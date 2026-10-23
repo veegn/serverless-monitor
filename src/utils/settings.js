@@ -682,6 +682,8 @@ export async function loadSiteSettings(db, options = {}) {
     result.notification_language = normalizeNotificationLanguage(result.notification_language);
     result.expire_notification_time = normalizeExpireNotificationTime(result.expire_notification_time);
     result.traffic_alert_threshold = normalizeTrafficAlertThreshold(result.traffic_alert_threshold);
+    result.auto_register_enabled = normalizeBooleanSetting(result.auto_register_enabled);
+    result.auto_register_default_group = String(result.auto_register_default_group || 'Default').trim().slice(0, 50) || 'Default';
   } catch (e) {
     console.error('加载站点设置失败:', e);
   }
@@ -811,6 +813,8 @@ export async function saveSiteOptions(db, updates) {
   siteOptions.notification_language = normalizeNotificationLanguage(siteOptions.notification_language);
   siteOptions.expire_notification_time = normalizeExpireNotificationTime(siteOptions.expire_notification_time);
   siteOptions.traffic_alert_threshold = normalizeTrafficAlertThreshold(siteOptions.traffic_alert_threshold);
+  siteOptions.auto_register_enabled = normalizeBooleanSetting(siteOptions.auto_register_enabled);
+  siteOptions.auto_register_default_group = String(siteOptions.auto_register_default_group || 'Default').trim().slice(0, 50) || 'Default';
   
   await db.prepare(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'

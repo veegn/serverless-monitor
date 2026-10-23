@@ -159,6 +159,43 @@ test('handleAdminAPI: generate_auto_register_token creates token with 30-min val
   assert.equal(savedOptions.auto_register_token_expires, data.expires_at);
 });
 
+test('handleAdminAPI: save_settings preserves and returns auto_register_enabled and auto_register_default_group', async () => {
+  clearSiteSettingsCache();
+  const sys = {
+    jwt_secret: 'a'.repeat(64),
+    password: 'password_hash',
+    auto_register_enabled: 'false',
+    auto_register_default_group: 'Default'
+  };
+  const { env, writes } = makeEnv(sys);
+  const token = await generateToken(env, sys);
+
+  const saveReq = new Request('https://example.com/admin/api', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${token}`
+    },
+    body: JSON.stringify({
+      action: 'save_settings',
+      settings: {
+        auto_register_enabled: 'true',
+        auto_register_default_group: 'Hong Kong Cluster'
+      }
+    })
+  });
+
+  const saveRes = await handleAdminAPI(saveReq, env, sys, async () => sys);
+  const saveData = await saveRes.json();
+  assert.equal(saveData.success, true);
+
+  const siteOptionWrite = writes.find(w => w.args && w.args[0] === 'site_options');
+  assert.ok(siteOptionWrite);
+  const savedOptions = JSON.parse(siteOptionWrite.args[1]);
+  assert.equal(savedOptions.auto_register_enabled, 'true');
+  assert.equal(savedOptions.auto_register_default_group, 'Hong Kong Cluster');
+});
+
 test('withoutPrivateServerFields: strips secret from public response', () => {
   const server = {
     id: 'test-srv',

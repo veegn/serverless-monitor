@@ -684,7 +684,7 @@ export async function handleUpdate(request, env, ctx) {
     let autoRegistered = false;
 
     if (!rawId) {
-      if (settings?.auto_register_enabled !== 'true') {
+      if (normalizeBooleanSetting(settings?.auto_register_enabled) !== 'true') {
         return new Response(JSON.stringify({
           error: 'Auto registration disabled',
           code: 404,
@@ -823,7 +823,7 @@ export async function handleUpdate(request, env, ctx) {
       const auth = checkSecretAuthorization(secret, serverDetail, settings, env);
 
       if (!serverDetail) {
-        if (settings?.auto_register_enabled !== 'true') {
+        if (normalizeBooleanSetting(settings?.auto_register_enabled) !== 'true') {
           return createServerNotFoundResponse();
         }
 

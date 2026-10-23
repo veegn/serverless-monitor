@@ -117,7 +117,6 @@
           :copied-server-id="copiedServerId"
           :copied-note-server-id="copiedNoteServerId"
           :copied-spec-key="copiedSpecKey"
-          :copied-auto-discovery="copiedAutoDiscovery"
           @add-server="addServer"
           @batch-edit="openBatchEditModal"
           @batch-delete="batchDelete"
@@ -129,8 +128,7 @@
           @copy-note="copyServerNote"
           @copy-spec="copyServerSpec"
           @copy-cmd="copyCmd"
-          @copy-auto-discovery="handleCopyAutoDiscovery"
-          @go-to-settings="activeTab = 'settings'"
+          @open-auto-discovery="openAutoDiscoveryModal"
           @edit="openEditModal"
           @delete="openDeleteModal"
         />
@@ -157,6 +155,7 @@
           @upload-favicon="uploadFavicon"
           @send-test-notification="sendTestNotification"
           @generate-auto-register-token="handleGenerateAutoRegisterToken"
+          @open-auto-discovery="openAutoDiscoveryModal"
           @query-d1-usage="queryD1Usage"
           @alert-message="alertMessage = $event"
         />
@@ -290,6 +289,19 @@
         @update:install-gh-proxy="installGhProxy = $event"
         @update:install-version="installVersion = $event"
         @open-edit-from-copy="openEditModalFromCopy"
+      />
+
+      <AutoDiscoveryModal
+        :show="showAutoDiscoveryModal"
+        :trans="trans"
+        :settings="settings"
+        :selected-api-base="selectedApiBase"
+        :generating-token="generatingAutoRegisterToken"
+        @close="showAutoDiscoveryModal = false"
+        @generate-token="handleGenerateAutoRegisterToken"
+        @enable-auto-register="handleEnableAutoRegister"
+        @alert-message="alertMessage = $event"
+        @go-to-settings="goToAutoRegisterSettings"
       />
 
       <div id="dbModal" class="modal-overlay" :class="{ active: showDbModal }">
@@ -591,6 +603,7 @@ import EditServerModal from './components/EditServerModal.vue'
 import BatchEditServersModal from './components/BatchEditServersModal.vue'
 import DeleteServerModal from './components/DeleteServerModal.vue'
 import CopyCommandModal from './components/CopyCommandModal.vue'
+import AutoDiscoveryModal from './components/AutoDiscoveryModal.vue'
 import { adminApi, login, logout as apiLogout, upgradeDatabase, clearHistory, fetchConfig } from '../../utils/api'
 import { hasMultipleApiBases, getApiBases } from '../../utils/config.js'
 import { copyTextToClipboard } from '../../utils/clipboard.js'
@@ -984,7 +997,11 @@ const settings = ref({
   custom_bd_name: 'BGP',
   theme_url: '',
   csp_static: '',
-  csp_api: ''
+  csp_api: '',
+  auto_register_enabled: false,
+  auto_register_default_group: 'Default',
+  auto_register_token: '',
+  auto_register_token_expires: 0
 })
 const apiSecret = ref('')
 const changeAdminPassword = ref(false)
@@ -1428,7 +1445,11 @@ const loadSettings = async () => {
         node_1_name: settingsData.node_1_name || 'Node 1', node_2_name: settingsData.node_2_name || 'Node 2', node_3_name: settingsData.node_3_name || 'Node 3', node_4_name: settingsData.node_4_name || 'Node 4',
         theme_url: settingsData.theme_url || '',
         csp_static: settingsData.csp_static || '',
-        csp_api: settingsData.csp_api || ''
+        csp_api: settingsData.csp_api || '',
+        auto_register_enabled: settingsData.auto_register_enabled === 'true' || settingsData.auto_register_enabled === true,
+        auto_register_default_group: settingsData.auto_register_default_group || 'Default',
+        auto_register_token: settingsData.auto_register_token || '',
+        auto_register_token_expires: Number(settingsData.auto_register_token_expires) || 0
       }
       applyMikusThemeOptions(settingsData.theme_options)
       changeAdminPassword.value = !settings.value.password_configured || !String(settings.value.username || '').trim()
@@ -1621,7 +1642,11 @@ const saveSettings = async () => {
       custom_bd_name: settings.value.custom_bd_name.trim(),
       node_1_name: settings.value.node_1_name.trim(), node_2_name: settings.value.node_2_name.trim(), node_3_name: settings.value.node_3_name.trim(), node_4_name: settings.value.node_4_name.trim(),
       csp_static: settings.value.csp_static || '',
-      csp_api: settings.value.csp_api || ''
+      csp_api: settings.value.csp_api || '',
+      auto_register_enabled: settings.value.auto_register_enabled ? 'true' : 'false',
+      auto_register_default_group: String(settings.value.auto_register_default_group || 'Default').trim(),
+      auto_register_token: String(settings.value.auto_register_token || '').trim(),
+      auto_register_token_expires: Number(settings.value.auto_register_token_expires) || 0
     }
   }
 
@@ -2502,45 +2527,42 @@ const handleGenerateAutoRegisterToken = async (silent = false) => {
   }
 }
 
-const copiedAutoDiscovery = ref(false)
+const showAutoDiscoveryModal = ref(false)
 
-const handleCopyAutoDiscovery = async (os = 'linux') => {
-  if (settings.value.auto_register_enabled !== 'true') {
-    alertMessage.value = trans.value.autoDiscoveryNeedEnable || '请先在系统设置中开启自动注册功能'
-    activeTab.value = 'settings'
-    return
-  }
-
+const openAutoDiscoveryModal = async () => {
+  showAutoDiscoveryModal.value = true
   const token = settings.value.auto_register_token
   const expires = Number(settings.value.auto_register_token_expires) || 0
   if (!token || expires <= Date.now()) {
-    const ok = await handleGenerateAutoRegisterToken(true)
-    if (!ok) return
+    await handleGenerateAutoRegisterToken(true)
   }
+}
 
-  const currentToken = settings.value.auto_register_token
-  if (!currentToken) return
-
-  const HOST = (selectedApiBase.value || (typeof window !== 'undefined' ? window.location.origin : '')).replace(/\/$/, '')
-  let cmd = ''
-  if (os === 'windows') {
-    cmd = `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script install -token='${currentToken}' -url='${HOST}/update'`
-  } else if (os === 'docker') {
-    cmd = `docker run -d --name sma --restart=unless-stopped --network=host -e SECRET='${currentToken}' -e WORKER_URL='${HOST}/update' ghcr.io/veegn/serverless-monitor-agent:latest`
-  } else {
-    cmd = `curl -fsSL 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh' | sh -s -- install -token='${currentToken}' -url='${HOST}/update'`
+const handleEnableAutoRegister = async () => {
+  try {
+    settings.value.auto_register_enabled = true
+    const result = await adminApiForSite({
+      action: 'save_settings',
+      settings: {
+        auto_register_enabled: 'true',
+        auto_register_default_group: String(settings.value.auto_register_default_group || 'Default').trim(),
+        auto_register_token: String(settings.value.auto_register_token || '').trim(),
+        auto_register_token_expires: Number(settings.value.auto_register_token_expires) || 0
+      }
+    })
+    if (!result.error) {
+      alertMessage.value = trans.value.settingsSaved || '自动注册已开启'
+    } else {
+      alertMessage.value = getMessage(result.error) || trans.value.operationFailed
+    }
+  } catch (e) {
+    alertMessage.value = e?.message || trans.value.operationFailed
   }
+}
 
-  const copied = await copyTextToClipboard(cmd)
-  if (copied) {
-    copiedAutoDiscovery.value = true
-    setTimeout(() => {
-      copiedAutoDiscovery.value = false
-    }, 2000)
-    alertMessage.value = trans.value.autoDiscoveryCopied || '自动发现部署脚本已复制到剪贴板 (有效时间 30 分钟)'
-  } else {
-    alertMessage.value = trans.value.httpsRequired || '复制失败，请手动复制'
-  }
+const goToAutoRegisterSettings = () => {
+  showAutoDiscoveryModal.value = false
+  activeTab.value = 'settings'
 }
 
 watch(() => route.query.apiIndex, async (value) => {

@@ -26,34 +26,14 @@
         <button v-if="newServerGroup" @click="newServerGroup = ''" class="toolbar-select-clear" aria-label="Clear">✕</button>
       </div>
       <button @click="$emit('add-server')" class="btn btn-primary">+ {{ trans.addServer }}</button>
-      <div class="toolbar-dropdown-wrapper">
-        <button
-          type="button"
-          @click="$emit('copy-auto-discovery', 'linux')"
-          class="btn btn-secondary toolbar-split-main"
-          :title="trans.autoDiscoveryDeployTip || '一键复制自动发现部署脚本'"
-        >
-          {{ copiedAutoDiscovery ? '✅ ' + trans.copied : '⚡ ' + (trans.autoDiscoveryDeploy || '一键复制自动发现命令') }}
-        </button>
-        <details class="toolbar-dropdown" ref="autoDiscoveryDropdownRef">
-          <summary class="btn btn-secondary toolbar-split-arrow" :title="trans.moreOptions || '更多选项'">▾</summary>
-          <div class="toolbar-dropdown-menu">
-            <button type="button" class="toolbar-dropdown-item" @click="handleCopyOption('linux')">
-              🐧 Linux (sh) 一键复制
-            </button>
-            <button type="button" class="toolbar-dropdown-item" @click="handleCopyOption('windows')">
-              🪟 Windows (PowerShell) 一键复制
-            </button>
-            <button type="button" class="toolbar-dropdown-item" @click="handleCopyOption('docker')">
-              🐳 Docker 一键复制
-            </button>
-            <div class="toolbar-dropdown-divider"></div>
-            <button type="button" class="toolbar-dropdown-item" @click="handleGoToSettings">
-              ⚙️ {{ trans.autoRegisterSettings || '自动注册设置' }}
-            </button>
-          </div>
-        </details>
-      </div>
+      <button
+        type="button"
+        @click="$emit('open-auto-discovery')"
+        class="btn btn-blue"
+        :title="trans.autoDiscoveryDeployTip || '配置并生成自动发现部署脚本'"
+      >
+        ⚡ {{ trans.autoDiscoveryDeploy || '一键复制自动发现脚本' }}
+      </button>
     </div>
 
     <div class="batch-actions">
@@ -227,7 +207,7 @@ const emit = defineEmits([
   'add-server', 'batch-edit', 'batch-delete', 'toggle-select-all', 'select-all',
   'drag-start', 'drop', 'toggle-server', 'copy-note',
   'copy-spec', 'copy-cmd', 'edit', 'delete',
-  'copy-auto-discovery', 'go-to-settings'
+  'open-auto-discovery'
 ])
 
 const POINTER_DRAG_THRESHOLD = 6
@@ -446,32 +426,7 @@ const handlePointerCancel = (event) => {
   cleanupPointerDrag()
 }
 
-const autoDiscoveryDropdownRef = ref(null)
-
-const handleCopyOption = (os) => {
-  autoDiscoveryDropdownRef.value?.removeAttribute('open')
-  emit('copy-auto-discovery', os)
-}
-
-const handleGoToSettings = () => {
-  autoDiscoveryDropdownRef.value?.removeAttribute('open')
-  emit('go-to-settings')
-}
-
-const handleOutsideClick = (event) => {
-  if (!autoDiscoveryDropdownRef.value?.hasAttribute('open')) return
-  const target = event.target
-  if (!target || !autoDiscoveryDropdownRef.value.contains(target)) {
-    autoDiscoveryDropdownRef.value.removeAttribute('open')
-  }
-}
-
-onMounted(() => {
-  document.addEventListener('click', handleOutsideClick)
-})
-
 onBeforeUnmount(() => {
-  document.removeEventListener('click', handleOutsideClick)
   cleanupPointerDrag()
 })
 

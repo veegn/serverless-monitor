@@ -730,6 +730,9 @@
             <button type="button" class="btn btn-margin-0" @click="copyAutoRegisterCommand">
               📋 {{ trans.copy || '复制' }}
             </button>
+            <button type="button" class="btn btn-blue btn-margin-0" @click="$emit('open-auto-discovery')">
+              ⚡ {{ trans.autoDiscoveryTitle || '弹窗设置与生成' }}
+            </button>
           </div>
           <p v-if="tokenStatus.isExpired" class="hint-text text-danger" style="margin-top: 6px;">
             ⚠️ {{ trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key' }}
@@ -916,7 +919,7 @@ const emit = defineEmits([
   'toggle-password', 'toggle-admin-password-change',
   'save-settings', 'upload-bg', 'upload-bg-mobile', 'upload-favicon',
   'send-test-notification', 'query-d1-usage',
-  'alert-message', 'generate-auto-register-token'
+  'alert-message', 'generate-auto-register-token', 'open-auto-discovery'
 ])
 
 const autoRegOs = ref('linux')
