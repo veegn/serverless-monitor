@@ -66,7 +66,11 @@ function envPlugin() {
 }
 
 export default defineConfig({
-  plugins: [vue(), mkcert(), envPlugin()],
+  plugins: [
+    vue(),
+    (process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test') ? null : mkcert(),
+    envPlugin()
+  ].filter(Boolean),
   base: process.env.VITE_BASE || '/',
   resolve: {
     alias: {

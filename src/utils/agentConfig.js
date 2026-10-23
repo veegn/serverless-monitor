@@ -2,7 +2,7 @@ import { md5Hash } from './common.js';
 import { isWssReportConfigured } from './settings.js';
 
 export const AGENT_CONFIG_SCHEMA_VERSION = 7;
-export const AGENT_CONFIG_LEGACY_SCHEMA_VERSION = 3;
+export const AGENT_CONFIG_LEGACY_SCHEMA_VERSION = 1;
 export const AGENT_CONFIG_CONNECTION_MODE_SCHEMA_VERSION = 4;
 export const AGENT_CONFIG_WSS_REPORT_INTERVAL_SCHEMA_VERSION = 5;
 export const AGENT_CONFIG_PING_MODE_SCHEMA_VERSION = 6;

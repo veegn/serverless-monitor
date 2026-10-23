@@ -90,6 +90,7 @@ export async function addServerColumns(db) {
       traffic_alert_state: "TEXT",
       interface: "TEXT DEFAULT ''",
       history_partition_id: "INTEGER DEFAULT 0",
+      secret: "TEXT DEFAULT NULL",
       timestamp: "INTEGER DEFAULT 0"
     };
     

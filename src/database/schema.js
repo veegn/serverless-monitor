@@ -109,6 +109,7 @@ export async function initDatabase(db) {
           is_hidden TEXT DEFAULT '0',
           sort_order INTEGER DEFAULT 0,
           history_partition_id INTEGER DEFAULT 0,
+          secret TEXT DEFAULT NULL,
           timestamp INTEGER DEFAULT 0
         )
       `).run();
@@ -540,33 +541,30 @@ export async function weeklyCleanup(db) {
   }
 }
 
-export async function saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
+export function buildHistoryInsertStatement(db, serverId, historyPartitionId, metrics = {}, regionCode = '', timestamp = null, agentVersion = '') {
   const historyId = buildHistoryId(historyPartitionId, timestamp);
   const rawTimestamp = Number(timestamp);
   const now = Number.isFinite(rawTimestamp) && rawTimestamp > 0
     ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
     : Date.now();
 
-  const DISABLED_PROBE_VALUE = 'false';
-
   const parsePing = (val) => {
-    if (isDisabledProbeMetric(val)) return DISABLED_PROBE_VALUE;
+    if (isDisabledProbeMetric(val)) return 'false';
     const num = parseInt(val);
     return (num > 0) ? num : null;
   };
 
   const parseLoss = (val) => {
-    if (isDisabledProbeMetric(val)) return DISABLED_PROBE_VALUE;
+    if (isDisabledProbeMetric(val)) return 'false';
     const num = parseInt(val);
     if (Number.isNaN(num)) return null;
     return Math.max(0, Math.min(100, num));
   };
 
-  const insertHistoryRow = async () => {
-    const diskMetrics = flattenDiskMetrics(metrics);
+  const diskMetrics = flattenDiskMetrics(metrics);
 
-    await db.prepare(`
-    INSERT INTO metrics_history (
+  return db.prepare(`
+    INSERT OR REPLACE INTO metrics_history (
       ${HISTORY_INSERT_COLUMNS.join(', ')}
     ) VALUES (
       ${HISTORY_INSERT_COLUMNS.map(() => '?').join(', ')}
@@ -625,23 +623,66 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
     metrics.boot_time || '',
     parseFloat(metrics.net_rx_monthly) || 0,
     parseFloat(metrics.net_tx_monthly) || 0
-    ).run();
-  };
+  );
+}
 
+export async function saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
   try {
-    await insertHistoryRow();
+    await buildHistoryInsertStatement(db, serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion).run();
   } catch (e) {
     if (e?.message && /has no column/i.test(e.message)) {
       console.warn('检测到数据库字段缺失，尝试添加缺失字段...');
       await addHistoryColumns(db);
       try {
-        await insertHistoryRow();
+        await buildHistoryInsertStatement(db, serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion).run();
       } catch (retryError) {
         console.error('保存历史数据失败:', retryError);
       }
       return;
     }
     console.error('保存历史数据失败:', e);
+  }
+}
+
+export async function saveMetricsHistoryBatch(db, serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '') {
+  if (!Array.isArray(samples) || samples.length === 0) return;
+
+  const buildStatements = () => samples.map(s => buildHistoryInsertStatement(
+    db,
+    serverId,
+    historyPartitionId,
+    s.metrics || {},
+    regionCode,
+    s.ts,
+    agentVersion
+  ));
+
+  try {
+    if (typeof db.batch === 'function') {
+      await db.batch(buildStatements());
+    } else {
+      for (const stmt of buildStatements()) {
+        await stmt.run();
+      }
+    }
+  } catch (e) {
+    if (e?.message && /has no column/i.test(e.message)) {
+      console.warn('检测到数据库字段缺失，尝试添加缺失字段...');
+      await addHistoryColumns(db);
+      try {
+        if (typeof db.batch === 'function') {
+          await db.batch(buildStatements());
+        } else {
+          for (const stmt of buildStatements()) {
+            await stmt.run();
+          }
+        }
+      } catch (retryError) {
+        console.error('批量保存历史数据失败:', retryError);
+      }
+      return;
+    }
+    console.error('批量保存历史数据失败:', e);
   }
 }
 

@@ -1,6 +1,6 @@
 <div align="center">
 
-# CF-Server-Monitor
+# Serverless Monitor
 
 A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1, and Durable Objects.
 
@@ -21,7 +21,7 @@ A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1,
 
 ## Overview
 
-CF-Server-Monitor is a server monitoring system designed for Cloudflare Workers. Each server runs an Agent that reports metrics to a Worker. The Worker stores data in D1 and pushes realtime updates through Durable Objects and WebSocket, providing free-hosted, low-maintenance realtime monitoring.
+Serverless Monitor is a server monitoring system designed for Cloudflare Workers. Each server runs an Agent that reports metrics to a Worker. The Worker stores data in D1 and pushes realtime updates through Durable Objects and WebSocket, providing free-hosted, low-maintenance realtime monitoring.
 
 It supports mainstream Linux distributions, Alpine Linux, OpenWrt, macOS, Synology DSM, Feiniu fnOS, Windows, and similar systems, and provides Docker image deployment.
 

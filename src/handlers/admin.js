@@ -634,6 +634,7 @@ async function handleListAction({ env }) {
     item.is_online = isOnline;
     if (!item.region) item.region = server.region || '';
     delete item.bandwidth;
+    delete item.secret;
 
     if (isOnline) {
       stats.online++;
@@ -720,7 +721,7 @@ async function handleSendTestNotificationAction({ data }) {
     }, messages.testMessage, {
       event: messages.events.test,
       emoji: '✅',
-      clients: ['CF Server Monitor'],
+      clients: ['Serverless Monitor'],
       count: 1,
       message: messages.testMessage
     });
@@ -735,13 +736,42 @@ async function handleSendTestNotificationAction({ data }) {
   }
 }
 
+async function handleGenerateAutoRegisterTokenAction({ env, sys, loadFullSettings }) {
+  const token = `cfsm_${crypto.randomUUID().replace(/-/g, '')}`;
+  const expiresAt = Date.now() + 30 * 60 * 1000;
+  await saveSiteOptions(env.DB, {
+    auto_register_token: token,
+    auto_register_token_expires: expiresAt
+  });
+  if (sys) {
+    sys.auto_register_token = token;
+    sys.auto_register_token_expires = expiresAt;
+  }
+  if (loadFullSettings) {
+    try {
+      const full = await loadFullSettings();
+      if (full) {
+        full.auto_register_token = token;
+        full.auto_register_token_expires = expiresAt;
+      }
+    } catch (_) {}
+  }
+  return createSuccessResponse({
+    success: true,
+    token,
+    expires_at: expiresAt,
+    message: 'tokenGenerated'
+  });
+}
+
 const AUTHENTICATED_ADMIN_ACTION_HANDLERS = {
   get_settings: handleGetSettingsAction,
   start_theme_preview: handleStartThemePreviewAction,
   save_theme_options: handleSaveThemeOptionsAction,
   list: handleListAction,
   d1_usage: handleD1UsageAction,
-  send_test_notification: handleSendTestNotificationAction
+  send_test_notification: handleSendTestNotificationAction,
+  generate_auto_register_token: handleGenerateAutoRegisterTokenAction
 };
 
 export async function handleAdminAPI(request, env, sys, loadFullSettings = null, ctx = null) {
@@ -910,6 +940,14 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             siteOptions[field] = normalizeNotificationTemplate(settings[field]);
           } else if (field === 'theme_url') {
             siteOptions[field] = normalizedThemeUrl;
+          } else if (field === 'auto_register_enabled') {
+            siteOptions[field] = normalizeBooleanSetting(settings[field]);
+          } else if (field === 'auto_register_default_group') {
+            siteOptions[field] = String(settings[field] || 'Default').trim().slice(0, 50) || 'Default';
+          } else if (field === 'auto_register_token') {
+            siteOptions[field] = String(settings[field] || '').trim();
+          } else if (field === 'auto_register_token_expires') {
+            siteOptions[field] = Number(settings[field]) || 0;
           } else {
             siteOptions[field] = settings[field];
           }

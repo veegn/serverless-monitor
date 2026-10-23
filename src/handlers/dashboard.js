@@ -55,11 +55,12 @@ function normalizePublicIpFields(item, ensureFields = true) {
   return item;
 }
 
-function withoutPrivateServerFields(server) {
+export function withoutPrivateServerFields(server) {
   const item = { ...server };
   delete item.bandwidth;
   delete item.note;
   delete item.auto_update;
+  delete item.secret;
   return normalizePublicIpFields(item);
 }
 

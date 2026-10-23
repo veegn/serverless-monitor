@@ -469,7 +469,7 @@ function normalizeNotificationClients(context = {}) {
     .map(client => String(client || '').trim())
     .filter(Boolean);
   if (clients.length > 0) return Array.from(new Set(clients));
-  return ['CF Server Monitor'];
+  return ['Serverless Monitor'];
 }
 
 function inferNotificationEmoji(event) {
@@ -488,7 +488,7 @@ function buildNotificationContext(settings, msg, context = {}) {
     : clients.length;
   const event = context.event || inferNotificationEvent(msg, getNotificationMessages(settings).events.notification);
   return {
-    title: '💌 Cloudflare Server Monitor',
+    title: '💌 Serverless Monitor',
     event,
     emoji: context.emoji || inferNotificationEmoji(event),
     client: context.client || clients.join(', '),
@@ -911,7 +911,7 @@ export async function sendNotification(settings, msg, notificationContext = {}) 
         body: JSON.stringify({
           title: title,
           markdown: formattedMsg,
-          group: "Cloudflare Server Monitor"
+          group: "Serverless Monitor"
         })
       });
     } catch (e) {

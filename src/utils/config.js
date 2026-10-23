@@ -2,7 +2,7 @@
 export const CURRENT_VERSION = '2.8.7 Beta2';
 
 // 站点设置默认值与缓存策略。
-export const DEFAULT_SITE_TITLE = 'Cloudflare Server Monitor';
+export const DEFAULT_SITE_TITLE = 'Serverless Monitor';
 export const SITE_SETTINGS_CACHE_TTL_MS = 120 * 1000;
 export const JWT_SECRET_MIN_LENGTH = 32;
 

@@ -145,6 +145,7 @@
           :change-admin-password="changeAdminPassword"
           :test-notification-loading="testNotificationLoading"
           :d1-usage-loading="d1UsageLoading"
+          :generating-auto-register-token="generatingAutoRegisterToken"
           @toggle-password="togglePassword"
           @toggle-admin-password-change="toggleAdminPasswordChange"
           @save-settings="saveSettings"
@@ -152,6 +153,7 @@
           @upload-bg-mobile="uploadBgMobile"
           @upload-favicon="uploadFavicon"
           @send-test-notification="sendTestNotification"
+          @generate-auto-register-token="handleGenerateAutoRegisterToken"
           @query-d1-usage="queryD1Usage"
           @alert-message="alertMessage = $event"
         />
@@ -957,7 +959,7 @@ const settings = ref({
   notification_webhook_format: 'json',
   notification_webhook_headers: '',
   notification_webhook_body: '{\n  "title": "{{emoji}} {{event}}",\n  "content": "{{notification}}"\n}',
-  notification_template: '{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n{{time}}',
+  notification_template: '{{emoji}}【Serverless Monitor】{{event}}\n\n{{message}}\n\n{{time}}',
   turnstile_enabled: false,
   turnstile_login_enabled: false,
   turnstile_site_key: '',
@@ -1003,7 +1005,7 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword', 'autoRegisterToken'
 ])
 
 const {
@@ -1399,7 +1401,7 @@ const loadSettings = async () => {
         notification_webhook_format: ['json', 'form', 'text'].includes(String(settingsData.notification_webhook_format || '').toLowerCase()) ? String(settingsData.notification_webhook_format).toLowerCase() : 'json',
         notification_webhook_headers: settingsData.notification_webhook_headers || '',
         notification_webhook_body: settingsData.notification_webhook_body || '{\n  "title": "{{emoji}} {{event}}",\n  "content": "{{notification}}"\n}',
-        notification_template: settingsData.notification_template || '{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n{{time}}',
+        notification_template: settingsData.notification_template || '{{emoji}}【Serverless Monitor】{{event}}\n\n{{message}}\n\n{{time}}',
         turnstile_enabled: settingsData.turnstile_enabled === 'true',
         turnstile_login_enabled: settingsData.turnstile_login_enabled === 'true',
         turnstile_site_key: settingsData.turnstile_site_key || '',
@@ -2466,6 +2468,29 @@ const sendTestNotification = async () => {
     alertMessage.value = trans.value.testNotificationFailed + ': ' + e.message
   } finally {
     testNotificationLoading.value = false
+  }
+}
+
+const generatingAutoRegisterToken = ref(false)
+
+const handleGenerateAutoRegisterToken = async () => {
+  if (generatingAutoRegisterToken.value) return
+  generatingAutoRegisterToken.value = true
+  try {
+    const result = await adminApiForSite({
+      action: 'generate_auto_register_token'
+    })
+    if (!result.error && result.data?.success) {
+      settings.value.auto_register_token = result.data.token
+      settings.value.auto_register_token_expires = result.data.expires_at
+      alertMessage.value = trans.value.tokenGenerated || '授权 Key 已生成，有效期 30 分钟'
+    } else {
+      alertMessage.value = getMessage(result.error) || trans.value.operationFailed
+    }
+  } catch (e) {
+    alertMessage.value = e?.message || trans.value.operationFailed
+  } finally {
+    generatingAutoRegisterToken.value = false
   }
 }
 

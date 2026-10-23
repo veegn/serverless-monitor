@@ -12,7 +12,7 @@
 //   通过 setWebSocketAutoResponse 自动响应 ping，无需唤醒 DO。
 // - Agent 上报连接使用标准 WebSocket API，避免高频指标消息计为 hibernation wakeup。
 
-import { saveMetricsHistory } from '../database/schema.js';
+import { saveMetricsHistory, saveMetricsHistoryBatch } from '../database/schema.js';
 import { evaluateTrafficAlert } from '../services/notification.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
@@ -30,6 +30,8 @@ import {
 } from '../utils/agentConfig.js';
 import {
   applyHistoryMetricAggregates,
+  autoRegisterServer,
+  checkSecretAuthorization,
   collectHistoryMetricAggregates,
   getReportMetrics,
   mergeHistoryMetricAggregates,
@@ -698,15 +700,6 @@ export class MetricsBroadcaster {
       return null;
     }
 
-    const hasSecret = Object.prototype.hasOwnProperty.call(data, 'secret');
-    if (!attachment.authenticated || hasSecret) {
-      if (data.secret !== this.env.API_SECRET) {
-        this._closeWsWithError(ws, 'Invalid secret', 401);
-        return null;
-      }
-    }
-
-    // 不永久信任附件：每次上报都走 120s 缓存复核，服务器删除后最多 120s 内自动断开。
     let serverDetail;
     try {
       serverDetail = await this._getAgentServerDetail(serverId);
@@ -722,12 +715,50 @@ export class MetricsBroadcaster {
       }
     }
 
+    let settings = null;
+    try {
+      settings = await loadSiteSettings(this.env.DB);
+    } catch (_) {
+      settings = {};
+    }
+
+    const auth = checkSecretAuthorization(data.secret, serverDetail, settings, this.env);
+
     if (!serverDetail) {
-      this.agentServerDetails.delete(serverId);
-      this.agentHistoryWrites.delete(serverId);
-      this.latestReportUpdates.delete(serverId);
-      this._closeWsWithError(ws, 'Server not found', 404, { text: 'server_not_found' });
-      return null;
+      if (settings?.auto_register_enabled !== 'true') {
+        this.agentServerDetails.delete(serverId);
+        this.agentHistoryWrites.delete(serverId);
+        this.latestReportUpdates.delete(serverId);
+        this._closeWsWithError(ws, 'Server not found', 404, { text: 'server_not_found' });
+        return null;
+      }
+
+      if (auth.isTokenMatch && auth.isTokenExpired) {
+        this._closeWsWithError(ws, 'Auto registration key expired', 401, { text: 'auto_register_key_expired' });
+        return null;
+      }
+
+      if (!auth.isAuthorizedForNew) {
+        this._closeWsWithError(ws, 'Invalid secret', 401);
+        return null;
+      }
+
+      try {
+        const reg = await autoRegisterServer(this.env.DB, serverId, data, data.secret, settings);
+        serverDetail = reg.serverDetail;
+        this.agentServerDetails.set(serverId, { data: serverDetail, time: Date.now() });
+      } catch (err) {
+        this._closeWsWithError(ws, err.message || 'Auto-registration failed', 400);
+        return null;
+      }
+    } else {
+      const hasSecret = Object.prototype.hasOwnProperty.call(data, 'secret');
+      if (!attachment.authenticated || hasSecret) {
+        if (!auth.isAuthorizedForExisting) {
+          this._closeWsWithError(ws, 'Invalid secret', 401);
+          return null;
+        }
+      }
     }
 
     if (!serverDetail.history_partition_id) {
@@ -1414,16 +1445,29 @@ export class MetricsBroadcaster {
       this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
     }
 
-    const persisted = await this._persistAgentHistoryIfDue(ws, context.attachment, {
-      serverId: context.serverId,
-      historyPartitionId: context.historyPartitionId,
-      metrics: latestMetrics,
-      historyAggregate,
-      regionCode: context.regionCode,
-      timestamp: latestSample.ts,
-      agentVersion: context.agentVersion,
-      reportIntervalMs: context.reportIntervalMs
-    });
+    let persisted;
+    if (data.batch === true && samples.length > 1) {
+      await saveMetricsHistoryBatch(
+        this.env.DB,
+        context.serverId,
+        context.historyPartitionId,
+        samples,
+        context.regionCode,
+        context.agentVersion
+      );
+      persisted = { persisted: true, nextD1WriteAfterMs: 0 };
+    } else {
+      persisted = await this._persistAgentHistoryIfDue(ws, context.attachment, {
+        serverId: context.serverId,
+        historyPartitionId: context.historyPartitionId,
+        metrics: latestMetrics,
+        historyAggregate,
+        regionCode: context.regionCode,
+        timestamp: latestSample.ts,
+        agentVersion: context.agentVersion,
+        reportIntervalMs: context.reportIntervalMs
+      });
+    }
 
     const configAck = await this._buildAgentConfigAck(context);
     const nextWssReportAfterMs = this._getAgentNextWssReportAfterMs(
@@ -1437,6 +1481,7 @@ export class MetricsBroadcaster {
       persisted: persisted.persisted,
       nextD1WriteAfterMs: persisted.nextD1WriteAfterMs,
       nextWssReportAfterMs,
+      realtimeHint: !!realtimeState?.frontendActive,
       ...(configAck || {})
     });
   }

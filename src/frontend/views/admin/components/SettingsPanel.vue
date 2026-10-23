@@ -7,7 +7,7 @@
         <div class="form-row">
           <div class="form-group flex-1">
             <label class="form-label">{{ trans.siteTitle }}</label>
-            <input type="text" v-model="settings.site_title" class="form-input" :placeholder="'Cloudflare Server Monitor'">
+            <input type="text" v-model="settings.site_title" class="form-input" :placeholder="'Serverless Monitor'">
           </div>
 
           <div class="form-group flex-1">
@@ -490,7 +490,7 @@
               v-model="settings.notification_template"
               class="form-textarea"
               rows="5"
-              placeholder="{{emoji}}【CF Server Monitor】{{event}}\n\n{{message}}\n\n{{time}}"
+              placeholder="{{emoji}}【Serverless Monitor】{{event}}\n\n{{message}}\n\n{{time}}"
             ></textarea>
           </div>
         </div>
@@ -645,6 +645,96 @@
           </div>
         </div>
 
+      </div>
+
+      <div class="settings-section">
+        <div class="section-title"><span>▸</span> {{ trans.autoRegisterSettings || '自动注册设置' }}</div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <div class="checkbox-item">
+              <input type="checkbox" id="cfg_auto_register_enabled" v-model="settings.auto_register_enabled">
+              <label for="cfg_auto_register_enabled"><b>{{ trans.enableAutoRegister || '启用探针自动注册' }}</b></label>
+              <HelpTooltip :text="trans.autoRegisterTip || '开启后，探针使用有效授权 Key 上报未录入的节点时，将自动入库上线并分配监控分区。'" />
+            </div>
+          </div>
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.autoRegisterDefaultGroup || '默认服务器分组' }}</label>
+            <input type="text" v-model="settings.auto_register_default_group" class="form-input" placeholder="Default">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label class="form-label">
+              {{ trans.autoRegisterToken || '授权 Key (有效期 30 分钟)' }}
+              <HelpTooltip :text="trans.autoRegisterTokenTip || '用于探针自动注册时的身份验证，有效期 30 分钟。过期后新节点将无法注册，需点击重新生成。'" />
+            </label>
+            <div class="password-input-wrapper">
+              <input
+                type="text"
+                readonly
+                :value="settings.auto_register_token || ''"
+                :class="['form-input', { 'secret-input-masked': !passwordVisible.autoRegisterToken }]"
+                :placeholder="trans.autoRegisterTokenNotGenerated || '未生成授权 Key'"
+              >
+              <button
+                type="button"
+                class="password-toggle"
+                @click="$emit('toggle-password', 'autoRegisterToken')"
+              >
+                {{ passwordVisible.autoRegisterToken ? '🙈' : '👁️' }}
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.autoRegisterTokenExpires || '授权状态' }}</label>
+            <div class="flex" style="gap: 8px; align-items: center; min-height: 38px;">
+              <div class="flex-1">
+                <span v-if="tokenStatus.isExpired" class="config-badge is-disabled" style="font-size: 12px; padding: 4px 8px;">
+                  ⚠️ {{ trans.autoRegisterTokenExpired || '已过期（需重新生成）' }}
+                </span>
+                <span v-else-if="tokenStatus.isValid" class="config-badge is-enabled" style="font-size: 12px; padding: 4px 8px;">
+                  ✅ {{ trans.autoRegisterTokenValid || '有效至' }}: {{ tokenStatus.formattedExpires }} ({{ tokenStatus.remainingMinutes }})
+                </span>
+                <span v-else class="config-badge" style="background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border-color); font-size: 12px; padding: 4px 8px;">
+                  ⚪ {{ trans.autoRegisterTokenNotGenerated || '未生成' }}
+                </span>
+              </div>
+              <button
+                type="button"
+                class="btn btn-blue"
+                style="margin: 0; white-space: nowrap;"
+                :disabled="generatingAutoRegisterToken"
+                @click="$emit('generate-auto-register-token')"
+              >
+                {{ generatingAutoRegisterToken ? '⏳' : '🔑' }} {{ settings.auto_register_token ? (trans.regenerateToken || '重新生成') : (trans.generateToken || '生成授权 Key') }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="settings.auto_register_enabled" class="form-group mt-2">
+          <label class="form-label">
+            {{ trans.autoRegisterCommand || '自动注册安装命令' }}
+            <HelpTooltip :text="trans.autoRegisterCommandTip || '在目标服务器直接执行此命令，探针启动后将自动注册并在前台上线。'" />
+          </label>
+          <div class="flex" style="gap: 8px;">
+            <select v-model="autoRegOs" class="form-select" style="max-width: 140px;">
+              <option value="linux">Linux (Go)</option>
+              <option value="windows">Windows</option>
+              <option value="docker">Docker</option>
+            </select>
+            <input type="text" readonly :value="autoRegisterInstallCommand" class="form-input flex-1" style="font-family: monospace; font-size: 12px;">
+            <button type="button" class="btn btn-margin-0" @click="copyAutoRegisterCommand">
+              📋 {{ trans.copy || '复制' }}
+            </button>
+          </div>
+          <p v-if="tokenStatus.isExpired" class="hint-text text-danger" style="margin-top: 6px;">
+            ⚠️ {{ trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key' }}
+          </p>
+        </div>
       </div>
 
       <div class="settings-section">
@@ -805,6 +895,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import HelpTooltip from '../../../components/HelpTooltip.vue'
 import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../../utils/constants.js'
 import { PING_NODE_FIELDS, validatePingNode } from '../../../utils/pingNode.js'
+import { copyTextToClipboard } from '../../../utils/clipboard.js'
 
 const props = defineProps({
   trans: { type: Object, required: true },
@@ -817,15 +908,85 @@ const props = defineProps({
   saving: { type: Boolean, default: false },
   changeAdminPassword: { type: Boolean, default: false },
   testNotificationLoading: { type: Boolean, default: false },
-  d1UsageLoading: { type: Boolean, default: false }
+  d1UsageLoading: { type: Boolean, default: false },
+  generatingAutoRegisterToken: { type: Boolean, default: false }
 })
 
 const emit = defineEmits([
   'toggle-password', 'toggle-admin-password-change',
   'save-settings', 'upload-bg', 'upload-bg-mobile', 'upload-favicon',
   'send-test-notification', 'query-d1-usage',
-  'alert-message'
+  'alert-message', 'generate-auto-register-token'
 ])
+
+const autoRegOs = ref('linux')
+const currentTime = ref(Date.now())
+let autoRegTimer = null
+
+onMounted(() => {
+  autoRegTimer = setInterval(() => {
+    currentTime.value = Date.now()
+  }, 10000)
+})
+
+onBeforeUnmount(() => {
+  if (autoRegTimer) clearInterval(autoRegTimer)
+})
+
+const tokenStatus = computed(() => {
+  const token = props.settings?.auto_register_token
+  const expires = Number(props.settings?.auto_register_token_expires) || 0
+  if (!token || !expires) {
+    return { isValid: false, isExpired: false, isEmpty: true }
+  }
+  const now = currentTime.value
+  if (now > expires) {
+    return { isValid: false, isExpired: true, isEmpty: false }
+  }
+  const diffSec = Math.floor((expires - now) / 1000)
+  const remainingMinutes = Math.max(1, Math.ceil(diffSec / 60))
+  const date = new Date(expires)
+  const pad = n => String(n).padStart(2, '0')
+  const formattedExpires = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+  return {
+    isValid: true,
+    isExpired: false,
+    isEmpty: false,
+    formattedExpires,
+    remainingMinutes: `${remainingMinutes}m`
+  }
+})
+
+const autoRegisterInstallCommand = computed(() => {
+  const HOST = (props.selectedApiBase || (typeof window !== 'undefined' ? window.location.origin : '')).replace(/\/$/, '')
+  const token = props.settings?.auto_register_token || ''
+  if (!token) return props.trans.autoRegisterTokenNotGenerated || '请先生成授权 Key'
+
+  if (autoRegOs.value === 'windows') {
+    return `$id = [guid]::NewGuid().ToString(); $script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script install -id=$id -secret='${token}' -url='${HOST}/update' -auto_update=0`
+  }
+  if (autoRegOs.value === 'docker') {
+    return `docker run -d --name cf-probe --restart=unless-stopped --network=host -e SERVER_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 2>/dev/null || date +%s) -e SECRET='${token}' -e WORKER_URL='${HOST}/update' ghcr.io/huilang-me/cfsm-agent:latest`
+  }
+  return `curl -fsSL 'https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh' | sh -s -- install -id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || openssl rand -hex 16 2>/dev/null || date +%s) -secret='${token}' -url='${HOST}/update' -auto_update=0`
+})
+
+const copyAutoRegisterCommand = async () => {
+  if (tokenStatus.value.isExpired) {
+    emit('alert-message', props.trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key')
+    return
+  }
+  if (!props.settings?.auto_register_token) {
+    emit('alert-message', props.trans.autoRegisterTokenNotGenerated || '请先生成授权 Key')
+    return
+  }
+  const copied = await copyTextToClipboard(autoRegisterInstallCommand.value)
+  if (copied) {
+    emit('alert-message', props.trans.autoRegisterCopied || '自动注册命令已复制到剪贴板')
+  } else {
+    emit('alert-message', props.trans.httpsRequired || '复制失败，请手动复制')
+  }
+}
 
 const commonNotificationTimezones = [
   'UTC',

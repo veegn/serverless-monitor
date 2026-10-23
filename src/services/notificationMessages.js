@@ -21,7 +21,7 @@ const NOTIFICATION_MESSAGES = {
     daysLeft: days => `剩余${days}天`,
     trafficUsed: ({ usedGb, limitGb, percent, threshold }) =>
       `本月已用 ${usedGb} GB / 限额 ${limitGb} GB（${percent}% ≥ ${threshold}%）`,
-    testMessage: '这是一条来自 CF Server Monitor 的测试消息。'
+    testMessage: '这是一条来自 Serverless Monitor 的测试消息。'
   },
   en: {
     events: {
@@ -43,7 +43,7 @@ const NOTIFICATION_MESSAGES = {
     daysLeft: days => `${days} ${days === 1 ? 'day' : 'days'} left`,
     trafficUsed: ({ usedGb, limitGb, percent, threshold }) =>
       `Used ${usedGb} GB of ${limitGb} GB this month (${percent}% ≥ ${threshold}%)`,
-    testMessage: 'This is a test message from CF Server Monitor.'
+    testMessage: 'This is a test message from Serverless Monitor.'
   },
   es: {
     events: {
@@ -65,7 +65,7 @@ const NOTIFICATION_MESSAGES = {
     daysLeft: days => (days === 1 ? 'Queda 1 día' : `Quedan ${days} días`),
     trafficUsed: ({ usedGb, limitGb, percent, threshold }) =>
       `Usados ${usedGb} GB de ${limitGb} GB este mes (${percent}% ≥ ${threshold}%)`,
-    testMessage: 'Este es un mensaje de prueba de CF Server Monitor.'
+    testMessage: 'Este es un mensaje de prueba de Serverless Monitor.'
   }
 };
 

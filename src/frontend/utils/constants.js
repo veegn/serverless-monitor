@@ -1,4 +1,4 @@
-export const DEFAULT_SITE_TITLE = 'Cloudflare Server Monitor'
+export const DEFAULT_SITE_TITLE = 'Serverless Monitor'
 export const FRONTEND_WS_TIMEOUT_MINUTES_MAX = 1440
 
 export const TIME = {
