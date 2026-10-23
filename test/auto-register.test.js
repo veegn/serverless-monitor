@@ -51,10 +51,10 @@ test('checkSecretAuthorization: validates master secret, server secret, and toke
 
   // 3. Valid token (expires in 30 minutes)
   const validSettings = {
-    auto_register_token: 'cfsm_valid_token',
+    auto_register_token: 'sma_valid_token',
     auto_register_token_expires: now + 30 * 60 * 1000
   };
-  const authTokenValid = checkSecretAuthorization('cfsm_valid_token', null, validSettings, env);
+  const authTokenValid = checkSecretAuthorization('sma_valid_token', null, validSettings, env);
   assert.equal(authTokenValid.isTokenMatch, true);
   assert.equal(authTokenValid.isTokenExpired, false);
   assert.equal(authTokenValid.isTokenValid, true);
@@ -62,10 +62,10 @@ test('checkSecretAuthorization: validates master secret, server secret, and toke
 
   // 4. Expired token (expired 1 second ago)
   const expiredSettings = {
-    auto_register_token: 'cfsm_expired_token',
+    auto_register_token: 'sma_expired_token',
     auto_register_token_expires: now - 1000
   };
-  const authTokenExpired = checkSecretAuthorization('cfsm_expired_token', null, expiredSettings, env);
+  const authTokenExpired = checkSecretAuthorization('sma_expired_token', null, expiredSettings, env);
   assert.equal(authTokenExpired.isTokenMatch, true);
   assert.equal(authTokenExpired.isTokenExpired, true);
   assert.equal(authTokenExpired.isTokenValid, false);
@@ -148,7 +148,7 @@ test('handleAdminAPI: generate_auto_register_token creates token with 30-min val
   const data = await res.json();
 
   assert.equal(data.success, true);
-  assert.match(data.token, /^cfsm_[0-9a-f]{32}$/);
+  assert.match(data.token, /^sma_[0-9a-f]{32}$/);
   const diffMinutes = (data.expires_at - Date.now()) / 60000;
   assert.ok(diffMinutes > 29.5 && diffMinutes <= 30.1);
 

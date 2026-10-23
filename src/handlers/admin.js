@@ -737,7 +737,7 @@ async function handleSendTestNotificationAction({ data }) {
 }
 
 async function handleGenerateAutoRegisterTokenAction({ env, sys, loadFullSettings }) {
-  const token = `cfsm_${crypto.randomUUID().replace(/-/g, '')}`;
+  const token = `sma_${crypto.randomUUID().replace(/-/g, '')}`;
   const expiresAt = Date.now() + 30 * 60 * 1000;
   await saveSiteOptions(env.DB, {
     auto_register_token: token,
