@@ -56,8 +56,10 @@ function buildPayloadForBroadcast(id, metrics = {}, extra = {}) {
 const DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
   DISK_IO_METRIC_FIELDS.map(field => [DISK_IO_FIELD_TO_COLUMN[field], field])
 ));
-export const AGENT_AUTO_DISCOVERY_HEADER = 'x-cfsm-auto-discovery';
-export const AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER = 'x-cfsm-server-id';
+export const AGENT_AUTO_DISCOVERY_HEADER = 'x-sma-auto-discovery';
+export const AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER = 'x-sma-server-id';
+export const LEGACY_AGENT_AUTO_DISCOVERY_HEADER = 'x-cfsm-auto-discovery';
+export const LEGACY_AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER = 'x-cfsm-server-id';
 export const AGENT_AUTO_DISCOVERY_CREATED = 'created';
 export const AGENT_AUTO_DISCOVERY_REUSED = 'reused';
 export const AGENT_AUTO_DISCOVERY_FAILED = 'failed';
@@ -66,6 +68,18 @@ export const AGENT_WSS_MODE_HEADER = 'x-agent-wss-mode';
 export const AGENT_WSS_REASON_HEADER = 'x-agent-wss-reason';
 export const AGENT_WSS_SCHEDULE_INACTIVE = 'wss_schedule_inactive';
 export const AGENT_WSS_SCHEDULE_DISABLED = 'wss_disabled';
+
+export function buildAutoDiscoveryHeaders(status, serverId = null) {
+  const headers = {
+    [AGENT_AUTO_DISCOVERY_HEADER]: status,
+    [LEGACY_AGENT_AUTO_DISCOVERY_HEADER]: status
+  };
+  if (serverId) {
+    headers[AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER] = serverId;
+    headers[LEGACY_AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER] = serverId;
+  }
+  return headers;
+}
 let batchQueue = new Map();
 let flushingPromise = null;
 let flushTimer = null;
@@ -681,7 +695,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            [AGENT_AUTO_DISCOVERY_HEADER]: AGENT_AUTO_DISCOVERY_DISABLED,
+            ...buildAutoDiscoveryHeaders(AGENT_AUTO_DISCOVERY_DISABLED),
             ...wssStateHeaders
           }
         });
@@ -699,7 +713,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            [AGENT_AUTO_DISCOVERY_HEADER]: `${AGENT_AUTO_DISCOVERY_FAILED}:key_expired`,
+            ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:key_expired`),
             ...wssStateHeaders
           }
         });
@@ -716,7 +730,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            [AGENT_AUTO_DISCOVERY_HEADER]: `${AGENT_AUTO_DISCOVERY_FAILED}:unauthorized`,
+            ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:unauthorized`),
             ...wssStateHeaders
           }
         });
@@ -736,7 +750,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            [AGENT_AUTO_DISCOVERY_HEADER]: `${AGENT_AUTO_DISCOVERY_FAILED}:no_name`,
+            ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:no_name`),
             ...wssStateHeaders
           }
         });
@@ -751,7 +765,7 @@ export async function handleUpdate(request, env, ctx) {
               'Content-Type': 'text/plain; charset=utf-8',
               'Cache-Control': 'no-store',
               ...dateHeader,
-              [AGENT_AUTO_DISCOVERY_HEADER]: AGENT_AUTO_DISCOVERY_REUSED,
+              ...buildAutoDiscoveryHeaders(AGENT_AUTO_DISCOVERY_REUSED),
               ...wssStateHeaders
             }
           });
@@ -794,7 +808,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            [AGENT_AUTO_DISCOVERY_HEADER]: `${AGENT_AUTO_DISCOVERY_FAILED}:db_error`,
+            ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:db_error`),
             ...wssStateHeaders
           }
         });
@@ -824,7 +838,7 @@ export async function handleUpdate(request, env, ctx) {
               'Content-Type': 'application/json',
               'Cache-Control': 'no-store',
               ...dateHeader,
-              [AGENT_AUTO_DISCOVERY_HEADER]: `${AGENT_AUTO_DISCOVERY_FAILED}:key_expired`,
+              ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:key_expired`),
               ...wssStateHeaders
             }
           });
@@ -966,10 +980,7 @@ export async function handleUpdate(request, env, ctx) {
     }
 
     const autoDiscoveryHeaders = autoRegistered
-      ? {
-          [AGENT_AUTO_DISCOVERY_HEADER]: AGENT_AUTO_DISCOVERY_CREATED,
-          [AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER]: serverId
-        }
+      ? buildAutoDiscoveryHeaders(AGENT_AUTO_DISCOVERY_CREATED, serverId)
       : {};
 
     const clientConfigSchema = normalizeAgentConfigSchemaVersion(request.headers.get(AGENT_CONFIG_SCHEMA_HEADER));

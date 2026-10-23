@@ -136,9 +136,15 @@ test('PROTOCOL: auto-discovery registration creates new node when id is empty', 
   assert.equal(res.status, 200);
 
   // Response headers validation
+  assert.equal(AGENT_AUTO_DISCOVERY_HEADER, 'x-sma-auto-discovery');
+  assert.equal(AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER, 'x-sma-server-id');
   assert.equal(res.headers.get(AGENT_AUTO_DISCOVERY_HEADER), AGENT_AUTO_DISCOVERY_CREATED);
+  assert.equal(res.headers.get('x-sma-auto-discovery'), AGENT_AUTO_DISCOVERY_CREATED);
+  assert.equal(res.headers.get('x-cfsm-auto-discovery'), AGENT_AUTO_DISCOVERY_CREATED);
   const newServerId = res.headers.get(AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER);
-  assert.ok(newServerId, 'x-cfsm-server-id header must be present');
+  assert.ok(newServerId, 'x-sma-server-id header must be present');
+  assert.equal(res.headers.get('x-sma-server-id'), newServerId);
+  assert.equal(res.headers.get('x-cfsm-server-id'), newServerId);
   assert.match(newServerId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   assert.ok(res.headers.get('date'), 'Date header must be present for clock calibration');
   assert.ok(res.headers.get(AGENT_WSS_MODE_HEADER), 'x-agent-wss-mode header must be present');
