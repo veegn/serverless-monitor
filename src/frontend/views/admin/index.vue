@@ -117,6 +117,7 @@
           :copied-server-id="copiedServerId"
           :copied-note-server-id="copiedNoteServerId"
           :copied-spec-key="copiedSpecKey"
+          :copied-auto-discovery="copiedAutoDiscovery"
           @add-server="addServer"
           @batch-edit="openBatchEditModal"
           @batch-delete="batchDelete"
@@ -128,6 +129,8 @@
           @copy-note="copyServerNote"
           @copy-spec="copyServerSpec"
           @copy-cmd="copyCmd"
+          @copy-auto-discovery="handleCopyAutoDiscovery"
+          @go-to-settings="activeTab = 'settings'"
           @edit="openEditModal"
           @delete="openDeleteModal"
         />
@@ -605,7 +608,7 @@ const route = useRoute()
 const router = useRouter()
 const appConfig = inject('appConfig', {})
 let startupConfigConsumed = false
-const AGENT_RELEASE_URL = 'https://api.github.com/repos/huilang-me/cfsm-agent/releases/latest'
+const AGENT_RELEASE_URL = 'https://api.github.com/repos/veegn/serverless-monitor-agent/releases/latest'
 const AGENT_RELEASE_FAILURE_TTL = 30 * 1000
 
 let cachedAgentReleaseVersion = ''
@@ -1715,12 +1718,12 @@ const getUninstallCommand = () => {
   const proxy = isGo ? deleteGhProxy.value.trim() : ''
   if (isGo) {
     if (deleteTargetOs.value === 'windows') {
-      const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
+      const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.ps1')
       const proxyParam = proxy ? ` ${quotePowerShellArg(`--install-ghproxy=${proxy}`)}` : ''
-      return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall${proxyParam}`
+      return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall${proxyParam}`
     }
     const sudoPrefix = deleteTargetOs.value === 'mac' ? 'sudo ' : ''
-    const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.sh')
+    const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.sh')
     const proxyParam = proxy ? ` ${quotePosixShellArg(`--install-ghproxy=${proxy}`)}` : ''
     const uninstallCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | ${sudoPrefix}sh -s -- uninstall${proxyParam}`
     if (deleteTargetOs.value === 'linux' && deleteInstallMode.value === 'cfsm-user') {
@@ -1867,15 +1870,15 @@ const getCustomInstallCommand = () => {
       `-url='${HOST}/update'`,
       `-auto_update='${autoUpdateFlag}'`
     )
-    const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
-    return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
+    const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.ps1')
+    return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
   }
   if (targetOs.value === 'docker') {
     const safeTag = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(version) ? version : 'latest'
-    const image = `ghcr.io/huilang-me/cfsm-agent:${safeTag}`
+    const image = `ghcr.io/veegn/serverless-monitor-agent:${safeTag}`
     return [
-      'docker run -d --name cf-probe --restart=unless-stopped --network=host \\',
-      '  -v cf-probe-data:/data \\',
+      'docker run -d --name sma --restart=unless-stopped --network=host \\',
+      '  -v sma-data:/data \\',
       `  -e SERVER_ID=${quotePosixShellArg(copyServerId.value)} -e SECRET=${quotePosixShellArg(apiSecret.value)} -e WORKER_URL=${quotePosixShellArg(`${HOST}/update`)} \\`,
       `  ${image}`
     ].join('\n')
@@ -1889,7 +1892,7 @@ const getCustomInstallCommand = () => {
     `-url=${HOST}/update`,
     `-auto_update=${autoUpdateFlag}`
   )
-  const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.sh')
+  const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.sh')
   const installCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | sh -s -- ${params.join(' ')}`
   if (!isDedicatedUserInstall) return installCommand
 
@@ -2473,8 +2476,8 @@ const sendTestNotification = async () => {
 
 const generatingAutoRegisterToken = ref(false)
 
-const handleGenerateAutoRegisterToken = async () => {
-  if (generatingAutoRegisterToken.value) return
+const handleGenerateAutoRegisterToken = async (silent = false) => {
+  if (generatingAutoRegisterToken.value) return false
   generatingAutoRegisterToken.value = true
   try {
     const result = await adminApiForSite({
@@ -2483,14 +2486,60 @@ const handleGenerateAutoRegisterToken = async () => {
     if (!result.error && result.data?.success) {
       settings.value.auto_register_token = result.data.token
       settings.value.auto_register_token_expires = result.data.expires_at
-      alertMessage.value = trans.value.tokenGenerated || '授权 Key 已生成，有效期 30 分钟'
+      if (!silent) {
+        alertMessage.value = trans.value.tokenGenerated || '授权 Key 已生成，有效期 30 分钟'
+      }
+      return true
     } else {
       alertMessage.value = getMessage(result.error) || trans.value.operationFailed
+      return false
     }
   } catch (e) {
     alertMessage.value = e?.message || trans.value.operationFailed
+    return false
   } finally {
     generatingAutoRegisterToken.value = false
+  }
+}
+
+const copiedAutoDiscovery = ref(false)
+
+const handleCopyAutoDiscovery = async (os = 'linux') => {
+  if (settings.value.auto_register_enabled !== 'true') {
+    alertMessage.value = trans.value.autoDiscoveryNeedEnable || '请先在系统设置中开启自动注册功能'
+    activeTab.value = 'settings'
+    return
+  }
+
+  const token = settings.value.auto_register_token
+  const expires = Number(settings.value.auto_register_token_expires) || 0
+  if (!token || expires <= Date.now()) {
+    const ok = await handleGenerateAutoRegisterToken(true)
+    if (!ok) return
+  }
+
+  const currentToken = settings.value.auto_register_token
+  if (!currentToken) return
+
+  const HOST = (selectedApiBase.value || (typeof window !== 'undefined' ? window.location.origin : '')).replace(/\/$/, '')
+  let cmd = ''
+  if (os === 'windows') {
+    cmd = `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script install -token='${currentToken}' -url='${HOST}/update'`
+  } else if (os === 'docker') {
+    cmd = `docker run -d --name sma --restart=unless-stopped --network=host -e SECRET='${currentToken}' -e WORKER_URL='${HOST}/update' ghcr.io/veegn/serverless-monitor-agent:latest`
+  } else {
+    cmd = `curl -fsSL 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh' | sh -s -- install -token='${currentToken}' -url='${HOST}/update'`
+  }
+
+  const copied = await copyTextToClipboard(cmd)
+  if (copied) {
+    copiedAutoDiscovery.value = true
+    setTimeout(() => {
+      copiedAutoDiscovery.value = false
+    }, 2000)
+    alertMessage.value = trans.value.autoDiscoveryCopied || '自动发现部署脚本已复制到剪贴板 (有效时间 30 分钟)'
+  } else {
+    alertMessage.value = trans.value.httpsRequired || '复制失败，请手动复制'
   }
 }
 

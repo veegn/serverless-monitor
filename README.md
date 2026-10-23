@@ -15,7 +15,7 @@
 [![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#许可证)
 
-[在线演示](https://demo.huilang.me/) · [API 文档](API.md) · [Go 探针文档](https://github.com/huilang-me/cfsm-agent) · [主题开发](theme-develop.md) · [主题开发 AI 提示词](theme-ai-prompt.md)
+[在线演示](https://demo.huilang.me/) · [API 文档](API.md) · [Agent 探针文档](https://github.com/veegn/serverless-monitor-agent) · [主题开发](theme-develop.md) · [主题开发 AI 提示词](theme-ai-prompt.md)
 
 </div>
 
@@ -196,9 +196,9 @@ https://你的 Worker 域名/admin#/admin
 
 ## Agent 参数与安全建议
 
-V2.8.3 起默认使用独立项目 [cfsm-agent](https://github.com/huilang-me/cfsm-agent)，安装后服务名为 `cf-probe`。新增服务器后建议直接从管理后台复制安装命令，后台会按目标系统、服务器 ID、Worker 地址和当前参数生成完整命令。
+默认使用独立项目 [serverless-monitor-agent](https://github.com/veegn/serverless-monitor-agent)，安装后服务名为 `sma`。新增服务器后建议直接从管理后台复制安装命令，后台会按目标系统、服务器 ID、Worker 地址和当前参数生成完整命令。
 
-完整安装路径、日志查看、状态检查和升级行为见 [https://github.com/huilang-me/cfsm-agent](https://github.com/huilang-me/cfsm-agent)。
+完整安装路径、日志查看、状态检查和升级行为见 [https://github.com/veegn/serverless-monitor-agent](https://github.com/veegn/serverless-monitor-agent)。
 
 ### 常用参数
 
@@ -233,16 +233,16 @@ loginctl enable-linger 用户名
 后台复制安装命令的目标系统支持选择 Docker，会生成如下容器命令（服务器 ID、Secret、Worker 地址已按当前服务器自动填充，镜像标签默认 `latest`，可在 Agent 版本栏自定义）：
 
 ```bash
-docker run -d --name cf-probe --restart=unless-stopped --network=host \
-  -v cf-probe-data:/data \
+docker run -d --name sma --restart=unless-stopped --network=host \
+  -v sma-data:/data \
   -e SERVER_ID=<服务器ID> -e SECRET='<API_SECRET>' -e WORKER_URL=https://<你的后台地址>/update \
-  ghcr.io/huilang-me/cfsm-agent:latest
+  ghcr.io/veegn/serverless-monitor-agent:latest
 ```
 
 采集间隔、上报间隔、Ping 节点、网卡、流量重置日、上下行校正等运行参数由 Agent 按 `SERVER_ID` 从后台动态拉取，无需在命令中重复指定；更换镜像标签即回退/升级到指定版本。卸载容器：
 
 ```bash
-docker rm -f cf-probe && docker volume rm cf-probe-data
+docker rm -f sma && docker volume rm sma-data
 ```
 
 ## 配置说明
@@ -454,23 +454,21 @@ Go 版本 Agent 会保留原配置，直接执行安装命令即可升级。
 Linux / OpenWrt / Synology DSM / FreeBSD / macOS：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- install
+curl -fsSL https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh | sh -s -- install
 ```
 
 Windows 管理员 PowerShell：
 
 ```powershell
-$script = "$env:TEMP\install-cf-probe.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing
+$script = "$env:TEMP\install-sma.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1" -OutFile $script -UseBasicParsing
 PowerShell -ExecutionPolicy Bypass -File $script install
 ```
 
 ### 卸载 Agent
 
-Go 版本：
-
 ```bash
-curl -fsSL https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh | sh -s -- uninstall
+curl -fsSL https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh | sh -s -- uninstall
 ```
 
 旧 Shell / PowerShell 版本已不再维护，下面命令仅用于清理历史 Shell / PowerShell 安装。请按当初安装时使用的系统脚本选择对应卸载命令；如果当前运行的是 Go Agent，请使用上面的 Go 卸载命令。
@@ -686,7 +684,7 @@ echo <CF_CDN_IP> <你的探针域名> | sudo tee -a /etc/hosts
 ## 相关文档
 
 - [API.md](API.md)：REST API、WebSocket、鉴权、错误码和数据结构
-- [https://github.com/huilang-me/cfsm-agent](cfsm-agent)：Go 版本 Agent 配置、升级、日志与排障
+- [https://github.com/veegn/serverless-monitor-agent](serverless-monitor-agent)：Agent 配置、升级、日志与排障
 - [theme-develop.md](theme-develop.md)：第三方主题开发
 - [theme-ai-prompt.md](theme-ai-prompt.md)：主题开发 AI 提示词，直接粘贴给 AI 即可按项目规范开发主题
 - [test/README.md](test/README.md)：本地模拟数据和测试流程

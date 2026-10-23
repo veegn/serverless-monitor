@@ -963,12 +963,12 @@ const autoRegisterInstallCommand = computed(() => {
   if (!token) return props.trans.autoRegisterTokenNotGenerated || '请先生成授权 Key'
 
   if (autoRegOs.value === 'windows') {
-    return `$id = [guid]::NewGuid().ToString(); $script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.ps1" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script install -id=$id -secret='${token}' -url='${HOST}/update' -auto_update=0`
+    return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script install -token='${token}' -url='${HOST}/update'`
   }
   if (autoRegOs.value === 'docker') {
-    return `docker run -d --name cf-probe --restart=unless-stopped --network=host -e SERVER_ID=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || openssl rand -hex 16 2>/dev/null || date +%s) -e SECRET='${token}' -e WORKER_URL='${HOST}/update' ghcr.io/huilang-me/cfsm-agent:latest`
+    return `docker run -d --name sma --restart=unless-stopped --network=host -e SECRET='${token}' -e WORKER_URL='${HOST}/update' ghcr.io/veegn/serverless-monitor-agent:latest`
   }
-  return `curl -fsSL 'https://raw.githubusercontent.com/huilang-me/cfsm-agent/main/install.sh' | sh -s -- install -id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || openssl rand -hex 16 2>/dev/null || date +%s) -secret='${token}' -url='${HOST}/update' -auto_update=0`
+  return `curl -fsSL 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh' | sh -s -- install -token='${token}' -url='${HOST}/update'`
 })
 
 const copyAutoRegisterCommand = async () => {
