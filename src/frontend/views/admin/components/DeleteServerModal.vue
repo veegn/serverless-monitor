@@ -39,8 +39,8 @@
         </div>
       </div>
 
-      <div v-if="deleteVersion === 'go'" class="form-row">
-        <div v-if="deleteTargetOs === 'linux' && deleteVersion === 'go'" class="form-group flex-1 mb-3">
+      <div v-if="deleteTargetOs === 'linux' && deleteVersion === 'go'" class="form-row">
+        <div class="form-group flex-1 mb-3">
           <label class="form-label">
             {{ trans.uninstallMode }}
           </label>
@@ -48,25 +48,6 @@
             <option value="current-user">{{ trans.uninstallModeCurrentUser }}</option>
             <option value="cfsm-user">{{ trans.uninstallModeCfsmUser }}</option>
           </select>
-        </div>
-
-        <div class="form-group flex-1 mb-3">
-          <label class="form-label">
-            {{ trans.ghProxy }}
-            <HelpTooltip :text="trans.ghProxyTip" />
-          </label>
-          <select v-model="selectedGhProxy" class="form-select">
-            <option v-for="option in ghProxyOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-            <option :value="CUSTOM_GH_PROXY_VALUE">{{ trans.custom || 'Custom' }}</option>
-          </select>
-          <input
-            v-if="showCustomGhProxy"
-            type="text"
-            :value="deleteGhProxy"
-            class="form-input mt-2"
-            :placeholder="trans.ghProxyPlaceholder"
-            @input="$emit('update:delete-gh-proxy', $event.target.value)"
-          >
         </div>
       </div>
 
@@ -103,7 +84,6 @@ const props = defineProps({
   deleteTargetOs: { type: String, default: 'linux' },
   deleteVersion: { type: String, default: 'go' },
   deleteInstallMode: { type: String, default: 'current-user' },
-  deleteGhProxy: { type: String, default: '' },
   uninstallCommand: { type: String, default: '' },
   uninstallCopied: { type: Boolean, default: false }
 })
@@ -114,51 +94,6 @@ const emit = defineEmits([
   'copy-uninstall',
   'update:delete-target-os',
   'update:delete-version',
-  'update:delete-install-mode',
-  'update:delete-gh-proxy'
+  'update:delete-install-mode'
 ])
-
-const CUSTOM_GH_PROXY_VALUE = '__custom__'
-const ghProxyOptions = [
-  { value: '', label: props.trans.ghProxyPlaceholder || 'Direct' },
-  { value: 'https://ghfast.top/', label: 'https://ghfast.top/' },
-  { value: 'https://ghproxy.net/', label: 'https://ghproxy.net/' },
-  { value: 'https://gh.llkk.cc/', label: 'https://gh.llkk.cc/' },
-  { value: 'https://gh-proxy.com/', label: 'https://gh-proxy.com/' }
-]
-
-const manualCustomGhProxy = ref(false)
-const isKnownGhProxy = (value) => ghProxyOptions.some(option => option.value === String(value || '').trim())
-
-const selectedGhProxy = computed({
-  get: () => {
-    const currentProxy = String(props.deleteGhProxy || '').trim()
-    if (manualCustomGhProxy.value || (!isKnownGhProxy(currentProxy) && currentProxy)) {
-      return CUSTOM_GH_PROXY_VALUE
-    }
-    return currentProxy
-  },
-  set: (value) => {
-    if (value === CUSTOM_GH_PROXY_VALUE) {
-      manualCustomGhProxy.value = true
-      if (isKnownGhProxy(props.deleteGhProxy)) {
-        emit('update:delete-gh-proxy', '')
-      }
-      return
-    }
-    manualCustomGhProxy.value = false
-    emit('update:delete-gh-proxy', value)
-  }
-})
-
-const showCustomGhProxy = computed(() => selectedGhProxy.value === CUSTOM_GH_PROXY_VALUE)
-
-watch(
-  () => props.show,
-  (show) => {
-    if (show && isKnownGhProxy(props.deleteGhProxy)) {
-      manualCustomGhProxy.value = false
-    }
-  }
-)
 </script>

@@ -241,7 +241,6 @@
         :delete-target-os="deleteTargetOs"
         :delete-version="deleteVersion"
         :delete-install-mode="deleteInstallMode"
-        :delete-gh-proxy="deleteGhProxy"
         :uninstall-command="getUninstallCommand()"
         :uninstall-copied="uninstallCopied"
         @close="closeDeleteModal"
@@ -250,7 +249,6 @@
         @update:delete-target-os="deleteTargetOs = $event"
         @update:delete-version="deleteVersion = $event"
         @update:delete-install-mode="deleteInstallMode = $event"
-        @update:delete-gh-proxy="deleteGhProxy = $event"
       />
 
       <CopyCommandModal
@@ -260,7 +258,6 @@
         :current-server-name="currentServerName"
         :target-os="targetOs"
         :install-mode="installMode"
-        :install-gh-proxy="installGhProxy"
         :install-version="installVersion"
         :collect-interval="collectInterval"
         :report-interval="reportInterval"
@@ -286,7 +283,6 @@
         @copy-cmd="copyCustomCmd"
         @update:target-os="targetOs = $event"
         @update:install-mode="installMode = $event"
-        @update:install-gh-proxy="installGhProxy = $event"
         @update:install-version="installVersion = $event"
         @open-edit-from-copy="openEditModalFromCopy"
       />
@@ -1115,7 +1111,6 @@ const copiedSpecKey = ref(null)
 const deleteTargetOs = ref('linux')
 const deleteVersion = ref('go')
 const deleteInstallMode = ref('current-user')
-const deleteGhProxy = ref('')
 const uninstallCopied = ref(false)
 const saving = ref(false)
 
@@ -1142,7 +1137,6 @@ const copyServerId = ref('')
 const currentServerName = ref('')
 const targetOs = ref('linux')
 const installMode = ref('current-user')
-const installGhProxy = ref('')
 const installVersion = ref('')
 const collectInterval = ref(0)
 const reportInterval = ref(60)
@@ -1740,17 +1734,14 @@ const resolveServerPingNode = (server, field) => {
 const getUninstallCommand = () => {
   const HOST = selectedApiBase.value
   const isGo = deleteVersion.value === 'go'
-  const proxy = isGo ? deleteGhProxy.value.trim() : ''
   if (isGo) {
     if (deleteTargetOs.value === 'windows') {
-      const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.ps1')
-      const proxyParam = proxy ? ` ${quotePowerShellArg(`--install-ghproxy=${proxy}`)}` : ''
-      return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall${proxyParam}`
+      const ghUrl = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1'
+      return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall`
     }
     const sudoPrefix = deleteTargetOs.value === 'mac' ? 'sudo ' : ''
-    const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.sh')
-    const proxyParam = proxy ? ` ${quotePosixShellArg(`--install-ghproxy=${proxy}`)}` : ''
-    const uninstallCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | ${sudoPrefix}sh -s -- uninstall${proxyParam}`
+    const ghUrl = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh'
+    const uninstallCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | ${sudoPrefix}sh -s -- uninstall`
     if (deleteTargetOs.value === 'linux' && deleteInstallMode.value === 'cfsm-user') {
       return buildUninstallAsCfsmCommand(uninstallCommand)
     }
@@ -1768,7 +1759,6 @@ const copyCmd = (serverId) => {
   currentServerName.value = server?.name || ''
   targetOs.value = 'linux'
   installMode.value = 'current-user'
-  installGhProxy.value = ''
   installVersion.value = ''
   collectInterval.value = server?.collect_interval ?? 0
   reportInterval.value = server?.report_interval || 60
@@ -1804,13 +1794,6 @@ const copyCmd = (serverId) => {
   autoUpdate.value = server?.auto_update === '1' || server?.auto_update === 1 || server?.auto_update === true
   copiedCmd.value = false
   showCopyModal.value = true
-}
-
-const buildGhRawUrl = (proxy, path) => {
-  const base = 'https://raw.githubusercontent.com'
-  if (!proxy) return `${base}${path}`
-  const cleanProxy = proxy.replace(/\/$/, '')
-  return `${cleanProxy}/${base}${path}`
 }
 
 const quotePosixShellArg = (value) => `'${String(value).replaceAll("'", `'"'"'`)}'`
@@ -1877,7 +1860,6 @@ const buildInstallAsCfsmCommand = (command, runStep) => {
 const getCustomInstallCommand = () => {
   const HOST = selectedApiBase.value
   const autoUpdateFlag = autoUpdate.value ? 1 : 0
-  const proxy = installGhProxy.value.trim()
   const version = installVersion.value.trim()
   const isDedicatedUserInstall = targetOs.value === 'linux' && installMode.value === 'cfsm-user'
   // 安装命令只保留必须写入本地的参数：id / secret / url / auto_update。
@@ -1887,7 +1869,6 @@ const getCustomInstallCommand = () => {
     const params = [
       'install'
     ]
-    if (proxy) params.push(quotePowerShellArg(`--install-ghproxy=${proxy}`))
     if (version) params.push(quotePowerShellArg(`--install-version=${version}`))
     params.push(
       `-id='${copyServerId.value}'`,
@@ -1895,21 +1876,10 @@ const getCustomInstallCommand = () => {
       `-url='${HOST}/update'`,
       `-auto_update='${autoUpdateFlag}'`
     )
-    const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.ps1')
+    const ghUrl = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1'
     return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
   }
-  if (targetOs.value === 'docker') {
-    const safeTag = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(version) ? version : 'latest'
-    const image = `ghcr.io/veegn/serverless-monitor-agent:${safeTag}`
-    return [
-      'docker run -d --name sma --restart=unless-stopped --network=host \\',
-      '  -v sma-data:/data \\',
-      `  -e SERVER_ID=${quotePosixShellArg(copyServerId.value)} -e SECRET=${quotePosixShellArg(apiSecret.value)} -e WORKER_URL=${quotePosixShellArg(`${HOST}/update`)} \\`,
-      `  ${image}`
-    ].join('\n')
-  }
   const params = ['install']
-  if (proxy) params.push(quotePosixShellArg(`--install-ghproxy=${proxy}`))
   if (version) params.push(quotePosixShellArg(`--install-version=${version}`))
   params.push(
     `-id=${copyServerId.value}`,
@@ -1917,7 +1887,7 @@ const getCustomInstallCommand = () => {
     `-url=${HOST}/update`,
     `-auto_update=${autoUpdateFlag}`
   )
-  const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.sh')
+  const ghUrl = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh'
   const installCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | sh -s -- ${params.join(' ')}`
   if (!isDedicatedUserInstall) return installCommand
 
@@ -2181,7 +2151,6 @@ const openDeleteModal = (id) => {
   deleteTargetOs.value = 'linux'
   deleteVersion.value = 'go'
   deleteInstallMode.value = 'current-user'
-  deleteGhProxy.value = ''
   uninstallCopied.value = false
   showDeleteModal.value = true
 }

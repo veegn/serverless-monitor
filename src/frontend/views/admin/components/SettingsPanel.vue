@@ -724,7 +724,6 @@
             <select v-model="autoRegOs" class="form-select" style="max-width: 140px;">
               <option value="linux">Linux (Go)</option>
               <option value="windows">Windows</option>
-              <option value="docker">Docker</option>
             </select>
             <input type="text" readonly :value="autoRegisterInstallCommand" class="form-input flex-1" style="font-family: monospace; font-size: 12px;">
             <button type="button" class="btn btn-margin-0" @click="copyAutoRegisterCommand">
@@ -967,9 +966,6 @@ const autoRegisterInstallCommand = computed(() => {
 
   if (autoRegOs.value === 'windows') {
     return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script install -token='${token}' -url='${HOST}/update'`
-  }
-  if (autoRegOs.value === 'docker') {
-    return `docker run -d --name sma --restart=unless-stopped --network=host -e SECRET='${token}' -e WORKER_URL='${HOST}/update' ghcr.io/veegn/serverless-monitor-agent:latest`
   }
   return `curl -fsSL 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh' | sh -s -- install -token='${token}' -url='${HOST}/update'`
 })

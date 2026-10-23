@@ -23,7 +23,7 @@
 
 Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系统。服务器端安装 Agent 后会单向上报指标到 Worker，数据写入 D1，并通过 Durable Objects + WebSocket 推送到前端，实现免费托管、低维护的实时监控。
 
-支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统，并提供 Docker 镜像部署方式。
+支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统。
 
 高安全性：Agent 仅单向上报指标，不提供 WebSSH、远程命令下发或主控通道；支持非 root 运行，可降低监控组件被利用后的影响范围。
 
@@ -67,7 +67,7 @@ Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控�
 | 网络质量      | 电信、联通、移动、BGP 节点延迟与丢包率追踪；三网详情开启时首页从 D1 最近 2 小时抽样最多 20 个真实点并缓存 5 分钟 |
 | 多视图前台     | 条形图、环形图、表格、地图视图，支持桌面端和移动端                                                        |
 | 管理后台      | 服务器增删改查、拖拽排序、隐藏服务器、导入导出、批量删除、数据库维护                                               |
-| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows，支持 Docker 镜像部署；默认 Go 版本，保留 Shell/PowerShell 版本 |
+| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows；默认 Go 版本，保留 Shell/PowerShell 版本 |
 | 实时推送      | Durable Objects + WebSocket，Agent 上报后前端即时刷新                                      |
 | 告警通知      | 离线告警、恢复通知、到期提醒、资源负载告警                                                            |
 | 多语言       | 前端内置中文、英文和西班牙语（拉美）切换；通知消息支持中文、英文和西班牙语；文档提供中文与英文入口              |
@@ -227,23 +227,6 @@ loginctl enable-linger 用户名
 ```
 
 卸载时请选择原来的安装用户。OpenWrt、Alpine/OpenRC、Synology DSM 等不支持 `systemd --user` 的环境，请使用对应系统命令。
-
-### Docker 部署
-
-后台复制安装命令的目标系统支持选择 Docker，会生成如下容器命令（服务器 ID、Secret、Worker 地址已按当前服务器自动填充，镜像标签默认 `latest`，可在 Agent 版本栏自定义）：
-
-```bash
-docker run -d --name sma --restart=unless-stopped --network=host \
-  -v sma-data:/data \
-  -e SERVER_ID=<服务器ID> -e SECRET='<API_SECRET>' -e WORKER_URL=https://<你的后台地址>/update \
-  ghcr.io/veegn/serverless-monitor-agent:latest
-```
-
-采集间隔、上报间隔、Ping 节点、网卡、流量重置日、上下行校正等运行参数由 Agent 按 `SERVER_ID` 从后台动态拉取，无需在命令中重复指定；更换镜像标签即回退/升级到指定版本。卸载容器：
-
-```bash
-docker rm -f sma && docker volume rm sma-data
-```
 
 ## 配置说明
 

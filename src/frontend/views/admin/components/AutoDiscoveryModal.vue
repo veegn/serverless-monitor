@@ -79,27 +79,26 @@
             <option value="unix">OpenWrt/Alpine/Synology DSM/FreeBSD</option>
             <option value="mac">macOS</option>
             <option value="windows">Windows</option>
-            <option value="docker">Docker</option>
           </select>
         </div>
 
         <div class="form-group flex-1">
           <label class="form-label">
             Agent {{ trans.version }}
-            <HelpTooltip :text="targetOs === 'docker' ? trans.dockerVersionTip : trans.installVersionTip" />
+            <HelpTooltip :text="trans.installVersionTip" />
           </label>
           <input
             type="text"
             v-model="installVersion"
             class="form-input"
-            :placeholder="targetOs === 'docker' ? 'latest' : (trans.installVersionPlaceholder || '默认最新版')"
+            :placeholder="trans.installVersionPlaceholder || '默认最新版'"
           >
         </div>
       </div>
 
-      <!-- Row 2: Linux Mode & Proxy (if not docker) -->
-      <div v-if="targetOs !== 'docker'" class="form-row">
-        <div v-if="targetOs === 'linux'" class="form-group flex-1">
+      <!-- Linux Mode (if linux) -->
+      <div v-if="targetOs === 'linux'" class="form-row">
+        <div class="form-group flex-1">
           <label class="form-label">
             {{ trans.installMode }}
             <HelpTooltip :text="trans.nonRootInstallTip" />
@@ -108,24 +107,6 @@
             <option value="current-user">{{ trans.installModeCurrentUser }}</option>
             <option value="cfsm-user">{{ trans.installModeCfsmUser }}</option>
           </select>
-        </div>
-
-        <div class="form-group flex-1">
-          <label class="form-label">
-            {{ trans.ghProxy }}
-            <HelpTooltip :text="trans.ghProxyTip" />
-          </label>
-          <select v-model="selectedGhProxy" class="form-select">
-            <option v-for="option in ghProxyOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-            <option :value="CUSTOM_GH_PROXY_VALUE">{{ trans.custom || 'Custom' }}</option>
-          </select>
-          <input
-            v-if="showCustomGhProxy"
-            type="text"
-            v-model="installGhProxy"
-            class="form-input mt-2"
-            :placeholder="trans.ghProxyPlaceholder || 'https://proxy.example.com/'"
-          >
         </div>
       </div>
 
@@ -208,7 +189,6 @@ const emit = defineEmits([
 
 const targetOs = ref('linux')
 const installMode = ref('current-user')
-const installGhProxy = ref('')
 const installVersion = ref('')
 const customNodeName = ref('')
 const autoUpdate = ref(false)
@@ -228,41 +208,6 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer)
 })
-
-const CUSTOM_GH_PROXY_VALUE = '__custom__'
-const ghProxyOptions = [
-  { value: '', label: props.trans.ghProxyPlaceholder || '海外直连 / Direct' },
-  { value: 'https://ghfast.top/', label: 'https://ghfast.top/' },
-  { value: 'https://ghproxy.net/', label: 'https://ghproxy.net/' },
-  { value: 'https://gh.llkk.cc/', label: 'https://gh.llkk.cc/' },
-  { value: 'https://gh-proxy.com/', label: 'https://gh-proxy.com/' }
-]
-
-const manualCustomGhProxy = ref(false)
-const isKnownGhProxy = (value) => ghProxyOptions.some(option => option.value === String(value || '').trim())
-
-const selectedGhProxy = computed({
-  get: () => {
-    const currentProxy = String(installGhProxy.value || '').trim()
-    if (manualCustomGhProxy.value || (!isKnownGhProxy(currentProxy) && currentProxy)) {
-      return CUSTOM_GH_PROXY_VALUE
-    }
-    return currentProxy
-  },
-  set: (value) => {
-    if (value === CUSTOM_GH_PROXY_VALUE) {
-      manualCustomGhProxy.value = true
-      if (isKnownGhProxy(installGhProxy.value)) {
-        installGhProxy.value = ''
-      }
-      return
-    }
-    manualCustomGhProxy.value = false
-    installGhProxy.value = value
-  }
-})
-
-const showCustomGhProxy = computed(() => selectedGhProxy.value === CUSTOM_GH_PROXY_VALUE)
 
 const isAutoRegisterEnabled = computed(() => {
   return props.settings?.auto_register_enabled === true || props.settings?.auto_register_enabled === 'true'
@@ -292,12 +237,8 @@ const tokenStatus = computed(() => {
   }
 })
 
-const buildGhRawUrl = (proxy, path) => {
-  const base = 'https://raw.githubusercontent.com'
-  if (!proxy) return `${base}${path}`
-  const cleanProxy = proxy.replace(/\/$/, '')
-  return `${cleanProxy}/${base}${path}`
-}
+const SCRIPT_URL_SH = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh'
+const SCRIPT_URL_PS1 = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1'
 
 const quotePosixShellArg = (value) => `'${String(value).replaceAll("'", `'"'"'`)}'`
 
@@ -348,14 +289,12 @@ const installCommand = computed(() => {
   const token = props.settings?.auto_register_token || ''
   if (!token) return props.trans.autoRegisterTokenNotGenerated || '请先生成授权 Key'
 
-  const proxy = installGhProxy.value.trim()
   const version = installVersion.value.trim()
   const name = customNodeName.value.trim()
   const autoUpdateFlag = autoUpdate.value ? 1 : 0
 
   if (targetOs.value === 'windows') {
     const params = ['install']
-    if (proxy) params.push(quotePowerShellArg(`--install-ghproxy=${proxy}`))
     if (version) params.push(quotePowerShellArg(`--install-version=${version}`))
     params.push(
       `-token='${token}'`,
@@ -363,29 +302,10 @@ const installCommand = computed(() => {
     )
     if (name) params.push(`-name=${quotePowerShellArg(name)}`)
     if (autoUpdateFlag) params.push(`-auto_update='1'`)
-    const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.ps1')
-    return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
-  }
-
-  if (targetOs.value === 'docker') {
-    const safeTag = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(version) ? version : 'latest'
-    const image = `ghcr.io/veegn/serverless-monitor-agent:${safeTag}`
-    const envs = [
-      `  -e SECRET=${quotePosixShellArg(token)} -e WORKER_URL=${quotePosixShellArg(`${HOST}/update`)} \\`
-    ]
-    if (name) {
-      envs.push(`  -e SERVER_NAME=${quotePosixShellArg(name)} \\`)
-    }
-    return [
-      'docker run -d --name sma --restart=unless-stopped --network=host \\',
-      '  -v sma-data:/data \\',
-      ...envs,
-      `  ${image}`
-    ].join('\n')
+    return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(SCRIPT_URL_PS1)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
   }
 
   const params = ['install']
-  if (proxy) params.push(quotePosixShellArg(`--install-ghproxy=${proxy}`))
   if (version) params.push(quotePosixShellArg(`--install-version=${version}`))
   params.push(
     `-token='${token}'`,
@@ -394,8 +314,7 @@ const installCommand = computed(() => {
   if (name) params.push(`-name=${quotePosixShellArg(name)}`)
   if (autoUpdateFlag) params.push(`-auto_update=1`)
 
-  const ghUrl = buildGhRawUrl(proxy, '/veegn/serverless-monitor-agent/refs/heads/main/install.sh')
-  const baseCmd = `curl -fsSL ${quotePosixShellArg(ghUrl)} | sh -s -- ${params.join(' ')}`
+  const baseCmd = `curl -fsSL ${quotePosixShellArg(SCRIPT_URL_SH)} | sh -s -- ${params.join(' ')}`
 
   if (targetOs.value === 'linux' && installMode.value === 'cfsm-user') {
     return buildInstallAsCfsmCommand(baseCmd, props.trans.nonRootInstallRunStep)

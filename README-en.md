@@ -23,7 +23,7 @@ A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1,
 
 Serverless Monitor is a server monitoring system designed for Cloudflare Workers. Each server runs an Agent that reports metrics to a Worker. The Worker stores data in D1 and pushes realtime updates through Durable Objects and WebSocket, providing free-hosted, low-maintenance realtime monitoring.
 
-It supports mainstream Linux distributions, Alpine Linux, OpenWrt, macOS, Synology DSM, Feiniu fnOS, Windows, and similar systems, and provides Docker image deployment.
+It supports mainstream Linux distributions, Alpine Linux, OpenWrt, macOS, Synology DSM, Feiniu fnOS, Windows, and similar systems.
 
 Security is stricter by design: the Agent only reports metrics one way, does not provide WebSSH, remote command delivery, or a controller channel, and can run as a non-root user to reduce blast radius.
 
@@ -67,7 +67,7 @@ Compared with traditional controller-style monitoring tools, CF-Server-Monitor i
 | Network quality | Latency and packet loss tracking for CT, CU, CM, and BGP nodes; when three-net details are enabled, the dashboard samples up to 20 real points from the last 2 hours of D1 history and caches them for 5 minutes |
 | Dashboard views | Bar chart, ring chart, table, and map views for desktop and mobile |
 | Admin panel | Server CRUD, drag sorting, hidden servers, import/export, batch delete, database maintenance |
-| Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows, plus Docker image deployment; Go Agent by default, Shell/PowerShell still available |
+| Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows; Go Agent by default, Shell/PowerShell still available |
 | Realtime push | Durable Objects + WebSocket refresh the UI immediately after Agent reports |
 | Alerts | Offline alerts, recovery notices, expiration reminders, resource load rules |
 | Multi-language | Built-in Chinese, English, and Latin American Spanish frontend switch; notifications in Chinese, English, or Spanish; Chinese and English documentation |
@@ -229,23 +229,6 @@ loginctl enable-linger username
 ```
 
 When uninstalling, select the user that originally installed the Agent. For OpenWrt, Alpine/OpenRC, Synology DSM, and other systems without `systemd --user`, use the matching system command.
-
-### Docker Deployment
-
-The admin copy-install dialog lets you choose Docker as the target system, generating a container command like the one below (server ID, secret, and Worker URL are filled in automatically for the current server; the image tag defaults to `latest` and can be customized in the Agent version field):
-
-```bash
-docker run -d --name cf-probe --restart=unless-stopped --network=host \
-  -v cf-probe-data:/data \
-  -e SERVER_ID=<server-id> -e SECRET='<API_SECRET>' -e WORKER_URL=https://<your-worker>/update \
-  ghcr.io/huilang-me/cfsm-agent:latest
-```
-
-Collect interval, report interval, ping nodes, network interface, traffic reset day, and upload/download correction are pulled dynamically by the Agent from the admin panel via `SERVER_ID`, so they do not need to be repeated in the command; changing the image tag upgrades or rolls back to that version. To remove the container:
-
-```bash
-docker rm -f cf-probe && docker volume rm cf-probe-data
-```
 
 ## Configuration
 
