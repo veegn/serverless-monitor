@@ -1,7 +1,7 @@
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { getLatestMetricsForAllServers } from '../database/schema.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
-import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, normalizeWssReportHours, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
+import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { normalizePctOrNull } from '../utils/traffic.js';
 import { verifyTurnstileToken, hashPassword } from '../utils/common.js';
@@ -916,8 +916,6 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             siteOptions[field] = normalizedResourceAlertRules;
           } else if (field === 'wss_report_enabled') {
             siteOptions[field] = normalizeBooleanSetting(settings[field]);
-          } else if (field === 'wss_report_hours') {
-            siteOptions[field] = normalizeWssReportHours(settings[field]);
           } else if (field === 'show_three_net_details') {
             siteOptions[field] = normalizeBooleanSetting(settings[field]);
           } else if (field === 'notification_timezone') {
@@ -968,10 +966,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         await clearResourceAlertState(env.DB);
       }
       Object.assign(sys, shouldSaveAppearanceOptions ? appearanceOptions : {}, siteOptions);
-      if (shouldCloseAgentWssReports && (
-        settings.wss_report_enabled !== undefined ||
-        settings.wss_report_hours !== undefined
-      )) {
+      if (shouldCloseAgentWssReports && settings.wss_report_enabled !== undefined) {
         scheduleAgentReportModeChanged(env, ctx);
       }
       return createSuccessResponse({

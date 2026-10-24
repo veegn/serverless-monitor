@@ -8,15 +8,14 @@
 // - 后端 /update WSS 由本 DO 接收 Agent 指标，并向所有订阅者广播。
 // - 兼容旧 POST 上报，/update 处理器在成功写入 DB 后会调用 /__do_push/<id>。
 //
-// - 前端订阅连接使用 DO WebSocket Hibernation API，闲置时休眠以节省资源。
+// - 前端订阅连接与 Agent 上报连接均使用 DO WebSocket Hibernation API，闲置时休眠以节省资源。
 //   通过 setWebSocketAutoResponse 自动响应 ping，无需唤醒 DO。
-// - Agent 上报连接使用标准 WebSocket API，避免高频指标消息计为 hibernation wakeup。
 
 import { saveMetricsHistory, saveMetricsHistoryBatch } from '../database/schema.js';
 import { evaluateTrafficAlert } from '../services/notification.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
-import { getWssReportScheduleState, loadSiteSettings } from '../utils/settings.js';
+import { getWssReportScheduleState, isWssReportConfigured, loadSiteSettings } from '../utils/settings.js';
 import {
   AGENT_CONFIG_MD5_HEADER,
   AGENT_CONFIG_LEGACY_SCHEMA_VERSION,
@@ -75,6 +74,10 @@ const RESOURCE_ALERT_MIN_SAMPLE_RATIO = 0.4;
 const RESOURCE_ALERT_MIN_SAMPLE_COUNT = 2;
 const RESOURCE_ALERT_MODE_AVERAGE = 'average';
 const RESOURCE_ALERT_MODE_CONTINUOUS = 'continuous';
+const MODE_REVISION_STORAGE_KEY = 'agent_mode_revision';
+const MODE_STATE_STORAGE_KEY = 'agent_mode_state';
+const PROCESSED_REPORTS_MAX_ENTRIES = 1000;
+const PROCESSED_REPORTS_TTL_MS = 10 * 60 * 1000;
 function getAlertCutoffMinute(now, buckets) {
   return Math.floor(now / RESOURCE_ALERT_BUCKET_MS) * RESOURCE_ALERT_BUCKET_MS -
     Math.max(0, buckets - 1) * RESOURCE_ALERT_BUCKET_MS;
@@ -289,9 +292,11 @@ export class MetricsBroadcaster {
     this.resourceAlertCacheActiveUntil = 0;
     this.agentServerDetails = new Map();
     this.agentHistoryWrites = new Map();
-    this.standardAgentWebSocketCount = 0;
-    this.standardAgentWebSockets = new Set();
     this.lastAgentRealtimeHintAt = 0;
+    this.modeRevision = 1;
+    this.modeRevisionLoaded = false;
+    this.lastModeState = null;
+    this.processedReports = new Map();
     this.pendingFrontendBroadcasts = new Map();
     this.frontendBroadcastTimer = null;
     this.pendingFrontendBroadcastTs = 0;
@@ -305,6 +310,57 @@ export class MetricsBroadcaster {
         JSON.stringify({ type: 'pong' })
       )
     );
+  }
+
+  async _getModeRevision() {
+    if (!this.modeRevisionLoaded) {
+      this.modeRevisionLoaded = true;
+      try {
+        const stored = await this.state?.storage?.get?.(MODE_REVISION_STORAGE_KEY);
+        if (Number.isInteger(stored) && stored > 0) {
+          this.modeRevision = stored;
+        }
+      } catch (e) {
+        console.warn('[update-ws] Failed to load modeRevision:', e?.message || e);
+      }
+    }
+    return this.modeRevision;
+  }
+
+  async _incrementModeRevision() {
+    await this._getModeRevision();
+    this.modeRevision += 1;
+    try {
+      await this.state?.storage?.put?.(MODE_REVISION_STORAGE_KEY, this.modeRevision);
+    } catch (e) {
+      console.warn('[update-ws] Failed to persist modeRevision:', e?.message || e);
+    }
+    return this.modeRevision;
+  }
+
+  async _getLastModeState() {
+    if (this.lastModeState === null) {
+      try {
+        const stored = await this.state?.storage?.get?.(MODE_STATE_STORAGE_KEY);
+        if (typeof stored === 'boolean') {
+          this.lastModeState = stored;
+        }
+      } catch (_) {}
+    }
+    return this.lastModeState;
+  }
+
+  _pruneProcessedReports(now = Date.now()) {
+    for (const [key, item] of this.processedReports) {
+      if (!item || now - item.ts > PROCESSED_REPORTS_TTL_MS) {
+        this.processedReports.delete(key);
+      }
+    }
+    while (this.processedReports.size > PROCESSED_REPORTS_MAX_ENTRIES) {
+      const oldestKey = this.processedReports.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.processedReports.delete(oldestKey);
+    }
   }
 
   _isValidServerId(id) {
@@ -431,15 +487,16 @@ export class MetricsBroadcaster {
     return sessionScope === serverId;
   }
 
-  _getFrontendWebSockets() {
+  _getFrontendWebSockets(excludeWs = null) {
     return this.state.getWebSockets().filter(ws => {
+      if (excludeWs && ws === excludeWs) return false;
       const attachment = ws.deserializeAttachment();
       return !attachment || attachment.kind !== AGENT_REPORT_KIND;
     });
   }
 
-  _getFrontendSubscriberCount() {
-    return this._getFrontendWebSockets().length;
+  _getFrontendSubscriberCount(excludeWs = null) {
+    return this._getFrontendWebSockets(excludeWs).length;
   }
 
   _getFrontendAllSubscriberCount() {
@@ -450,14 +507,10 @@ export class MetricsBroadcaster {
   }
 
   _getAgentReportWebSockets() {
-    const sockets = new Set(this.standardAgentWebSockets);
-    for (const ws of this.state.getWebSockets()) {
+    return this.state.getWebSockets().filter(ws => {
       const attachment = ws.deserializeAttachment();
-      if (attachment?.kind === AGENT_REPORT_KIND) {
-        sockets.add(ws);
-      }
-    }
-    return Array.from(sockets);
+      return attachment?.kind === AGENT_REPORT_KIND;
+    });
   }
 
   _isWebSocketUpgrade(request) {
@@ -471,46 +524,6 @@ export class MetricsBroadcaster {
     } catch (_) {}
   }
 
-  _acceptStandardAgentWebSocket(server, initialAttachment) {
-    // Agent 上报连接使用标准 WebSocket API，避免每条业务消息都成为 hibernation wakeup。
-    // 代价是只要 Agent 长连接存在，本 DO 就不能休眠，会持续产生 duration。
-    server.accept();
-
-    const session = { attachment: initialAttachment || {} };
-    const ws = {
-      send: data => server.send(data),
-      close: (code, reason) => server.close(code, reason),
-      serializeAttachment(value) {
-        session.attachment = value || {};
-      },
-      deserializeAttachment() {
-        return session.attachment;
-      }
-    };
-
-    this.standardAgentWebSocketCount += 1;
-    this.standardAgentWebSockets.add(ws);
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) return;
-      cleaned = true;
-      this.standardAgentWebSocketCount = Math.max(0, this.standardAgentWebSocketCount - 1);
-      this.standardAgentWebSockets.delete(ws);
-    };
-
-    server.addEventListener('message', event => {
-      this._handleAgentReportMessage(ws, event.data, ws.deserializeAttachment())
-        .catch(error => {
-          console.warn('[update-ws] Agent standard WebSocket message failed:', error?.message || error);
-          this._closeWsWithError(ws, 'Internal error', 500);
-        });
-    });
-    server.addEventListener('close', cleanup);
-    server.addEventListener('error', cleanup);
-
-    return ws;
-  }
-
   _closeWsWithError(ws, message, code = 400, extra = {}, closeCode = WS_POLICY_VIOLATION, closeReason = message) {
     this._sendWsJson(ws, {
       type: 'error',
@@ -522,20 +535,6 @@ export class MetricsBroadcaster {
     try {
       ws.close(closeCode, closeReason);
     } catch (_) {}
-  }
-
-  _closeWsForInactiveAgentSchedule(ws) {
-    this._closeWsWithError(
-      ws,
-      'Agent WSS report outside active hours',
-      409,
-      {
-        text: AGENT_WSS_SCHEDULE_INACTIVE,
-        connection_mode: 'http'
-      },
-      WS_TRY_AGAIN_LATER,
-      AGENT_WSS_SCHEDULE_INACTIVE
-    );
   }
 
   _closeWsForDisabledAgentSchedule(ws) {
@@ -553,35 +552,18 @@ export class MetricsBroadcaster {
   }
 
   _createAgentWssUnavailableResponse(scheduleState) {
-    if (!scheduleState?.configured) {
-      return new Response(JSON.stringify({
-        error: 'Agent WSS report disabled',
-        code: 409,
-        text: AGENT_WSS_SCHEDULE_DISABLED,
-        connection_mode: 'http'
-      }), {
-        status: 409,
-        headers: {
-          'Cache-Control': 'no-store',
-          'Content-Type': 'application/json',
-          [AGENT_WSS_MODE_HEADER]: scheduleState.mode,
-          [AGENT_WSS_REASON_HEADER]: scheduleState.reason
-        }
-      });
-    }
-
     return new Response(JSON.stringify({
-      error: 'Agent WSS report outside active hours',
+      error: 'Agent WSS report disabled',
       code: 409,
-      text: AGENT_WSS_SCHEDULE_INACTIVE,
+      text: AGENT_WSS_SCHEDULE_DISABLED,
       connection_mode: 'http'
     }), {
       status: 409,
       headers: {
         'Cache-Control': 'no-store',
         'Content-Type': 'application/json',
-        [AGENT_WSS_MODE_HEADER]: scheduleState.mode,
-        [AGENT_WSS_REASON_HEADER]: scheduleState.reason
+        [AGENT_WSS_MODE_HEADER]: scheduleState?.mode || 'disabled',
+        [AGENT_WSS_REASON_HEADER]: scheduleState?.reason || AGENT_WSS_SCHEDULE_DISABLED
       }
     });
   }
@@ -600,6 +582,7 @@ export class MetricsBroadcaster {
     if (message.type === 'update' && message.payload && typeof message.payload === 'object' && !Array.isArray(message.payload)) {
       const payload = { ...message.payload };
       const inheritedFields = [
+        'reportId',
         'config_md5',
         'configMd5',
         'agent_config_md5',
@@ -958,52 +941,10 @@ export class MetricsBroadcaster {
     return { matched, closed };
   }
 
-  _closeInactiveAgentReportWebSockets() {
-    let matched = 0;
-    let closed = 0;
-
-    for (const ws of this._getAgentReportWebSockets()) {
-      const attachment = ws.deserializeAttachment() || {};
-      if (attachment.kind !== AGENT_REPORT_KIND) continue;
-      matched += 1;
-
-      try {
-        this._closeWsForInactiveAgentSchedule(ws);
-        closed += 1;
-      } catch (_) {}
-    }
-
-    return { matched, closed };
-  }
-
-  _nextUtcHourAlarmTime() {
-    const nextHour = new Date();
-    nextHour.setUTCMinutes(60, 0, 0);
-    return nextHour.getTime();
-  }
-
-  async _scheduleAgentWssHourAlarm() {
-    if (!this.state?.storage || typeof this.state.storage.setAlarm !== 'function') return;
-    try {
-      await this.state.storage.setAlarm(this._nextUtcHourAlarmTime());
-    } catch (e) {
-      console.warn('[update-ws] Failed to schedule WSS hour alarm:', e?.message || e);
-    }
-  }
-
   async alarm() {
     const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
-    const scheduleState = getWssReportScheduleState(settings);
-    if (!scheduleState.configured) {
+    if (!isWssReportConfigured(settings)) {
       this._closeAgentReportWebSockets();
-      return;
-    }
-    if (!scheduleState.active) {
-      this._closeInactiveAgentReportWebSockets();
-      return;
-    }
-    if (this._getAgentReportWebSockets().length > 0) {
-      await this._scheduleAgentWssHourAlarm();
     }
   }
 
@@ -1020,15 +961,13 @@ export class MetricsBroadcaster {
 
     if (body?.agentReportModeChanged === true) {
       const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
-      const scheduleState = getWssReportScheduleState(settings);
-      const result = scheduleState.active
+      const configured = isWssReportConfigured(settings);
+      const result = configured
         ? { matched: 0, closed: 0 }
-        : (scheduleState.configured
-            ? this._closeInactiveAgentReportWebSockets()
-            : this._closeAgentReportWebSockets());
+        : this._closeAgentReportWebSockets();
       return new Response(JSON.stringify({
         ok: true,
-        wssReportEnabled: scheduleState.active,
+        wssReportEnabled: configured,
         ...result
       }), {
         headers: {
@@ -1228,9 +1167,19 @@ export class MetricsBroadcaster {
 
   async _hintAgentRealtimeIntervals(realtimeState = null) {
     const now = Date.now();
-    const state = realtimeState || this._getAgentRealtimeState(now);
-    if (!state.frontendActive) return 0;
-    if (now - this.lastAgentRealtimeHintAt < 1000) return 0;
+    const state = this._normalizeRealtimeState(realtimeState || this._getAgentRealtimeState(now));
+    const isFrontendActive = !!state.frontendActive;
+
+    const lastState = await this._getLastModeState();
+    if (lastState !== null && lastState === isFrontendActive) {
+      return 0;
+    }
+    this.lastModeState = isFrontendActive;
+    try {
+      await this.state?.storage?.put?.(MODE_STATE_STORAGE_KEY, isFrontendActive);
+    } catch (_) {}
+
+    const modeRevision = await this._incrementModeRevision();
     this.lastAgentRealtimeHintAt = now;
 
     let hinted = 0;
@@ -1252,9 +1201,11 @@ export class MetricsBroadcaster {
       );
       this._sendWsJson(ws, {
         type: 'ack',
+        ackFor: 'mode',
         ts: Date.now(),
-        realtimeHint: true,
-        nextWssReportAfterMs
+        modeRevision,
+        nextWssReportAfterMs,
+        realtimeHint: isFrontendActive
       });
       hinted += 1;
     }
@@ -1376,24 +1327,6 @@ export class MetricsBroadcaster {
 
     if (msg?.type === 'pong') return;
 
-    const scheduleCheckAfter = Number(attachment.wssScheduleCheckAfter);
-    if (Number.isFinite(scheduleCheckAfter) && Date.now() >= scheduleCheckAfter) {
-      const settings = await loadSiteSettings(this.env.DB);
-      const scheduleState = getWssReportScheduleState(settings);
-      if (!scheduleState.configured) {
-        this._closeWsForDisabledAgentSchedule(ws);
-        return;
-      }
-      if (!scheduleState.active) {
-        this._closeWsForInactiveAgentSchedule(ws);
-        return;
-      }
-      const nextHour = new Date();
-      nextHour.setUTCMinutes(60, 0, 0);
-      attachment = { ...attachment, wssScheduleCheckAfter: nextHour.getTime() };
-      ws.serializeAttachment(attachment);
-    }
-
     const data = this._normalizeAgentReportData(msg);
     if (!data) {
       this._closeWsWithError(ws, 'Invalid report payload', 400);
@@ -1425,6 +1358,35 @@ export class MetricsBroadcaster {
 
     const latestSample = samples[samples.length - 1];
     const latestMetrics = getReportMetrics(data, latestSample);
+
+    const rawReportId = data.reportId;
+    const reportId = typeof rawReportId === 'string' && rawReportId.trim() ? rawReportId.trim() : null;
+    const reportKey = reportId ? `${context.serverId}:${reportId}` : null;
+    const contentFingerprint = JSON.stringify(data.batch === true ? samples : latestMetrics);
+
+    if (reportKey) {
+      this._pruneProcessedReports();
+      const existing = this.processedReports.get(reportKey);
+      if (existing) {
+        if (existing.fingerprint === contentFingerprint) {
+          this._sendWsJson(ws, {
+            type: 'ack',
+            ackFor: 'report',
+            ts: Date.now(),
+            reportId,
+            accepted: existing.ack.accepted,
+            ...(existing.ack.persisted !== undefined ? { persisted: existing.ack.persisted } : {}),
+            ...(existing.ack.acceptedSamples !== undefined ? { acceptedSamples: existing.ack.acceptedSamples } : {}),
+            ...(existing.ack.nextD1WriteAfterMs !== undefined ? { nextD1WriteAfterMs: existing.ack.nextD1WriteAfterMs } : {})
+          });
+          return;
+        } else {
+          this._closeWsWithError(ws, 'Conflicting reportId with different content', 400);
+          return;
+        }
+      }
+    }
+
     const historyAggregate = collectHistoryMetricAggregates(samples);
     const broadcastSamples = toBroadcastSamples(
       context.serverId,
@@ -1446,16 +1408,27 @@ export class MetricsBroadcaster {
     }
 
     let persisted;
-    if (data.batch === true && samples.length > 1) {
-      await saveMetricsHistoryBatch(
-        this.env.DB,
-        context.serverId,
-        context.historyPartitionId,
-        samples,
-        context.regionCode,
-        context.agentVersion
-      );
-      persisted = { persisted: true, nextD1WriteAfterMs: 0 };
+    let acceptedSamples = undefined;
+    let accepted = true;
+
+    if (data.batch === true && samples.length > 0) {
+      try {
+        await saveMetricsHistoryBatch(
+          this.env.DB,
+          context.serverId,
+          context.historyPartitionId,
+          samples,
+          context.regionCode,
+          context.agentVersion
+        );
+        persisted = { persisted: true, nextD1WriteAfterMs: 0 };
+        acceptedSamples = samples.length;
+      } catch (err) {
+        console.error('[update-ws] Failed to persist batch metrics:', err?.message || err);
+        persisted = { persisted: false, nextD1WriteAfterMs: 0 };
+        acceptedSamples = 0;
+        accepted = false;
+      }
     } else {
       persisted = await this._persistAgentHistoryIfDue(ws, context.attachment, {
         serverId: context.serverId,
@@ -1470,18 +1443,33 @@ export class MetricsBroadcaster {
     }
 
     const configAck = await this._buildAgentConfigAck(context);
-    const nextWssReportAfterMs = this._getAgentNextWssReportAfterMs(
-      context.wssReportIntervalMs,
-      context.reportIntervalMs,
-      realtimeState
-    );
+
+    if (reportKey && accepted) {
+      this.processedReports.set(reportKey, {
+        fingerprint: contentFingerprint,
+        ack: {
+          accepted,
+          ...(data.batch === true ? {
+            persisted: persisted.persisted,
+            acceptedSamples
+          } : {}),
+          nextD1WriteAfterMs: persisted.nextD1WriteAfterMs
+        },
+        ts: Date.now()
+      });
+    }
+
     this._sendWsJson(ws, {
       type: 'ack',
+      ackFor: 'report',
       ts: Date.now(),
-      persisted: persisted.persisted,
-      nextD1WriteAfterMs: persisted.nextD1WriteAfterMs,
-      nextWssReportAfterMs,
-      realtimeHint: !!realtimeState?.frontendActive,
+      accepted,
+      ...(data.batch === true ? {
+        persisted: persisted.persisted,
+        acceptedSamples
+      } : {}),
+      ...(persisted.nextD1WriteAfterMs !== undefined ? { nextD1WriteAfterMs: persisted.nextD1WriteAfterMs } : {}),
+      ...(reportId ? { reportId } : {}),
       ...(configAck || {})
     });
   }
@@ -1505,11 +1493,10 @@ export class MetricsBroadcaster {
     }
 
     // @ts-ignore - Cloudflare Workers runtime provides WebSocketPair
-    const nextHour = new Date();
-    nextHour.setUTCMinutes(60, 0, 0);
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    const agentSocket = this._acceptStandardAgentWebSocket(server, {
+
+    const initialAttachment = {
       kind: AGENT_REPORT_KIND,
       authenticated: false,
       serverId: '',
@@ -1518,7 +1505,6 @@ export class MetricsBroadcaster {
       agentVersion: normalizeAgentVersion(request.headers.get('X-Agent-Version')),
       reportIntervalMs: AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,
       wssReportIntervalMs: DEFAULT_WSS_REPORT_INTERVAL * 1000,
-      wssScheduleCheckAfter: nextHour.getTime(),
       lastD1WriteTs: 0,
       configSchema: normalizeConfigSchema(firstDefined(
         url.searchParams.get('config_schema'),
@@ -1530,14 +1516,28 @@ export class MetricsBroadcaster {
         url.searchParams.get('agent_config_md5'),
         request.headers.get(AGENT_CONFIG_MD5_HEADER)
       ))
-    });
+    };
+    server.serializeAttachment(initialAttachment);
 
-    this._sendWsJson(agentSocket, {
+    // Agent WebSocket 使用 DO WebSocket Hibernation API 接管连接
+    this.state.acceptWebSocket(server);
+
+    const realtimeState = this._getAgentRealtimeState();
+    const nextWssReportAfterMs = this._getAgentNextWssReportAfterMs(
+      DEFAULT_WSS_REPORT_INTERVAL * 1000,
+      AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,
+      realtimeState
+    );
+    const modeRevision = await this._getModeRevision();
+
+    this._sendWsJson(server, {
       type: 'hello',
       ts: Date.now(),
-      protocol: 'update'
+      protocol: 'update',
+      realtimeHint: !!realtimeState.frontendActive,
+      nextWssReportAfterMs,
+      modeRevision
     });
-    await this._scheduleAgentWssHourAlarm();
 
     const responseHeaders = new Headers();
     if (origin && allowedOrigins.length > 0) {
@@ -1606,6 +1606,14 @@ export class MetricsBroadcaster {
         }));
       } catch (_) {
       }
+
+      this._hintAgentRealtimeIntervals({
+        frontendActive: true,
+        resourceAlertActive: this._shouldCacheResourceAlertSamples(),
+        realtimeActive: true
+      }).catch(err => {
+        console.warn('[ws] Failed to hint agent realtime interval on connect:', err?.message || err);
+      });
 
       const responseHeaders = new Headers();
       if (origin && allowedOrigins.length > 0) {
@@ -1787,8 +1795,8 @@ export class MetricsBroadcaster {
     // ── 3) 健康检查 ────────────────────────────────────
     if (method === 'GET' && (path === '/health' || path.endsWith('/health'))) {
       const subscribers = this._getFrontendSubscriberCount();
-      const agentSockets = this.standardAgentWebSocketCount;
-      const sockets = this.state.getWebSockets().length + agentSockets;
+      const agentSockets = this._getAgentReportWebSockets().length;
+      const sockets = this.state.getWebSockets().length;
       return new Response(JSON.stringify({ ok: true, subscribers, sockets, agentSockets }), {
         headers: { 'Content-Type': 'application/json' }
       });
@@ -2203,8 +2211,22 @@ export class MetricsBroadcaster {
     } catch (_) {}
   }
 
-  // WebSocket 关闭 — DO 自动清理，无需手动移除
-  webSocketClose(ws, code, reason) {}
+  // WebSocket 关闭 — DO 自动清理，处理会话状态清理与前端断连感知
+  webSocketClose(ws, code, reason) {
+    const attachment = ws.deserializeAttachment() || {};
+    if (attachment.kind === AGENT_REPORT_KIND) {
+      if (attachment.serverId) {
+        this.agentServerDetails.delete(attachment.serverId);
+      }
+      return;
+    }
+
+    if (this._getFrontendSubscriberCount(ws) === 0) {
+      return this._hintAgentRealtimeIntervals({ frontendActive: false, realtimeActive: false }).catch(err => {
+        console.warn('[ws] Failed to hint agent idle interval on frontend disconnect:', err?.message || err);
+      });
+    }
+  }
 
   // WebSocket 错误 — DO 自动处理
   webSocketError(ws, error) {}

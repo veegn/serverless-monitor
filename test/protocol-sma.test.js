@@ -326,7 +326,7 @@ test('PROTOCOL: batch backfill (batch: true) persists all samples', async () => 
   assert.equal(historyInserts.length, 50, 'All 50 samples must be persisted to database');
 });
 
-test('PROTOCOL: WebSocket Ack frame contains realtimeHint', async () => {
+test('PROTOCOL: Mode Push frame conforms to ADAPTIVE_REPORTING_SPEC', async () => {
   if (!globalThis.WebSocketRequestResponsePair) {
     globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {};
   }
@@ -344,19 +344,65 @@ test('PROTOCOL: WebSocket Ack frame contains realtimeHint', async () => {
     storage: { async get() { return null; }, async put() {} }
   }, { DB: {} });
 
-  // Test _sendWsJson output
   broadcaster._sendWsJson(fakeWs, {
     type: 'ack',
+    ackFor: 'mode',
     ts: 1729700000000,
-    persisted: true,
-    nextWssReportAfterMs: 1000,
-    realtimeHint: false
+    modeRevision: 2,
+    nextWssReportAfterMs: 2000,
+    realtimeHint: true
   });
 
   assert.equal(sent.length, 1);
   const ack = sent[0];
   assert.equal(ack.type, 'ack');
+  assert.equal(ack.ackFor, 'mode');
+  assert.equal(ack.modeRevision, 2);
+  assert.equal(ack.nextWssReportAfterMs, 2000);
+  assert.equal(ack.realtimeHint, true);
+  assert.equal(ack.reportId, undefined);
+  assert.equal(ack.accepted, undefined);
+  assert.equal(ack.persisted, undefined);
+});
+
+test('PROTOCOL: Report ACK frame conforms to ADAPTIVE_REPORTING_SPEC', async () => {
+  if (!globalThis.WebSocketRequestResponsePair) {
+    globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {};
+  }
+  const { MetricsBroadcaster } = await import('../src/durable/MetricsBroadcaster.js');
+  const sent = [];
+  const fakeWs = {
+    send(str) { sent.push(JSON.parse(str)); },
+    close() {},
+    serializeAttachment() {},
+    deserializeAttachment() { return {}; }
+  };
+  const broadcaster = new MetricsBroadcaster({
+    setWebSocketAutoResponse() {},
+    getWebSockets() { return []; },
+    storage: { async get() { return null; }, async put() {} }
+  }, { DB: {} });
+
+  broadcaster._sendWsJson(fakeWs, {
+    type: 'ack',
+    ackFor: 'report',
+    ts: 1729700000000,
+    reportId: 'srv-us-east-01-00000042',
+    accepted: true,
+    persisted: true,
+    acceptedSamples: 30,
+    nextD1WriteAfterMs: 0
+  });
+
+  assert.equal(sent.length, 1);
+  const ack = sent[0];
+  assert.equal(ack.type, 'ack');
+  assert.equal(ack.ackFor, 'report');
+  assert.equal(ack.reportId, 'srv-us-east-01-00000042');
+  assert.equal(ack.accepted, true);
   assert.equal(ack.persisted, true);
-  assert.equal(ack.nextWssReportAfterMs, 1000);
-  assert.equal(ack.realtimeHint, false);
+  assert.equal(ack.acceptedSamples, 30);
+  assert.equal(ack.nextD1WriteAfterMs, 0);
+  assert.equal(ack.realtimeHint, undefined);
+  assert.equal(ack.nextWssReportAfterMs, undefined);
 });

@@ -7,6 +7,19 @@ import { buildResourceAlertNotificationPayloads } from '../src/services/notifica
 import { clearSiteSettingsCache, DEFAULT_NOTIFICATION_TEMPLATE, normalizeNotificationTemplate, normalizeResourceAlertRules } from '../src/utils/settings.js';
 import { UPDATE_MAX_REQUEST_BYTES } from '../src/utils/config.js';
 
+const NativeResponse = globalThis.Response;
+globalThis.Response = class CustomResponse extends NativeResponse {
+  constructor(body, init) {
+    if (init && init.status === 101) {
+      super(body, { ...init, status: 200 });
+      Object.defineProperty(this, 'status', { value: 101, configurable: true });
+      if (init.webSocket) this.webSocket = init.webSocket;
+      return;
+    }
+    super(body, init);
+  }
+};
+
 globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {
   constructor(request, response) {
     this.request = request;
@@ -14,9 +27,30 @@ globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {
   }
 };
 
+globalThis.WebSocketPair = class WebSocketPair {
+  constructor() {
+    let attachment = null;
+    const client = { send() {}, close() {} };
+    const server = {
+      send(data) {
+        if (!this.sent) this.sent = [];
+        this.sent.push(data);
+      },
+      close() {},
+      serializeAttachment(val) { attachment = val; },
+      deserializeAttachment() { return attachment; }
+    };
+    this[0] = client;
+    this[1] = server;
+  }
+};
+
 function makeBroadcaster(webSockets = [], env = { DB: {} }) {
   return new MetricsBroadcaster({
     setWebSocketAutoResponse() {},
+    acceptWebSocket(ws) {
+      webSockets.push(ws);
+    },
     getWebSockets() {
       return webSockets;
     },
@@ -203,15 +237,13 @@ test('private frontend WebSocket accepts auth cookie', async () => {
   assert.equal(forwarded, true);
 });
 
-test('Agent WSS upgrade follows the configured UTC hour schedule', async () => {
-  const currentHour = new Date().getUTCHours();
+test('Agent WSS upgrade follows the configured report enabled setting', async () => {
   let forwarded = false;
   clearSiteSettingsCache();
   const enabledResponse = await handleUpdateWebSocketUpgrade(
     makeWebSocketUpgradeRequest('https://example.com/update'),
     makeWebSocketEnv({
-      wss_report_enabled: 'true',
-      wss_report_hours: [currentHour]
+      wss_report_enabled: 'true'
     }, () => {
       forwarded = true;
     })
@@ -225,29 +257,27 @@ test('Agent WSS upgrade follows the configured UTC hour schedule', async () => {
   const disabledResponse = await handleUpdateWebSocketUpgrade(
     makeWebSocketUpgradeRequest('https://example.com/update'),
     makeWebSocketEnv({
-      wss_report_enabled: 'true',
-      wss_report_hours: [(currentHour + 1) % 24]
+      wss_report_enabled: 'false'
     }, () => {
       forwarded = true;
     })
   );
 
   assert.equal(disabledResponse.status, 409);
-  assert.equal(disabledResponse.headers.get('X-Agent-Wss-Mode'), 'inactive');
-  assert.equal(disabledResponse.headers.get('X-Agent-Wss-Reason'), 'wss_schedule_inactive');
+  assert.equal(disabledResponse.headers.get('X-Agent-Wss-Mode'), 'disabled');
+  assert.equal(disabledResponse.headers.get('X-Agent-Wss-Reason'), 'wss_disabled');
   const disabledBody = await disabledResponse.json();
-  assert.equal(disabledBody.text, 'wss_schedule_inactive');
+  assert.equal(disabledBody.text, 'wss_disabled');
   assert.equal(disabledBody.connection_mode, 'http');
   assert.equal(forwarded, false);
 });
 
-test('Durable Object rechecks Agent WSS schedule before accepting a socket', async () => {
+test('Durable Object accepts Agent WSS upgrade when report is enabled', async () => {
   clearSiteSettingsCache();
-  const currentHour = new Date().getUTCHours();
-  const broadcaster = makeBroadcaster([], {
+  const sockets = [];
+  const broadcaster = makeBroadcaster(sockets, {
     DB: makeSettingsDb({
-      wss_report_enabled: 'true',
-      wss_report_hours: [(currentHour + 1) % 24]
+      wss_report_enabled: 'true'
     })
   });
 
@@ -256,13 +286,8 @@ test('Durable Object rechecks Agent WSS schedule before accepting a socket', asy
     new URL('http://internal/update')
   );
 
-  assert.equal(response.status, 409);
-  assert.equal(response.headers.get('X-Agent-Wss-Mode'), 'inactive');
-  assert.equal(response.headers.get('X-Agent-Wss-Reason'), 'wss_schedule_inactive');
-  const body = await response.json();
-  assert.equal(body.text, 'wss_schedule_inactive');
-  assert.equal(body.connection_mode, 'http');
-  assert.equal(broadcaster.standardAgentWebSocketCount, 0);
+  assert.equal(response.status, 101);
+  assert.equal(broadcaster._getAgentReportWebSockets().length, 1);
 });
 
 test('Durable Object rejects Agent WSS upgrade when report is disabled', async () => {
@@ -285,7 +310,7 @@ test('Durable Object rejects Agent WSS upgrade when report is disabled', async (
   assert.equal(body.code, 409);
   assert.equal(body.text, 'wss_disabled');
   assert.equal(body.connection_mode, 'http');
-  assert.equal(broadcaster.standardAgentWebSocketCount, 0);
+  assert.equal(broadcaster._getAgentReportWebSockets().length, 0);
 });
 
 test('WSS agent config state only requests ack for fields in current report', () => {
@@ -300,48 +325,36 @@ test('WSS agent config state only requests ack for fields in current report', ()
   );
 });
 
-test('WSS agent standard WebSocket adapter preserves attachment state', async () => {
-  const broadcaster = makeBroadcaster();
-  const listeners = {};
+test('WSS agent hibernation WebSocket preserves attachment state', async () => {
+  const sockets = [];
+  const broadcaster = makeBroadcaster(sockets);
   const sent = [];
-  let accepted = false;
-  const server = {
-    accept() {
-      accepted = true;
+  let attachment = { kind: 'agent-report' };
+  const ws = {
+    serializeAttachment(value) {
+      attachment = value;
+    },
+    deserializeAttachment() {
+      return attachment;
     },
     send(message) {
       sent.push(message);
     },
-    close() {},
-    addEventListener(type, handler) {
-      listeners[type] = handler;
-    }
+    close() {}
   };
+  sockets.push(ws);
 
-  let finish;
-  const handled = new Promise(resolve => {
-    finish = resolve;
-  });
-  broadcaster._handleAgentReportMessage = async (ws, rawMessage, attachment) => {
+  broadcaster._handleAgentReportMessage = async (socket, rawMessage, att) => {
     assert.equal(rawMessage, '{"metrics":{}}');
-    assert.equal(attachment.kind, 'agent-report');
-    ws.serializeAttachment({ ...attachment, authenticated: true, serverId: 'server-1' });
-    ws.send('ok');
-    finish();
+    assert.equal(att.kind, 'agent-report');
+    socket.serializeAttachment({ ...att, authenticated: true, serverId: 'server-1' });
+    socket.send('ok');
   };
 
-  const ws = broadcaster._acceptStandardAgentWebSocket(server, { kind: 'agent-report' });
-  assert.equal(accepted, true);
-  assert.equal(broadcaster.standardAgentWebSocketCount, 1);
-
-  listeners.message({ data: '{"metrics":{}}' });
-  await handled;
+  await broadcaster.webSocketMessage(ws, '{"metrics":{}}');
 
   assert.equal(ws.deserializeAttachment().serverId, 'server-1');
   assert.deepEqual(sent, ['ok']);
-
-  listeners.close();
-  assert.equal(broadcaster.standardAgentWebSocketCount, 0);
 });
 
 test('WSS agent ack suggests configured realtime or idle report interval', () => {
@@ -800,20 +813,21 @@ test('agent report mode change closes existing Agent WSS when disabled', async (
   }]);
 });
 
-test('Agent WSS closes on the first report after entering a disabled UTC hour', async () => {
+test('alarm closes existing Agent WSS when report is disabled', async () => {
   clearSiteSettingsCache();
-  const currentHour = new Date().getUTCHours();
   const sent = [];
   const closed = [];
   let attachment = {
     kind: 'agent-report',
     authenticated: true,
-    serverId: 'server-1',
-    wssScheduleCheckAfter: Date.now() - 1
+    serverId: 'server-1'
   };
   const ws = {
     serializeAttachment(value) {
       attachment = value;
+    },
+    deserializeAttachment() {
+      return attachment;
     },
     send(message) {
       sent.push(JSON.parse(message));
@@ -822,23 +836,22 @@ test('Agent WSS closes on the first report after entering a disabled UTC hour', 
       closed.push({ code, reason });
     }
   };
-  const broadcaster = makeBroadcaster([], {
+  const broadcaster = makeBroadcaster([ws], {
     DB: makeSettingsDb({
-      wss_report_enabled: 'true',
-      wss_report_hours: [(currentHour + 1) % 24]
+      wss_report_enabled: 'false'
     })
   });
 
-  await broadcaster._handleAgentReportMessage(ws, JSON.stringify({ metrics: { cpu: 1 } }), attachment);
+  await broadcaster.alarm();
 
   assert.equal(sent.length, 1);
   assert.equal(sent[0].type, 'error');
   assert.equal(sent[0].code, 409);
-  assert.equal(sent[0].text, 'wss_schedule_inactive');
+  assert.equal(sent[0].text, 'wss_disabled');
   assert.equal(sent[0].connection_mode, 'http');
   assert.deepEqual(closed, [{
     code: 1013,
-    reason: 'wss_schedule_inactive'
+    reason: 'wss_disabled'
   }]);
 });
 
@@ -937,6 +950,357 @@ test('Agent WSS frontend batch queue stays idle without frontend subscribers', (
 
   assert.equal(broadcaster.pendingFrontendBroadcasts.size, 0);
   assert.equal(broadcaster.frontendBroadcastTimer, null);
+});
+
+test('Agent WSS handshake hello frame includes initial realtimeHint and nextWssReportAfterMs', async () => {
+  clearSiteSettingsCache();
+  // 1. Without frontend subscriber: idle mode
+  const sockets1 = [];
+  const broadcasterIdle = makeBroadcaster(sockets1, {
+    DB: makeSettingsDb({ wss_report_enabled: 'true' })
+  });
+
+  const resIdle = await broadcasterIdle._handleAgentReportWebSocket(
+    makeWebSocketUpgradeRequest('http://internal/update'),
+    new URL('http://internal/update')
+  );
+  assert.equal(resIdle.status, 101);
+  const serverWsIdle = sockets1[0];
+  assert.equal(serverWsIdle.sent.length, 1);
+  const helloIdle = JSON.parse(serverWsIdle.sent[0]);
+  assert.equal(helloIdle.type, 'hello');
+  assert.equal(helloIdle.realtimeHint, false);
+  assert.equal(helloIdle.nextWssReportAfterMs, 60000);
+
+  // 2. With frontend subscriber: realtime mode
+  const sockets2 = [{
+    deserializeAttachment() {
+      return { scope: 'all' };
+    }
+  }];
+  const broadcasterRealtime = makeBroadcaster(sockets2, {
+    DB: makeSettingsDb({ wss_report_enabled: 'true' })
+  });
+
+  const resRealtime = await broadcasterRealtime._handleAgentReportWebSocket(
+    makeWebSocketUpgradeRequest('http://internal/update'),
+    new URL('http://internal/update')
+  );
+  assert.equal(resRealtime.status, 101);
+  const serverWsRealtime = sockets2[1];
+  assert.equal(serverWsRealtime.sent.length, 1);
+  const helloRealtime = JSON.parse(serverWsRealtime.sent[0]);
+  assert.equal(helloRealtime.type, 'hello');
+  assert.equal(helloRealtime.realtimeHint, true);
+  assert.equal(helloRealtime.nextWssReportAfterMs, 2000);
+});
+
+test('webSocketClose of frontend connection hints connected agents to drop to idle batch mode', async () => {
+  const agentSent = [];
+  const agentWs = {
+    deserializeAttachment() {
+      return {
+        kind: 'agent-report',
+        authenticated: true,
+        serverId: 'server-1',
+        reportIntervalMs: 60000,
+        wssReportIntervalMs: 2000
+      };
+    },
+    send(msg) {
+      agentSent.push(JSON.parse(msg));
+    }
+  };
+  const frontendWs = {
+    deserializeAttachment() {
+      return { scope: 'all' };
+    }
+  };
+
+  const sockets = [agentWs, frontendWs];
+  const broadcaster = makeBroadcaster(sockets);
+
+  // Frontend disconnects: remove frontendWs from sockets
+  sockets.splice(1, 1);
+  await broadcaster.webSocketClose(frontendWs, 1000, 'normal close');
+
+  // Agent should receive ack frame with realtimeHint: false and 60000ms
+  assert.equal(agentSent.length, 1);
+  assert.equal(agentSent[0].type, 'ack');
+  assert.equal(agentSent[0].ackFor, 'mode');
+  assert.equal(typeof agentSent[0].modeRevision, 'number');
+  assert.equal(agentSent[0].realtimeHint, false);
+  assert.equal(agentSent[0].nextWssReportAfterMs, 60000);
+  assert.equal(agentSent[0].reportId, undefined);
+  assert.equal(agentSent[0].accepted, undefined);
+  assert.equal(agentSent[0].persisted, undefined);
+});
+
+test('Multi-dashboard subscriptions: mode stays realtime until the last frontend disconnects', async () => {
+  const agentSent = [];
+  const agentWs = {
+    deserializeAttachment() {
+      return {
+        kind: 'agent-report',
+        authenticated: true,
+        serverId: 'server-1',
+        reportIntervalMs: 60000,
+        wssReportIntervalMs: 2000
+      };
+    },
+    send(msg) {
+      agentSent.push(JSON.parse(msg));
+    }
+  };
+  const frontendWs1 = {
+    deserializeAttachment() {
+      return { scope: 'all' };
+    }
+  };
+  const frontendWs2 = {
+    deserializeAttachment() {
+      return { scope: 'all' };
+    }
+  };
+
+  const sockets = [agentWs, frontendWs1, frontendWs2];
+  const broadcaster = makeBroadcaster(sockets);
+
+  // Set initial active state
+  broadcaster.lastModeState = true;
+  const initialRevision = broadcaster.modeRevision;
+
+  // First dashboard closes: remaining frontend count is 1 (> 0)
+  sockets.splice(1, 1); // remove frontendWs1
+  await broadcaster.webSocketClose(frontendWs1, 1000, 'tab closed');
+
+  // Agent should NOT receive mode downgrade because frontendWs2 is still connected!
+  assert.equal(agentSent.length, 0);
+  assert.equal(broadcaster.lastModeState, true);
+  assert.equal(broadcaster.modeRevision, initialRevision);
+
+  // Second (last) dashboard closes: remaining frontend count is 0
+  sockets.splice(1, 1); // remove frontendWs2
+  await broadcaster.webSocketClose(frontendWs2, 1000, 'tab closed');
+
+  // Agent should now receive mode downgrade
+  assert.equal(agentSent.length, 1);
+  assert.equal(agentSent[0].type, 'ack');
+  assert.equal(agentSent[0].ackFor, 'mode');
+  assert.equal(agentSent[0].realtimeHint, false);
+  assert.equal(agentSent[0].nextWssReportAfterMs, 60000);
+  assert.equal(agentSent[0].modeRevision, initialRevision + 1);
+  assert.equal(broadcaster.lastModeState, false);
+});
+
+test('modeRevision monotonically increments on visitor state transitions', async () => {
+  const agentSent = [];
+  const agentWs = {
+    deserializeAttachment() {
+      return {
+        kind: 'agent-report',
+        authenticated: true,
+        serverId: 'server-1',
+        reportIntervalMs: 60000,
+        wssReportIntervalMs: 2000
+      };
+    },
+    send(msg) {
+      agentSent.push(JSON.parse(msg));
+    }
+  };
+  const sockets = [agentWs];
+  const broadcaster = makeBroadcaster(sockets);
+
+  // Start with idle (false)
+  broadcaster.lastModeState = false;
+  broadcaster.modeRevision = 10;
+
+  // 1. Visitor joins: transition to true
+  await broadcaster._hintAgentRealtimeIntervals({ frontendActive: true });
+  assert.equal(agentSent.length, 1);
+  assert.equal(agentSent[0].ackFor, 'mode');
+  assert.equal(agentSent[0].modeRevision, 11);
+  assert.equal(agentSent[0].realtimeHint, true);
+
+  // Another hint with the same active state does NOT increment revision
+  await broadcaster._hintAgentRealtimeIntervals({ frontendActive: true });
+  assert.equal(agentSent.length, 1);
+
+  // 2. Visitor leaves: transition to false
+  await broadcaster._hintAgentRealtimeIntervals({ frontendActive: false });
+  assert.equal(agentSent.length, 2);
+  assert.equal(agentSent[1].ackFor, 'mode');
+  assert.equal(agentSent[1].modeRevision, 12);
+  assert.equal(agentSent[1].realtimeHint, false);
+});
+
+test('reportId batch idempotency and conflict rejection', async () => {
+  const savedBatches = [];
+  const fakeDb = {
+    prepare(sql) {
+      return {
+        bind(...args) {
+          return {
+            async run() {
+              return { success: true };
+            },
+            async first() {
+              return null;
+            }
+          };
+        },
+        async first() {
+          return null;
+        }
+      };
+    },
+    async batch(statements) {
+      savedBatches.push(statements);
+      return statements.map(() => ({ success: true }));
+    }
+  };
+
+  const broadcaster = makeBroadcaster([], { DB: fakeDb });
+  broadcaster._getAgentServerDetail = async () => ({
+    id: 'server-1',
+    secret: 'test-secret',
+    history_partition_id: 1,
+    report_interval: 60,
+    wss_report_interval: 2
+  });
+
+  const agentSent = [];
+  const closed = [];
+  const ws = {
+    deserializeAttachment() {
+      return {
+        kind: 'agent-report',
+        authenticated: true,
+        serverId: 'server-1',
+        historyPartitionId: 1
+      };
+    },
+    serializeAttachment() {},
+    send(msg) {
+      agentSent.push(JSON.parse(msg));
+    },
+    close(code, reason) {
+      closed.push({ code, reason });
+    }
+  };
+
+  const batchPayload = {
+    id: 'server-1',
+    secret: 'test-secret',
+    reportId: 'rep-001',
+    batch: true,
+    metrics: { cpu: '10' },
+    samples: [
+      { ts: 1729800002000, metrics: { cpu: '10' } },
+      { ts: 1729800004000, metrics: { cpu: '15' } }
+    ]
+  };
+
+  // First submission: should succeed and write to D1
+  await broadcaster._handleAgentReportMessage(ws, JSON.stringify(batchPayload));
+  assert.equal(agentSent.length, 1);
+  assert.equal(agentSent[0].type, 'ack');
+  assert.equal(agentSent[0].ackFor, 'report');
+  assert.equal(agentSent[0].reportId, 'rep-001');
+  assert.equal(agentSent[0].accepted, true);
+  assert.equal(agentSent[0].persisted, true);
+  assert.equal(agentSent[0].acceptedSamples, 2);
+  assert.equal(agentSent[0].realtimeHint, undefined);
+  assert.equal(agentSent[0].nextWssReportAfterMs, undefined);
+  assert.equal(savedBatches.length, 1);
+
+  // Duplicate submission with identical content: idempotent retry, no new D1 write
+  await broadcaster._handleAgentReportMessage(ws, JSON.stringify(batchPayload));
+  assert.equal(agentSent.length, 2);
+  assert.equal(agentSent[1].ackFor, 'report');
+  assert.equal(agentSent[1].reportId, 'rep-001');
+  assert.equal(agentSent[1].accepted, true);
+  assert.equal(agentSent[1].persisted, true);
+  assert.equal(agentSent[1].acceptedSamples, 2);
+  assert.equal(savedBatches.length, 1); // Still 1! No duplicate batch written!
+
+  // Conflicting submission with same reportId but altered content: must be rejected with 400
+  const conflictingPayload = {
+    ...batchPayload,
+    samples: [
+      { ts: 1729800002000, metrics: { cpu: '99' } }
+    ]
+  };
+  await broadcaster._handleAgentReportMessage(ws, JSON.stringify(conflictingPayload));
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].code, 1008);
+});
+
+test('Atomic batch persistence failure returns accepted: false and persisted: false', async () => {
+  const failingDb = {
+    prepare() {
+      return {
+        bind() {
+          return {
+            async run() {},
+            async first() { return null; }
+          };
+        },
+        async first() { return null; }
+      };
+    },
+    async batch() {
+      throw new Error('D1 transaction aborted');
+    }
+  };
+
+  const broadcaster = makeBroadcaster([], { DB: failingDb });
+  broadcaster._getAgentServerDetail = async () => ({
+    id: 'server-1',
+    secret: 'test-secret',
+    history_partition_id: 1,
+    report_interval: 60,
+    wss_report_interval: 2
+  });
+
+  const agentSent = [];
+  const ws = {
+    deserializeAttachment() {
+      return {
+        kind: 'agent-report',
+        authenticated: true,
+        serverId: 'server-1',
+        historyPartitionId: 1
+      };
+    },
+    serializeAttachment() {},
+    send(msg) {
+      agentSent.push(JSON.parse(msg));
+    },
+    close() {}
+  };
+
+  const batchPayload = {
+    id: 'server-1',
+    secret: 'test-secret',
+    reportId: 'rep-fail-01',
+    batch: true,
+    metrics: { cpu: '10' },
+    samples: [
+      { ts: 1729800002000, metrics: { cpu: '10' } },
+      { ts: 1729800004000, metrics: { cpu: '15' } }
+    ]
+  };
+
+  await broadcaster._handleAgentReportMessage(ws, JSON.stringify(batchPayload));
+  assert.equal(agentSent.length, 1);
+  assert.equal(agentSent[0].type, 'ack');
+  assert.equal(agentSent[0].ackFor, 'report');
+  assert.equal(agentSent[0].reportId, 'rep-fail-01');
+  assert.equal(agentSent[0].accepted, false);
+  assert.equal(agentSent[0].persisted, false);
+  assert.equal(agentSent[0].acceptedSamples, 0);
 });
 
 test('resource alert rule batches are capped at 20 rules', () => {

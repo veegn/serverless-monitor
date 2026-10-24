@@ -172,34 +172,6 @@
           </div>
         </div>
 
-        <div v-if="settings.wss_report_enabled" class="wss-schedule">
-          <div class="wss-schedule-header">
-            <div>
-              <div class="form-label wss-schedule-title">
-                {{ trans.wssReportHours }}
-                <HelpTooltip :text="trans.wssReportHoursTip" />
-              </div>
-              <div class="wss-schedule-meta">
-                {{ localTimezoneLabel }} · {{ wssReportHours.length }}/24 {{ trans.hoursSelected }} · {{ trans.agentWssMinVersion }}
-              </div>
-            </div>
-            <div class="wss-schedule-actions">
-              <button type="button" class="btn btn-sm" @click="selectAllWssReportHours">{{ trans.selectAll }}</button>
-              <button type="button" class="btn btn-sm" @click="clearWssReportHours">{{ trans.clear }}</button>
-            </div>
-          </div>
-          <div class="wss-hour-grid" role="group" :aria-label="trans.wssReportHours">
-            <label v-for="hour in 24" :key="hour - 1" class="wss-hour-option" :title="formatWssHourRange(hour - 1)">
-              <input
-                type="checkbox"
-                :checked="isLocalWssReportHourSelected(hour - 1)"
-                @change="toggleLocalWssReportHour(hour - 1, $event.target.checked)"
-              >
-              <span>{{ String(hour - 1).padStart(2, '0') }}</span>
-            </label>
-          </div>
-        </div>
-
         <div class="form-row">
           <div class="form-group flex-1">
             <label class="form-label">
@@ -1211,50 +1183,6 @@ const longHistoryPointOptions = computed(() => (
       : `${points} points`
   }))
 ))
-
-const wssReportHours = computed(() => {
-  const source = Array.isArray(props.settings.wss_report_hours)
-    ? props.settings.wss_report_hours
-    : Array.from({ length: 24 }, (_, hour) => hour)
-  return source
-    .map(hour => Number(hour))
-    .filter(hour => Number.isInteger(hour) && hour >= 0 && hour <= 23)
-    .filter((hour, index, hours) => hours.indexOf(hour) === index)
-    .sort((a, b) => a - b)
-})
-
-const localHourToUtcHour = hour => new Date(2000, 0, 1, hour, 0, 0, 0).getUTCHours()
-
-const localTimezoneLabel = computed(() => {
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone
-  const localTime = props.trans.localTime || 'Local time'
-  return timezone ? `${localTime} · ${timezone}` : localTime
-})
-
-const isLocalWssReportHourSelected = hour => wssReportHours.value.includes(localHourToUtcHour(hour))
-
-const toggleLocalWssReportHour = (hour, checked) => {
-  const utcHour = localHourToUtcHour(hour)
-  const selected = new Set(wssReportHours.value)
-  if (checked) selected.add(utcHour)
-  else selected.delete(utcHour)
-  props.settings.wss_report_hours = Array.from(selected).sort((a, b) => a - b)
-}
-
-const selectAllWssReportHours = () => {
-  props.settings.wss_report_hours = Array.from({ length: 24 }, (_, hour) => hour)
-}
-
-const clearWssReportHours = () => {
-  props.settings.wss_report_hours = []
-}
-
-const formatWssHourRange = hour => {
-  const utcHour = localHourToUtcHour(hour)
-  const localHourText = String(hour).padStart(2, '0')
-  const utcHourText = String(utcHour).padStart(2, '0')
-  return `${localHourText}:00-${localHourText}:59 ${props.trans.localTime} (${utcHourText}:00-${utcHourText}:59 UTC)`
-}
 
 // SMTP 通知复用后端 tg_bot_token 字段，采用前缀协议存储（方案 A）：
 // smtp://<user>:<pass>@<host>:<port>?from=<from>&to=<a,b>&secure=<auto|tls|starttls>

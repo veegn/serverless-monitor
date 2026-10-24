@@ -679,10 +679,12 @@ export async function saveMetricsHistoryBatch(db, serverId, historyPartitionId, 
         }
       } catch (retryError) {
         console.error('批量保存历史数据失败:', retryError);
+        throw retryError;
       }
       return;
     }
     console.error('批量保存历史数据失败:', e);
+    throw e;
   }
 }
 

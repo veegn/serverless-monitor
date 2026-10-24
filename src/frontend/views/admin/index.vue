@@ -530,31 +530,6 @@ const normalizeFrontendWsTimeoutMinutesSetting = (value) => {
     : 0
 }
 
-const normalizeWssReportHoursSetting = (value) => {
-  if (value === undefined || value === null || value === '') {
-    return Array.from({ length: 24 }, (_, hour) => hour)
-  }
-
-  let source = value
-  if (typeof source === 'string') {
-    try {
-      source = JSON.parse(source)
-    } catch (_) {
-      source = source.split(',').map(item => item.trim()).filter(Boolean)
-    }
-  }
-  if (!Array.isArray(source)) return Array.from({ length: 24 }, (_, hour) => hour)
-
-  return Array.from(new Set(source
-    .map(hour => {
-      if (typeof hour === 'number') return hour
-      if (typeof hour === 'string' && /^\d{1,2}$/.test(hour.trim())) return Number(hour)
-      return NaN
-    })
-    .filter(hour => Number.isInteger(hour) && hour >= 0 && hour <= 23)))
-    .sort((a, b) => a - b)
-}
-
 const normalizeResourceAlertModeSetting = (value) => {
   const mode = String(value || '').trim().toLowerCase()
   return mode === 'continuous' ? 'continuous' : 'average'
@@ -721,7 +696,6 @@ const settings = ref({
   show_tf: true,
   show_three_net_details: true,
   wss_report_enabled: true,
-  wss_report_hours: Array.from({ length: 24 }, (_, hour) => hour),
   frontend_ws_timeout_minutes: 0,
   long_history_points: String(HISTORY.DEFAULT_LONG_RANGE_POINTS),
   tg_notify: '0',
@@ -1143,7 +1117,6 @@ const loadSettings = async () => {
         show_tf: settingsData.show_tf === 'true',
         show_three_net_details: settingsData.show_three_net_details === 'true' || settingsData.show_three_net_details === true,
         wss_report_enabled: settingsData.wss_report_enabled === 'true' || settingsData.wss_report_enabled === true,
-        wss_report_hours: normalizeWssReportHoursSetting(settingsData.wss_report_hours),
         frontend_ws_timeout_minutes: normalizeFrontendWsTimeoutMinutesSetting(settingsData.frontend_ws_timeout_minutes),
         long_history_points: normalizeLongHistoryPointsSetting(settingsData.long_history_points),
         tg_notify: normalizeTgNotifySetting(settingsData.tg_notify),
@@ -1345,7 +1318,6 @@ const saveSettings = async () => {
       show_tf: settings.value.show_tf ? 'true' : 'false',
       show_three_net_details: settings.value.show_three_net_details ? 'true' : 'false',
       wss_report_enabled: settings.value.wss_report_enabled ? 'true' : 'false',
-      wss_report_hours: normalizeWssReportHoursSetting(settings.value.wss_report_hours),
       frontend_ws_timeout_minutes: String(frontendWsTimeoutMinutes),
       long_history_points: normalizeLongHistoryPointsSetting(settings.value.long_history_points),
       tg_notify: normalizeTgNotifySetting(settings.value.tg_notify),

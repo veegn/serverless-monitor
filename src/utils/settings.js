@@ -7,7 +7,7 @@ import { normalizePct } from './traffic.js';
 
 export const APPEARANCE_FIELDS = ['site_title', 'custom_bg', 'custom_bg_mobile', 'favicon', 'custom_head', 'custom_script', 'csp_static', 'csp_api', 'display_mode', 'preferred_theme', 'default_language', 'theme_options'];
 
-export const SITE_FIELDS = ['is_public', 'show_price', 'show_expire', 'show_tf', 'show_three_net_details', 'wss_report_enabled', 'wss_report_hours', 'frontend_ws_timeout_minutes', 'long_history_points', 'tg_notify', 'tg_bot_token', 'tg_chat_id', 'notification_timezone', 'notification_language', 'expire_notification_time', 'notification_webhook_enabled', 'notification_webhook_url', 'notification_webhook_method', 'notification_webhook_format', 'notification_webhook_headers', 'notification_webhook_body', 'notification_template', 'turnstile_enabled', 'turnstile_login_enabled', 'turnstile_site_key', 'turnstile_secret_key', 'jwt_secret', 'username', 'password', 'cloudflare_account_id', 'cloudflare_token', 'custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4', 'custom_ct_name', 'custom_cu_name', 'custom_cm_name', 'custom_bd_name', 'node_1_name', 'node_2_name', 'node_3_name', 'node_4_name', 'expire_reminder', 'resource_alert_rules', 'traffic_alert_threshold', 'theme_url', 'servers_optimized', 'auto_register_enabled', 'auto_register_default_group', 'auto_register_token', 'auto_register_token_expires'];
+export const SITE_FIELDS = ['is_public', 'show_price', 'show_expire', 'show_tf', 'show_three_net_details', 'wss_report_enabled', 'frontend_ws_timeout_minutes', 'long_history_points', 'tg_notify', 'tg_bot_token', 'tg_chat_id', 'notification_timezone', 'notification_language', 'expire_notification_time', 'notification_webhook_enabled', 'notification_webhook_url', 'notification_webhook_method', 'notification_webhook_format', 'notification_webhook_headers', 'notification_webhook_body', 'notification_template', 'turnstile_enabled', 'turnstile_login_enabled', 'turnstile_site_key', 'turnstile_secret_key', 'jwt_secret', 'username', 'password', 'cloudflare_account_id', 'cloudflare_token', 'custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4', 'custom_ct_name', 'custom_cu_name', 'custom_cm_name', 'custom_bd_name', 'node_1_name', 'node_2_name', 'node_3_name', 'node_4_name', 'expire_reminder', 'resource_alert_rules', 'traffic_alert_threshold', 'theme_url', 'servers_optimized', 'auto_register_enabled', 'auto_register_default_group', 'auto_register_token', 'auto_register_token_expires'];
 
 export const TG_NOTIFY_MINUTES_MIN = 2;
 export const TG_NOTIFY_MINUTES_MAX = 30;
@@ -82,7 +82,6 @@ const defaults = {
   show_tf: 'true',
   show_three_net_details: 'true',
   wss_report_enabled: 'true',
-  wss_report_hours: [...ALL_WSS_REPORT_HOURS],
   frontend_ws_timeout_minutes: '0',
   long_history_points: String(DEFAULT_LONG_HISTORY_POINTS),
   tg_notify: '0',
@@ -505,7 +504,7 @@ export function normalizeBooleanSetting(value, fallback = 'false') {
 
 export function normalizeWssReportHours(value) {
   if (value === undefined || value === null || value === '') {
-    return [...ALL_WSS_REPORT_HOURS];
+    return Array.from({ length: 24 }, (_, hour) => hour);
   }
 
   let source = value;
@@ -516,7 +515,7 @@ export function normalizeWssReportHours(value) {
       source = source.split(',').map(item => item.trim()).filter(Boolean);
     }
   }
-  if (!Array.isArray(source)) return [...ALL_WSS_REPORT_HOURS];
+  if (!Array.isArray(source)) return Array.from({ length: 24 }, (_, hour) => hour);
 
   return Array.from(new Set(source
     .map(hour => {
@@ -533,9 +532,6 @@ export function isWssReportConfigured(settings = {}) {
 }
 
 export function getWssReportScheduleState(settings = {}, now = Date.now()) {
-  const date = now instanceof Date ? now : new Date(now);
-  const safeDate = Number.isNaN(date.getTime()) ? new Date() : date;
-
   if (!isWssReportConfigured(settings)) {
     return {
       configured: false,
@@ -545,31 +541,11 @@ export function getWssReportScheduleState(settings = {}, now = Date.now()) {
     };
   }
 
-  const hours = normalizeWssReportHours(settings?.wss_report_hours);
-  if (hours.length === 0) {
-    return {
-      configured: true,
-      active: false,
-      mode: 'inactive',
-      reason: 'wss_schedule_empty'
-    };
-  }
-
-  const currentHour = safeDate.getUTCHours();
-  if (hours.includes(currentHour)) {
-    return {
-      configured: true,
-      active: true,
-      mode: 'active',
-      reason: 'wss_schedule_active'
-    };
-  }
-
   return {
     configured: true,
-    active: false,
-    mode: 'inactive',
-    reason: 'wss_schedule_inactive'
+    active: true,
+    mode: 'active',
+    reason: 'wss_active'
   };
 }
 
@@ -670,7 +646,6 @@ export async function loadSiteSettings(db, options = {}) {
     result.resource_alert_rules = normalizeResourceAlertRules(result.resource_alert_rules);
     result.show_three_net_details = normalizeBooleanSetting(result.show_three_net_details, defaults.show_three_net_details);
     result.wss_report_enabled = normalizeBooleanSetting(result.wss_report_enabled, defaults.wss_report_enabled);
-    result.wss_report_hours = normalizeWssReportHours(result.wss_report_hours);
     result.frontend_ws_timeout_minutes = normalizeFrontendWsTimeoutMinutes(result.frontend_ws_timeout_minutes);
     result.notification_webhook_enabled = normalizeBooleanSetting(result.notification_webhook_enabled);
     result.notification_webhook_method = normalizeNotificationWebhookMethod(result.notification_webhook_method);
@@ -801,7 +776,6 @@ export async function saveSiteOptions(db, updates) {
   siteOptions.resource_alert_rules = normalizeResourceAlertRules(siteOptions.resource_alert_rules);
   siteOptions.show_three_net_details = normalizeBooleanSetting(siteOptions.show_three_net_details, defaults.show_three_net_details);
   siteOptions.wss_report_enabled = normalizeBooleanSetting(siteOptions.wss_report_enabled, defaults.wss_report_enabled);
-  siteOptions.wss_report_hours = normalizeWssReportHours(siteOptions.wss_report_hours);
   siteOptions.frontend_ws_timeout_minutes = normalizeFrontendWsTimeoutMinutes(siteOptions.frontend_ws_timeout_minutes);
   siteOptions.notification_webhook_enabled = normalizeBooleanSetting(siteOptions.notification_webhook_enabled);
   siteOptions.notification_webhook_method = normalizeNotificationWebhookMethod(siteOptions.notification_webhook_method);
