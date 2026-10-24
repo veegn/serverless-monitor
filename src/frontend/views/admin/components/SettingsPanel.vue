@@ -1,8 +1,12 @@
 <template>
   <div id="tab-settings" class="tab-content" :class="{ active: activeTab === 'settings' }">
     <div class="settings-grid">
+      <!-- 1. 站点与外观设置 (Appearance & Site Identity) -->
       <div class="settings-section" v-if="currentOrigin === selectedApiBase">
-        <div class="section-title"><span>▸</span> {{ trans.appearance }}</div>
+        <div class="section-title">
+          <AppIcon name="globe" :size="16" />
+          <span>{{ trans.appearance }}</span>
+        </div>
 
         <div class="form-row">
           <div class="form-group flex-1">
@@ -11,38 +15,16 @@
           </div>
 
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.displayMode }}</label>
-            <select v-model="settings.display_mode" class="form-select">
-              <option value="bar">{{ trans.displayModeBar }}</option>
-              <option value="ring">{{ trans.displayModeRing }}</option>
-              <option value="table">{{ trans.displayModeTable }}</option>
-            </select>
+            <label class="form-label">{{ trans.publicAccess }}</label>
+            <div class="checkbox-item" style="padding-top: 4px;">
+              <input type="checkbox" id="cfg_is_public" v-model="settings.is_public">
+              <label for="cfg_is_public"><b>{{ trans.publicAccess }}</b></label>
+            </div>
           </div>
         </div>
 
         <div class="form-row">
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.defaultTheme }}</label>
-            <select v-model="settings.preferred_theme" class="form-select">
-              <option value="auto">{{ trans.themeAuto }}</option>
-              <option value="dark">{{ trans.themeDark }}</option>
-              <option value="light">{{ trans.themeLight }}</option>
-            </select>
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.defaultLanguage }}</label>
-            <select v-model="settings.default_language" class="form-select">
-              <option value="auto">{{ trans.languageAuto }}</option>
-              <option value="zh">{{ trans.languageChinese }}</option>
-              <option value="en">{{ trans.languageEnglish }}</option>
-              <option value="es">{{ trans.languageSpanish }}</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group ">
             <label class="form-label">
               {{ trans.bgImage }}
               <HelpTooltip :text="trans.remoteImageTip" />
@@ -50,14 +32,16 @@
             <div class="flex" style="gap:8px;">
               <input type="text" v-model="settings.custom_bg" class="form-input flex-1" placeholder="https://...">
               <div class="upload-btn-wrapper">
-                <button class="btn btn-margin-0">📁 {{ trans.upload }}</button>
+                <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
+                  <AppIcon name="upload" :size="14" /> {{ trans.upload }}
+                </button>
                 <input type="file" accept="image/*" @change="$emit('upload-bg', $event)">
               </div>
             </div>
             <img v-if="settings.custom_bg" :src="settings.custom_bg" class="bg-preview">
           </div>
 
-          <div class="form-group">
+          <div class="form-group flex-1">
             <label class="form-label">
               {{ trans.mobileBgImage }}
               <HelpTooltip :text="trans.remoteImageTip" />
@@ -65,14 +49,16 @@
             <div class="flex" style="gap:8px;">
               <input type="text" v-model="settings.custom_bg_mobile" class="form-input flex-1" placeholder="https://...">
               <div class="upload-btn-wrapper">
-                <button class="btn btn-margin-0">📁 {{ trans.upload }}</button>
+                <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
+                  <AppIcon name="upload" :size="14" /> {{ trans.upload }}
+                </button>
                 <input type="file" accept="image/*" @change="$emit('upload-bg-mobile', $event)">
               </div>
             </div>
             <img v-if="settings.custom_bg_mobile" :src="settings.custom_bg_mobile" class="bg-preview">
           </div>
 
-          <div class="form-group">
+          <div class="form-group flex-1">
             <label class="form-label">
               {{ trans.favicon }}
               <HelpTooltip :text="trans.remoteImageTip" />
@@ -80,7 +66,9 @@
             <div class="flex" style="gap:8px;">
               <input type="text" v-model="settings.favicon" class="form-input flex-1" placeholder="https://...">
               <div class="upload-btn-wrapper">
-                <button class="btn btn-margin-0">📁 {{ trans.upload }}</button>
+                <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
+                  <AppIcon name="upload" :size="14" /> {{ trans.upload }}
+                </button>
                 <input type="file" accept="image/*,.ico" @change="$emit('upload-favicon', $event)">
               </div>
             </div>
@@ -131,44 +119,47 @@
               {{ trans.themeOptions }}
               <HelpTooltip :text="trans.themeOptionsTip" />
             </label>
-            <textarea v-model="settings.theme_options" class="form-textarea" rows="5" placeholder='{"mikus":1}'></textarea>
+            <textarea v-model="settings.theme_options" class="form-textarea" rows="3" placeholder='{"mikus":1}'></textarea>
           </div>
         </div>
       </div>
 
+      <!-- 2. 监控与展示配置 (Display & Monitoring Options) -->
       <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.displayOptions }}</div>
+        <div class="section-title">
+          <AppIcon name="gauge" :size="16" />
+          <span>{{ trans.displayOptions }}</span>
+        </div>
 
         <div class="form-row">
           <div class="form-group flex-1 checkbox-item">
-            <input type="checkbox" id="cfg_is_public" v-model="settings.is_public">
-            <label><b>{{ trans.publicAccess }}</b></label>
-          </div>
-
-          <div class="form-group flex-1 checkbox-item">
             <input type="checkbox" id="cfg_show_price" v-model="settings.show_price">
-            <label>{{ trans.showPrice }}</label>
+            <label for="cfg_show_price">{{ trans.showPrice }}</label>
           </div>
 
           <div class="form-group flex-1 checkbox-item">
             <input type="checkbox" id="cfg_show_expire" v-model="settings.show_expire">
-            <label>{{ trans.showExpire }}</label>
+            <label for="cfg_show_expire">{{ trans.showExpire }}</label>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1 checkbox-item">
+            <input type="checkbox" id="cfg_show_tf" v-model="settings.show_tf">
+            <label for="cfg_show_tf">{{ trans.showTf }}</label>
+          </div>
+
+          <div class="form-group flex-1 checkbox-item">
+            <input type="checkbox" id="cfg_show_three_net_details" v-model="settings.show_three_net_details">
+            <label for="cfg_show_three_net_details">{{ trans.showThreeNetDetails }}</label>
           </div>
         </div>
 
         <div class="form-row">
           <div class="form-group flex-1 checkbox-item">
             <input type="checkbox" id="cfg_wss_report_enabled" v-model="settings.wss_report_enabled">
-            <label><b>{{ trans.wssReportEnabled }}</b></label>
+            <label for="cfg_wss_report_enabled"><b>{{ trans.wssReportEnabled }}</b></label>
             <HelpTooltip :text="trans.wssReportTip" />
-          </div>
-          <div class="form-group flex-1 checkbox-item">
-            <input type="checkbox" id="cfg_show_tf" v-model="settings.show_tf">
-            <label>{{ trans.showTf }}</label>
-          </div>
-          <div class="form-group flex-1 checkbox-item">
-            <input type="checkbox" id="cfg_show_three_net_details" v-model="settings.show_three_net_details">
-            <label>{{ trans.showThreeNetDetails }}</label>
           </div>
         </div>
 
@@ -200,8 +191,296 @@
         </div>
       </div>
 
+      <!-- 3. 安全防护设置 (Security Settings) -->
       <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.notifications }}</div>
+        <div class="section-title">
+          <AppIcon name="shield" :size="16" />
+          <span>{{ trans.securitySettings }}</span>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <div class="checkbox-item">
+              <input type="checkbox" id="cfg_turnstile_enabled" v-model="settings.turnstile_enabled">
+              <label for="cfg_turnstile_enabled"><b>{{ trans.enableTurnstile }}</b></label>
+            </div>
+          </div>
+          <div class="form-group flex-1">
+            <div class="checkbox-item">
+              <input type="checkbox" id="cfg_turnstile_login_enabled" v-model="settings.turnstile_login_enabled">
+              <label for="cfg_turnstile_login_enabled">{{ trans.enableTurnstileLogin }}</label>
+              <HelpTooltip :text="trans.turnstileLoginTip" />
+            </div>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label class="form-label">
+              {{ trans.turnstileSiteKey }}
+              <HelpTooltip :text="trans.turnstileTip" />
+            </label>
+            <input type="text" name="turnstile_site_key" autocomplete="off" v-model="settings.turnstile_site_key" class="form-input" :placeholder="trans.turnstileSiteKeyPlaceholder">
+          </div>
+
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.turnstileSecretKey }}</label>
+            <div class="password-input-wrapper">
+              <input type="text" name="turnstile_secret_key" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.turnstile_secret_key" :class="['form-input', { 'secret-input-masked': !passwordVisible.turnstileSecret }]" :placeholder="trans.turnstileSecretKeyPlaceholder">
+              <button type="button" class="password-toggle" @click="$emit('toggle-password', 'turnstileSecret')">
+                <AppIcon :name="passwordVisible.turnstileSecret ? 'eye-off' : 'eye'" :size="15" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group mt-3">
+          <label class="form-label">
+            {{ trans.jwtSecret }}
+            <HelpTooltip :text="trans.jwtSecretTip" />
+          </label>
+          <div class="password-input-wrapper">
+            <input type="text" name="jwt_secret" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.jwt_secret" :class="['form-input', { 'secret-input-masked': !passwordVisible.jwtSecret }]" placeholder="••••••••••••••••••••••••••••••••">
+            <button type="button" class="password-toggle" @click="$emit('toggle-password', 'jwtSecret')">
+              <AppIcon :name="passwordVisible.jwtSecret ? 'eye-off' : 'eye'" :size="15" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. 探针自动注册 (Auto Register Settings) -->
+      <div class="settings-section">
+        <div class="section-title">
+          <AppIcon name="radio" :size="16" />
+          <span>{{ trans.autoRegisterSettings || '自动注册设置' }}</span>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <div class="checkbox-item" style="padding-top: 4px;">
+              <input type="checkbox" id="cfg_auto_register_enabled" v-model="settings.auto_register_enabled">
+              <label for="cfg_auto_register_enabled"><b>{{ trans.enableAutoRegister || '启用探针自动注册' }}</b></label>
+              <HelpTooltip :text="trans.autoRegisterTip || '开启后，探针使用有效授权 Key 上报未录入的节点时，将自动入库上线并分配监控分区。'" />
+            </div>
+          </div>
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.autoRegisterDefaultGroup || '默认服务器分组' }}</label>
+            <input type="text" v-model="settings.auto_register_default_group" class="form-input" placeholder="Default">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label class="form-label">
+              {{ trans.autoRegisterToken || '授权 Key (有效期 30 分钟)' }}
+              <HelpTooltip :text="trans.autoRegisterTokenTip || '用于探针自动注册时的身份验证，有效期 30 分钟。过期后新节点将无法注册，需点击重新生成。'" />
+            </label>
+            <div class="password-input-wrapper">
+              <input
+                type="text"
+                readonly
+                :value="settings.auto_register_token || ''"
+                :class="['form-input', { 'secret-input-masked': !passwordVisible.autoRegisterToken }]"
+                :placeholder="trans.autoRegisterTokenNotGenerated || '未生成授权 Key'"
+              >
+              <button
+                type="button"
+                class="password-toggle"
+                @click="$emit('toggle-password', 'autoRegisterToken')"
+              >
+                <AppIcon :name="passwordVisible.autoRegisterToken ? 'eye-off' : 'eye'" :size="15" />
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.autoRegisterTokenExpires || '授权状态' }}</label>
+            <div class="flex" style="gap: 8px; align-items: center; min-height: 38px;">
+              <div class="flex-1">
+                <span v-if="tokenStatus.isExpired" class="config-badge is-disabled" style="font-size: 12px; padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px;">
+                  <AppIcon name="alert-triangle" :size="13" /> {{ trans.autoRegisterTokenExpired || '已过期（需重新生成）' }}
+                </span>
+                <span v-else-if="tokenStatus.isValid" class="config-badge is-enabled" style="font-size: 12px; padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px;">
+                  <AppIcon name="check-circle" :size="13" /> {{ trans.autoRegisterTokenValid || '有效至' }}: {{ tokenStatus.formattedExpires }} ({{ tokenStatus.remainingMinutes }})
+                </span>
+                <span v-else class="config-badge" style="background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border-color); font-size: 12px; padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px;">
+                  <AppIcon name="circle" :size="13" /> {{ trans.autoRegisterTokenNotGenerated || '未生成' }}
+                </span>
+              </div>
+              <button
+                type="button"
+                class="btn btn-blue"
+                style="margin: 0; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;"
+                :disabled="generatingAutoRegisterToken"
+                @click="$emit('generate-auto-register-token')"
+              >
+                <AppIcon :name="generatingAutoRegisterToken ? 'spinner' : 'key'" :size="14" />
+                {{ settings.auto_register_token ? (trans.regenerateToken || '重新生成') : (trans.generateToken || '生成授权 Key') }}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="settings.auto_register_enabled" class="form-row mt-2">
+          <div class="form-group flex-1">
+            <div class="flex-center-gap-sm" style="justify-content: flex-start; gap: 12px; align-items: center;">
+              <button
+                type="button"
+                class="btn btn-primary"
+                style="margin: 0; display: inline-flex; align-items: center; gap: 6px;"
+                :disabled="tokenStatus.isExpired || !settings.auto_register_token"
+                @click="$emit('open-auto-discovery')"
+              >
+                <AppIcon name="terminal" :size="14" /> {{ trans.autoDiscoveryTitle || '生成自动注册部署脚本' }}
+              </button>
+              <span v-if="tokenStatus.isExpired" class="text-sm text-danger" style="display: inline-flex; align-items: center; gap: 4px;">
+                <AppIcon name="alert-triangle" :size="14" /> {{ trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key' }}
+              </span>
+              <span v-else-if="!settings.auto_register_token" class="text-sm text-muted" style="display: inline-flex; align-items: center; gap: 4px;">
+                <AppIcon name="info" :size="14" /> {{ trans.autoRegisterTokenNotGenerated || '请先生成授权 Key 即可生成部署脚本' }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5. 管理员登录设置 (Admin Login Settings) -->
+      <div class="settings-section">
+        <div class="section-title">
+          <AppIcon name="user" :size="16" />
+          <span>{{ trans.adminLoginSettings }}</span>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">{{ trans.username }}</label>
+          <input
+            type="text"
+            name="settings_admin_user"
+            autocomplete="off"
+            data-lpignore="true"
+            data-1p-ignore="true"
+            data-bwignore="true"
+            data-form-type="other"
+            v-model="settings.username"
+            class="form-input"
+            :placeholder="trans.usernamePlaceholder"
+          >
+        </div>
+
+        <div class="inline-help-action mb-3">
+          <button type="button" class="btn btn-sm" @click="$emit('toggle-admin-password-change')">
+            {{ changeAdminPassword ? trans.cancelPasswordChange : trans.changePassword }}
+          </button>
+          <HelpTooltip :text="trans.apiSecretTip" />
+        </div>
+
+        <div v-if="changeAdminPassword" class="form-row">
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.password }}</label>
+            <div class="password-input-wrapper">
+              <input
+                :type="passwordVisible.password ? 'text' : 'password'"
+                name="settings_admin_passphrase"
+                autocomplete="off"
+                data-lpignore="true"
+                data-1p-ignore="true"
+                data-bwignore="true"
+                data-form-type="other"
+                v-model="settings.password"
+                class="form-input"
+                :placeholder="settings.password_configured ? '••••••••' : ''"
+              >
+              <button type="button" class="password-toggle" @click="$emit('toggle-password', 'password')">
+                <AppIcon :name="passwordVisible.password ? 'eye-off' : 'eye'" :size="15" />
+              </button>
+            </div>
+          </div>
+
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.confirmPassword }}</label>
+            <div class="password-input-wrapper">
+              <input
+                :type="passwordVisible.confirmPassword ? 'text' : 'password'"
+                name="settings_admin_passphrase_confirm"
+                autocomplete="off"
+                data-lpignore="true"
+                data-1p-ignore="true"
+                data-bwignore="true"
+                data-form-type="other"
+                v-model="settings.confirm_password"
+                class="form-input"
+                :placeholder="settings.password_configured ? '••••••••' : ''"
+              >
+              <button type="button" class="password-toggle" @click="$emit('toggle-password', 'confirmPassword')">
+                <AppIcon :name="passwordVisible.confirmPassword ? 'eye-off' : 'eye'" :size="15" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 6. 网络探测节点 (Ping Nodes) -->
+      <div class="settings-section">
+        <div class="section-title">
+          <AppIcon name="radio" :size="16" />
+          <span>{{ trans.pingNodes }}</span>
+        </div>
+
+        <div class="ping-node-grid">
+          <div class="ping-node-item">
+            <div class="ping-node-fields">
+              <input type="text" v-model.trim="settings.custom_ct_name" class="form-input ping-node-name">
+              <span class="ping-node-arrow">→</span>
+              <input type="text" v-model.trim="settings.custom_ct" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_ct }]" placeholder="gd-ct-dualstack.ip.zstaticcdn.com">
+            </div>
+            <p v-if="pingNodeErrors.custom_ct" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_ct }}</p>
+          </div>
+
+          <div class="ping-node-item">
+            <div class="ping-node-fields">
+              <input type="text" v-model.trim="settings.custom_cu_name" class="form-input ping-node-name">
+              <span class="ping-node-arrow">→</span>
+              <input type="text" v-model.trim="settings.custom_cu" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cu }]" placeholder="gd-cu-dualstack.ip.zstaticcdn.com">
+            </div>
+            <p v-if="pingNodeErrors.custom_cu" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cu }}</p>
+          </div>
+
+          <div class="ping-node-item">
+            <div class="ping-node-fields">
+              <input type="text" v-model.trim="settings.custom_cm_name" class="form-input ping-node-name">
+              <span class="ping-node-arrow">→</span>
+              <input type="text" v-model.trim="settings.custom_cm" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cm }]" placeholder="gd-cm-dualstack.ip.zstaticcdn.com">
+            </div>
+            <p v-if="pingNodeErrors.custom_cm" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cm }}</p>
+          </div>
+
+          <div class="ping-node-item">
+            <div class="ping-node-fields">
+              <input type="text" v-model.trim="settings.custom_bd_name" class="form-input ping-node-name">
+              <span class="ping-node-arrow">→</span>
+              <input type="text" v-model.trim="settings.custom_bd" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_bd }]" placeholder="ip.zstaticcdn.com">
+            </div>
+            <p v-if="pingNodeErrors.custom_bd" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_bd }}</p>
+          </div>
+
+          <div v-for="field in ['node_1', 'node_2', 'node_3', 'node_4']" :key="field" class="ping-node-item">
+            <div class="ping-node-fields">
+              <input type="text" v-model.trim="settings[`${field}_name`]" class="form-input ping-node-name">
+              <span class="ping-node-arrow">→</span>
+              <input type="text" v-model.trim="settings[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" placeholder="host[:port] / [IPv6]:port">
+            </div>
+            <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 7. 告警与通知推送 (Notifications & Resource Alerts) -->
+      <div class="settings-section full-width">
+        <div class="section-title">
+          <AppIcon name="bell" :size="16" />
+          <span>{{ trans.notifications }}</span>
+        </div>
+
         <div class="form-row">
           <div class="form-group flex-1">
             <label class="form-label">{{ trans.offlineAlert }}</label>
@@ -245,7 +524,7 @@
             <div class="password-input-wrapper">
               <input type="text" name="tg_bot_token" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.tg_bot_token" :class="['form-input', { 'secret-input-masked': !passwordVisible.tgBotToken }]" placeholder="Bot Token or Webhook URL">
               <button type="button" class="password-toggle" @click="$emit('toggle-password', 'tgBotToken')">
-                {{ passwordVisible.tgBotToken ? '🙈' : '👁️' }}
+                <AppIcon :name="passwordVisible.tgBotToken ? 'eye-off' : 'eye'" :size="15" />
               </button>
             </div>
           </div>
@@ -255,7 +534,7 @@
             <div class="password-input-wrapper">
               <input type="text" name="tg_chat_id" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.tg_chat_id" :class="['form-input', { 'secret-input-masked': !passwordVisible.tgChatId }]" placeholder="Optional Chat ID">
               <button type="button" class="password-toggle" @click="$emit('toggle-password', 'tgChatId')">
-                {{ passwordVisible.tgChatId ? '🙈' : '👁️' }}
+                <AppIcon :name="passwordVisible.tgChatId ? 'eye-off' : 'eye'" :size="15" />
               </button>
             </div>
           </div>
@@ -308,7 +587,7 @@
               <div class="password-input-wrapper">
                 <input type="text" name="smtp_password" autocomplete="new-password" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="smtpConfig.password" @blur="validateSmtpField('password')" :class="['form-input', { 'secret-input-masked': !passwordVisible.smtpPassword }]" placeholder="SMTP password / app password">
                 <button type="button" class="password-toggle" @click="$emit('toggle-password', 'smtpPassword')">
-                  {{ passwordVisible.smtpPassword ? '🙈' : '👁️' }}
+                  <AppIcon :name="passwordVisible.smtpPassword ? 'eye-off' : 'eye'" :size="15" />
                 </button>
               </div>
               <p v-if="smtpErrors.password" class="text-danger text-sm">{{ smtpErrors.password }}</p>
@@ -352,7 +631,7 @@
                   placeholder="https://example.com/webhook"
                 >
                 <button type="button" class="password-toggle" @click="$emit('toggle-password', 'notificationWebhookUrl')">
-                  {{ passwordVisible.notificationWebhookUrl ? '🙈' : '👁️' }}
+                  <AppIcon :name="passwordVisible.notificationWebhookUrl ? 'eye-off' : 'eye'" :size="15" />
                 </button>
               </div>
             </div>
@@ -464,7 +743,10 @@
 
         <div class="form-row">
           <div class="form-group flex-1">
-            <button type="button" @click="$emit('send-test-notification')" class="btn btn-primary" :disabled="testNotificationLoading">{{ testNotificationLoading ? '⏳' : '📨' }} {{ trans.sendTestNotification }}</button>
+            <button type="button" @click="$emit('send-test-notification')" class="btn btn-primary" :disabled="testNotificationLoading" style="display: inline-flex; align-items: center; gap: 6px;">
+              <AppIcon :name="testNotificationLoading ? 'spinner' : 'send'" :size="15" />
+              <span>{{ trans.sendTestNotification }}</span>
+            </button>
           </div>
         </div>
 
@@ -481,7 +763,10 @@
             <span class="resource-alert-toggle-text">{{ resourceAlertToggleText }}</span>
           </button>
           <HelpTooltip :text="trans.resourceAlertTip" />
-          <button type="button" class="btn btn-primary btn-sm" @click="addResourceAlertRule">+ {{ trans.resourceAlertAddRule }}</button>
+          <button type="button" class="btn btn-primary btn-sm" @click="addResourceAlertRule" style="display: inline-flex; align-items: center; gap: 4px;">
+            <AppIcon name="plus" :size="13" />
+            <span>{{ trans.resourceAlertAddRule }}</span>
+          </button>
         </div>
 
         <div v-if="resourceAlertExpanded" class="resource-alert-body">
@@ -559,299 +844,60 @@
           </div>
         </div>
       </div>
-
-      <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.securitySettings }}</div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <div class="checkbox-item">
-              <input type="checkbox" id="cfg_turnstile_enabled" v-model="settings.turnstile_enabled">
-              <label><b>{{ trans.enableTurnstile }}</b></label>
-            </div>
-            </div>
-          <div class="form-group flex-1">
-            <div class="checkbox-item">
-              <input type="checkbox" id="cfg_turnstile_login_enabled" v-model="settings.turnstile_login_enabled">
-              <label>{{ trans.enableTurnstileLogin }}</label>
-              <HelpTooltip :text="trans.turnstileLoginTip" />
-            </div>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.turnstileSiteKey }}
-              <HelpTooltip :text="trans.turnstileTip" />
-            </label>
-            <input type="text" name="turnstile_site_key" autocomplete="off" v-model="settings.turnstile_site_key" class="form-input" :placeholder="trans.turnstileSiteKeyPlaceholder">
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.turnstileSecretKey }}</label>
-            <div class="password-input-wrapper">
-              <input type="text" name="turnstile_secret_key" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.turnstile_secret_key" :class="['form-input', { 'secret-input-masked': !passwordVisible.turnstileSecret }]" :placeholder="trans.turnstileSecretKeyPlaceholder">
-              <button type="button" class="password-toggle" @click="$emit('toggle-password', 'turnstileSecret')">
-                {{ passwordVisible.turnstileSecret ? '🙈' : '👁️' }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div class="form-group mt-4">
-          <label class="form-label">
-            {{ trans.jwtSecret }}
-            <HelpTooltip :text="trans.jwtSecretTip" />
-          </label>
-          <div class="password-input-wrapper">
-            <input type="text" name="jwt_secret" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.jwt_secret" :class="['form-input', { 'secret-input-masked': !passwordVisible.jwtSecret }]" placeholder="••••••••••••••••••••••••••••••••">
-            <button type="button" class="password-toggle" @click="$emit('toggle-password', 'jwtSecret')">
-              {{ passwordVisible.jwtSecret ? '🙈' : '👁️' }}
-            </button>
-          </div>
-        </div>
-
-      </div>
-
-      <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.autoRegisterSettings || '自动注册设置' }}</div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <div class="checkbox-item">
-              <input type="checkbox" id="cfg_auto_register_enabled" v-model="settings.auto_register_enabled">
-              <label for="cfg_auto_register_enabled"><b>{{ trans.enableAutoRegister || '启用探针自动注册' }}</b></label>
-              <HelpTooltip :text="trans.autoRegisterTip || '开启后，探针使用有效授权 Key 上报未录入的节点时，将自动入库上线并分配监控分区。'" />
-            </div>
-          </div>
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.autoRegisterDefaultGroup || '默认服务器分组' }}</label>
-            <input type="text" v-model="settings.auto_register_default_group" class="form-input" placeholder="Default">
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.autoRegisterToken || '授权 Key (有效期 30 分钟)' }}
-              <HelpTooltip :text="trans.autoRegisterTokenTip || '用于探针自动注册时的身份验证，有效期 30 分钟。过期后新节点将无法注册，需点击重新生成。'" />
-            </label>
-            <div class="password-input-wrapper">
-              <input
-                type="text"
-                readonly
-                :value="settings.auto_register_token || ''"
-                :class="['form-input', { 'secret-input-masked': !passwordVisible.autoRegisterToken }]"
-                :placeholder="trans.autoRegisterTokenNotGenerated || '未生成授权 Key'"
-              >
-              <button
-                type="button"
-                class="password-toggle"
-                @click="$emit('toggle-password', 'autoRegisterToken')"
-              >
-                {{ passwordVisible.autoRegisterToken ? '🙈' : '👁️' }}
-              </button>
-            </div>
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.autoRegisterTokenExpires || '授权状态' }}</label>
-            <div class="flex" style="gap: 8px; align-items: center; min-height: 38px;">
-              <div class="flex-1">
-                <span v-if="tokenStatus.isExpired" class="config-badge is-disabled" style="font-size: 12px; padding: 4px 8px;">
-                  ⚠️ {{ trans.autoRegisterTokenExpired || '已过期（需重新生成）' }}
-                </span>
-                <span v-else-if="tokenStatus.isValid" class="config-badge is-enabled" style="font-size: 12px; padding: 4px 8px;">
-                  ✅ {{ trans.autoRegisterTokenValid || '有效至' }}: {{ tokenStatus.formattedExpires }} ({{ tokenStatus.remainingMinutes }})
-                </span>
-                <span v-else class="config-badge" style="background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border-color); font-size: 12px; padding: 4px 8px;">
-                  ⚪ {{ trans.autoRegisterTokenNotGenerated || '未生成' }}
-                </span>
-              </div>
-              <button
-                type="button"
-                class="btn btn-blue"
-                style="margin: 0; white-space: nowrap;"
-                :disabled="generatingAutoRegisterToken"
-                @click="$emit('generate-auto-register-token')"
-              >
-                {{ generatingAutoRegisterToken ? '⏳' : '🔑' }} {{ settings.auto_register_token ? (trans.regenerateToken || '重新生成') : (trans.generateToken || '生成授权 Key') }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="settings.auto_register_enabled" class="form-row mt-2">
-          <div class="form-group flex-1">
-            <div class="flex-center-gap-sm" style="justify-content: flex-start; gap: 12px; align-items: center;">
-              <button
-                type="button"
-                class="btn btn-primary"
-                style="margin: 0;"
-                :disabled="tokenStatus.isExpired || !settings.auto_register_token"
-                @click="$emit('open-auto-discovery')"
-              >
-                ⚡ {{ trans.autoDiscoveryTitle || '生成自动注册部署脚本' }}
-              </button>
-              <span v-if="tokenStatus.isExpired" class="text-sm text-danger">
-                ⚠️ {{ trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key' }}
-              </span>
-              <span v-else-if="!settings.auto_register_token" class="text-sm text-muted">
-                💡 {{ trans.autoRegisterTokenNotGenerated || '请先生成授权 Key 即可生成部署脚本' }}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.adminLoginSettings }}</div>
-
-        <div class="form-group">
-          <label class="form-label">{{ trans.username }}</label>
-          <input
-            type="text"
-            name="settings_admin_user"
-            autocomplete="off"
-            data-lpignore="true"
-            data-1p-ignore="true"
-            data-bwignore="true"
-            data-form-type="other"
-            v-model="settings.username"
-            class="form-input"
-            :placeholder="trans.usernamePlaceholder"
-          >
-        </div>
-
-        <div class="inline-help-action mb-3">
-          <button type="button" class="btn btn-sm" @click="$emit('toggle-admin-password-change')">
-            {{ changeAdminPassword ? trans.cancelPasswordChange : trans.changePassword }}
-          </button>
-          <HelpTooltip :text="trans.apiSecretTip" />
-        </div>
-
-        <div v-if="changeAdminPassword" class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.password }}</label>
-            <div class="password-input-wrapper">
-              <input
-                :type="passwordVisible.password ? 'text' : 'password'"
-                name="settings_admin_passphrase"
-                autocomplete="off"
-                data-lpignore="true"
-                data-1p-ignore="true"
-                data-bwignore="true"
-                data-form-type="other"
-                v-model="settings.password"
-                class="form-input"
-                :placeholder="settings.password_configured ? '••••••••' : ''"
-              >
-              <button type="button" class="password-toggle" @click="$emit('toggle-password', 'password')">
-                {{ passwordVisible.password ? '🙈' : '👁️' }}
-              </button>
-            </div>
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.confirmPassword }}</label>
-            <div class="password-input-wrapper">
-              <input
-                :type="passwordVisible.confirmPassword ? 'text' : 'password'"
-                name="settings_admin_passphrase_confirm"
-                autocomplete="off"
-                data-lpignore="true"
-                data-1p-ignore="true"
-                data-bwignore="true"
-                data-form-type="other"
-                v-model="settings.confirm_password"
-                class="form-input"
-                :placeholder="settings.password_configured ? '••••••••' : ''"
-              >
-              <button type="button" class="password-toggle" @click="$emit('toggle-password', 'confirmPassword')">
-                {{ passwordVisible.confirmPassword ? '🙈' : '👁️' }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-      </div>
-
-      <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.pingNodes }}</div>
-
-        <div class="ping-node-grid">
-          <div class="ping-node-item">
-            <div class="ping-node-fields"><input type="text" v-model.trim="settings.custom_ct_name" class="form-input ping-node-name"><span class="ping-node-arrow">→</span>
-            <input type="text" v-model.trim="settings.custom_ct" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_ct }]" placeholder="gd-ct-dualstack.ip.zstaticcdn.com">
-            </div><p v-if="pingNodeErrors.custom_ct" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_ct }}</p>
-          </div>
-
-          <div class="ping-node-item">
-            <div class="ping-node-fields"><input type="text" v-model.trim="settings.custom_cu_name" class="form-input ping-node-name"><span class="ping-node-arrow">→</span>
-            <input type="text" v-model.trim="settings.custom_cu" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cu }]" placeholder="gd-cu-dualstack.ip.zstaticcdn.com">
-            </div><p v-if="pingNodeErrors.custom_cu" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cu }}</p>
-          </div>
-        </div>
-        <div class="ping-node-grid">
-          <div class="ping-node-item">
-            <div class="ping-node-fields"><input type="text" v-model.trim="settings.custom_cm_name" class="form-input ping-node-name"><span class="ping-node-arrow">→</span>
-            <input type="text" v-model.trim="settings.custom_cm" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cm }]" placeholder="gd-cm-dualstack.ip.zstaticcdn.com">
-            </div><p v-if="pingNodeErrors.custom_cm" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cm }}</p>
-          </div>
-
-          <div class="ping-node-item">
-            <div class="ping-node-fields"><input type="text" v-model.trim="settings.custom_bd_name" class="form-input ping-node-name"><span class="ping-node-arrow">→</span>
-            <input type="text" v-model.trim="settings.custom_bd" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_bd }]" placeholder="ip.zstaticcdn.com">
-            </div><p v-if="pingNodeErrors.custom_bd" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_bd }}</p>
-          </div>
-        </div>
-        <div class="ping-node-grid">
-          <div v-for="field in ['node_1', 'node_2']" :key="field" class="ping-node-item">
-            <div class="ping-node-fields"><input type="text" v-model.trim="settings[`${field}_name`]" class="form-input ping-node-name"><span class="ping-node-arrow">→</span><input type="text" v-model.trim="settings[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" placeholder="host[:port] / [IPv6]:port"></div>
-            <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
-          </div>
-        </div>
-        <div class="ping-node-grid">
-          <div v-for="field in ['node_3', 'node_4']" :key="field" class="ping-node-item">
-            <div class="ping-node-fields"><input type="text" v-model.trim="settings[`${field}_name`]" class="form-input ping-node-name"><span class="ping-node-arrow">→</span><input type="text" v-model.trim="settings[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" placeholder="host[:port] / [IPv6]:port"></div>
-            <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
-          </div>
-        </div>
-      </div>
     </div>
 
+    <!-- 保存设置按钮 -->
     <div class="text-right mt-5 mb-5">
-      <button @click="$emit('save-settings')" class="btn btn-primary btn-lg" :disabled="saving || hasPingNodeErrors">{{ saving ? '⏳' : '💾' }} {{ saving ? trans.saving : trans.saveConfig }}</button>
+      <button @click="$emit('save-settings')" class="btn btn-primary btn-lg" :disabled="saving || hasPingNodeErrors" style="display: inline-flex; align-items: center; gap: 8px;">
+        <AppIcon :name="saving ? 'spinner' : 'save'" :size="16" />
+        <span>{{ saving ? trans.saving : trans.saveConfig }}</span>
+      </button>
     </div>
 
+    <!-- 系统数据维护 (DB Management & Export/Import) -->
     <div class="settings-grid mt-4">
       <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.dbManagement }}</div>
+        <div class="section-title">
+          <AppIcon name="database" :size="16" />
+          <span>{{ trans.dbManagement }}</span>
+        </div>
         <div class="form-row">
           <div class="form-group flex-1">
             <label class="form-label">{{ trans.upgradeDatabase }}</label>
             <p class="text-muted mb-2 text-sm">{{ trans.upgradeDesc }}</p>
-            <button type="button" @click="$emit('open-db-modal', 'upgrade')" class="btn btn-primary btn-lg" :disabled="dbLoading">⬆️ {{ trans.upgradeDatabase }}</button>
+            <button type="button" @click="$emit('open-db-modal', 'upgrade')" class="btn btn-primary btn-lg" :disabled="dbLoading" style="display: inline-flex; align-items: center; gap: 6px;">
+              <AppIcon name="arrow-up" :size="15" />
+              <span>{{ trans.upgradeDatabase }}</span>
+            </button>
           </div>
 
           <div class="form-group flex-1">
-            <label class="form-label danger-label">⚠️ {{ trans.clearHistory }}</label>
+            <label class="form-label danger-label" style="display: inline-flex; align-items: center; gap: 4px;">
+              <AppIcon name="alert-triangle" :size="14" />
+              <span>{{ trans.clearHistory }}</span>
+            </label>
             <p class="text-muted mb-2 text-sm">{{ trans.clearHistoryDesc }}</p>
-            <button type="button" @click="$emit('open-db-modal', 'clearHistory')" class="btn btn-red btn-lg" :disabled="dbLoading">🗑️ {{ trans.clearHistory }}</button>
+            <button type="button" @click="$emit('open-db-modal', 'clearHistory')" class="btn btn-red btn-lg" :disabled="dbLoading" style="display: inline-flex; align-items: center; gap: 6px;">
+              <AppIcon name="trash" :size="15" />
+              <span>{{ trans.clearHistory }}</span>
+            </button>
           </div>
         </div>
       </div>
 
       <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.exportServers }} / {{ trans.importServers }}</div>
+        <div class="section-title">
+          <AppIcon name="download" :size="16" />
+          <span>{{ trans.exportServers }} / {{ trans.importServers }}</span>
+        </div>
 
         <div class="form-row">
           <div class="form-group flex-1">
             <label class="form-label">{{ trans.exportServers }}</label>
             <p class="text-muted mb-2 text-sm">{{ trans.exportServersDesc }}</p>
-            <button type="button" @click="handleExport" class="btn btn-primary btn-lg" :disabled="dbLoading || exporting">
-              {{ exporting ? trans.exporting : '📤 ' + trans.exportServers }}
+            <button type="button" @click="handleExport" class="btn btn-primary btn-lg" :disabled="dbLoading || exporting" style="display: inline-flex; align-items: center; gap: 6px;">
+              <AppIcon :name="exporting ? 'spinner' : 'download'" :size="15" />
+              <span>{{ exporting ? trans.exporting : trans.exportServers }}</span>
             </button>
           </div>
 
@@ -865,8 +911,9 @@
               style="display: none"
               @change="handleFileSelect"
             >
-            <button type="button" @click="fileInput && fileInput.click()" class="btn btn-lg" :disabled="dbLoading || importing">
-              {{ importing ? trans.importing : '📥 ' + trans.importServers }}
+            <button type="button" @click="fileInput && fileInput.click()" class="btn btn-lg" :disabled="dbLoading || importing" style="display: inline-flex; align-items: center; gap: 6px;">
+              <AppIcon :name="importing ? 'spinner' : 'upload'" :size="15" />
+              <span>{{ importing ? trans.importing : trans.importServers }}</span>
             </button>
           </div>
         </div>
@@ -874,8 +921,9 @@
         <div v-if="importResult" class="mt-3">
           <div :class="importResult.success ? 'warning-box' : 'danger-box'" class="mb-2">
             <div class="flex-center-gap-sm">
-              <span :style="{ color: importResult.success ? 'var(--accent-green)' : 'var(--accent-red)', fontWeight: '600' }">
-                {{ importResult.success ? '✅' : '❌' }} {{ trans.importResult }}
+              <span :style="{ color: importResult.success ? 'var(--accent-green)' : 'var(--accent-red)', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '4px' }">
+                <AppIcon :name="importResult.success ? 'check-circle' : 'x-circle'" :size="15" />
+                {{ trans.importResult }}
               </span>
             </div>
             <div class="mt-2 text-sm">
@@ -889,32 +937,12 @@
         </div>
       </div>
     </div>
-
-    <div class="settings-section donation-section mt-4">
-      <div class="section-title"><span>▸</span> {{ trans.donationTitle }}</div>
-
-      <div class="donation-content">
-        <div class="donation-qr-card">
-          <img
-            class="donation-qr"
-            src="/donate/wechat-reward.jpg"
-            :alt="trans.donationQrAlt"
-          >
-          <div class="donation-qr-caption">{{ trans.donationWechat }}</div>
-        </div>
-
-        <div class="donation-copy">
-          <p>{{ trans.donationDesc }}</p>
-          <p class="donation-token">🪙 {{ trans.donationToken }}</p>
-          <p class="text-secondary text-sm">{{ trans.donationThanks }}</p>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import AppIcon from '../../../components/AppIcon.vue'
 import HelpTooltip from '../../../components/HelpTooltip.vue'
 import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../../utils/constants.js'
 import { PING_NODE_FIELDS, validatePingNode } from '../../../utils/pingNode.js'

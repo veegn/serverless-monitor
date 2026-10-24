@@ -315,7 +315,7 @@ const createEmptyMergedData = () => ({
     show_expire: true,
     show_tf: true,
     show_three_net_details: true,
-    display_mode: 'bar',
+    display_mode: 'ring',
     site_title: DEFAULT_SITE_TITLE,
     latency_window: {
       points: LATENCY_WINDOW.POINTS,

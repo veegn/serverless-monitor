@@ -14,7 +14,7 @@ export const DEFAULT_SERVER_CARD_CONFIG = {
     points: LATENCY_WINDOW.POINTS,
     hours: LATENCY_WINDOW.HOURS
   },
-  display_mode: 'bar'
+  display_mode: 'ring'
 }
 
 const THREE_NET_DEFS = [

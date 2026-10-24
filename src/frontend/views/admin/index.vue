@@ -686,7 +686,7 @@ const settings = ref({
   favicon: '',
   custom_head: '',
   custom_script: '',
-  display_mode: 'bar',
+  display_mode: 'ring',
   preferred_theme: 'auto',
   default_language: 'auto',
   theme_options: '{}',
@@ -1306,9 +1306,9 @@ const saveSettings = async () => {
       favicon: settings.value.favicon,
       custom_head: settings.value.custom_head,
       custom_script: settings.value.custom_script,
-      display_mode: normalizeDisplayMode(settings.value.display_mode),
-      preferred_theme: normalizePreferredThemeSetting(settings.value.preferred_theme),
-      default_language: normalizeDefaultLanguageSetting(settings.value.default_language),
+      display_mode: 'ring',
+      preferred_theme: 'auto',
+      default_language: 'auto',
       appearance_options: {
         theme_options: themeOptionsResult.value
       },

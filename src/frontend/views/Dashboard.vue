@@ -408,7 +408,7 @@ const sysConfig = ref({
   custom_cm_name: appConfig?.custom_cm_name || '移动',
   custom_bd_name: appConfig?.custom_bd_name || 'BGP',
   frontend_ws_timeout_minutes: normalizeLiveSocketTimeoutMinutes(appConfig?.frontend_ws_timeout_minutes),
-  display_mode: 'bar',
+  display_mode: 'ring',
   site_title: DEFAULT_SITE_TITLE,
   theme_options: normalizeThemeOptions(appConfig?.theme_options),
   latency_window: appConfig?.latency_window || {
@@ -417,7 +417,7 @@ const sysConfig = ref({
   }
 })
 const regionStats = ref({})
-const currentView = ref('bar')
+const currentView = ref('ring')
 const currentFilter = ref('all')
 const filterWrap = ref(null)
 const filterMeasure = ref(null)

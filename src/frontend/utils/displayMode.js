@@ -1,4 +1,4 @@
-export const DEFAULT_DISPLAY_MODE = 'bar'
+export const DEFAULT_DISPLAY_MODE = 'ring'
 export const ADMIN_DISPLAY_MODES = ['bar', 'ring', 'table']
 export const DASHBOARD_VIEWS = ['bar', 'ring', 'table', 'map']
 
