@@ -56,7 +56,7 @@ Compared with traditional controller-style monitoring tools, Serverless Monitor 
 - Practical feature coverage: realtime metrics, history charts, maps, offline notifications, resource alerts, expiration reminders, theme store, multi-language UI, and mobile support are built in.
 - Dynamic Agent config delivery: ping nodes, collect interval, report interval, network interfaces, traffic reset day, upload/download traffic correction, and similar parameters can be changed from the admin panel and picked up by the Agent later; Worker URL, `API_SECRET`, and the auto-update switch require running the install command again.
 - Non-root installation: Linux systems with `systemd --user` can run the Agent as a regular user, with files stored under `~/.cf-probe/`.
-- Clock-tolerant reporting: the Go Agent uses the Worker's HTTP `Date` response header to calibrate sample timestamps and `boot_time`, reducing the impact of wrong local server time on history charts; it does not change the system clock.
+- Clock-tolerant reporting: the Rust Agent uses the Worker's HTTP `Date` response header to calibrate sample timestamps and `boot_time`, reducing the impact of wrong local server time on history charts; it does not change the system clock.
 
 ## Features
 
@@ -67,7 +67,7 @@ Compared with traditional controller-style monitoring tools, Serverless Monitor 
 | Network quality | Latency and packet loss tracking for CT, CU, CM, and BGP nodes; when three-net details are enabled, the dashboard samples up to 20 real points from the last 2 hours of D1 history and caches them for 5 minutes |
 | Dashboard views | Bar chart, ring chart, table, and map views for desktop and mobile |
 | Admin panel | Server CRUD, drag sorting, hidden servers, import/export, batch delete, database maintenance |
-| Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows; Go Agent by default, Shell/PowerShell still available |
+| Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows; Rust high-performance Agent |
 | Realtime push | Durable Objects + WebSocket refresh the UI immediately after Agent reports |
 | Alerts | Offline alerts, recovery notices, expiration reminders, resource load rules |
 | Multi-language | Built-in Chinese, English, and Latin American Spanish frontend switch; notifications in Chinese, English, or Spanish; Chinese and English documentation |
@@ -81,7 +81,7 @@ Compared with traditional controller-style monitoring tools, Serverless Monitor 
 
 ```mermaid
 flowchart LR
-  Agent["Server Agent<br/>Go / Shell / PowerShell"] -->|"POST /update"| Worker["Cloudflare Worker"]
+  Agent["Server Agent<br/>Rust"] -->|"POST /update"| Worker["Cloudflare Worker"]
   Worker --> D1["Cloudflare D1<br/>servers / settings / history"]
   Worker <--> DO["Durable Object<br/>WebSocket broadcast"]
   Worker --> Assets["Vue Dashboard<br/>Admin Panel"]
@@ -109,7 +109,7 @@ Recent changes:
 - `2.8.0`: Added the theme store and one-click third-party theme switching.
 - `2.7.x`: Refactored database writes, monthly table rotation, notifications, security policy, billing fields, import/export, and admin workflows.
 
-For the full Go Agent changelog, see [serverless-monitor-agent releases](https://github.com/veegn/serverless-monitor-agent/releases).
+For the full Rust Agent changelog, see [serverless-monitor-agent releases](https://github.com/veegn/serverless-monitor-agent/releases).
 
 ## Quick Deployment
 
@@ -429,7 +429,7 @@ For one-click deployment, redeploy to the same project or migrate to a fork-base
 
 ### Upgrade Agent
 
-The Go Agent keeps existing configuration. Re-running the install command upgrades it.
+The Rust Agent keeps existing configuration. Re-running the install command upgrades it.
 
 Linux / OpenWrt / Synology DSM / FreeBSD / macOS:
 
@@ -447,13 +447,13 @@ PowerShell -ExecutionPolicy Bypass -File $script install
 
 ### Uninstall Agent
 
-Go Agent:
+Rust Agent:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh | sh -s -- uninstall
 ```
 
-The legacy Shell / PowerShell Agent is no longer maintained. The commands below are only for cleaning up historical Shell / PowerShell installations. Use the script that matches the system script used during the original install. If the current Agent is the Go Agent, use the Go uninstall command above.
+The legacy Shell / PowerShell Agent is no longer maintained. The commands below are only for cleaning up historical Shell / PowerShell installations. Use the script that matches the system script used during the original install. If the current Agent is the Rust Agent, use the Rust uninstall command above.
 
 | Legacy system script | Uninstall command |
 | --- | --- |
@@ -470,7 +470,7 @@ irm https://your-worker-domain/cf-server-monitor.ps1 -OutFile cf-server-monitor.
 powershell -ExecutionPolicy Bypass -File .\cf-server-monitor.ps1 uninstall
 ```
 
-Go and legacy Shell / PowerShell uninstallers only remove the services and files they created. If you switched from Shell / PowerShell to Go, or the other way around, run the matching uninstaller for each version to avoid leftover services, scheduled tasks, or configuration files.
+Rust and legacy Shell / PowerShell uninstallers only remove the services and files they created. If you switched from Shell / PowerShell to Rust, or the other way around, run the matching uninstaller for each version to avoid leftover services, scheduled tasks, or configuration files.
 
 ### Database Maintenance
 

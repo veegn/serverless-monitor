@@ -56,7 +56,7 @@ Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控�
 - 功能覆盖完整：实时指标、历史图表、地图展示、离线通知、资源告警、到期提醒、主题商店、多语言和移动端适配都已内置。
 - 参数动态下发：后台可修改 Ping 节点、采集间隔、HTTP 上报间隔、WSS 上报间隔、统计网卡、流量重置日、上下行流量校正等参数，Agent 后续自动拉取并生效；Worker 地址、`API_SECRET` 和自动更新开关变更需要重新执行安装命令。
 - 支持非 root 安装：支持 `systemd --user` 的 Linux 可使用普通用户安装，探针文件写入 `~/.cf-probe/`。
-- 上报时间自动校准：Go Agent 会使用 Worker 响应中的 HTTP `Date` 头校正样本时间和 `boot_time`，降低服务器本地时间错误对历史图表的影响；不会修改系统时间。
+- 上报时间自动校准：Rust 探针会使用 Worker 响应中的 HTTP `Date` 头校正样本时间和 `boot_time`，降低服务器本地时间错误对历史图表的影响；不会修改系统时间。
 
 ## 特性
 
@@ -67,7 +67,7 @@ Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控�
 | 网络质量      | 电信、联通、移动、BGP 节点延迟与丢包率追踪；三网详情开启时首页从 D1 最近 2 小时抽样最多 20 个真实点并缓存 5 分钟 |
 | 多视图前台     | 条形图、环形图、表格、地图视图，支持桌面端和移动端                                                        |
 | 管理后台      | 服务器增删改查、拖拽排序、隐藏服务器、导入导出、批量删除、数据库维护                                               |
-| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows；默认 Go 版本，保留 Shell/PowerShell 版本 |
+| 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows；Rust 高性能探针 |
 | 实时推送      | Durable Objects + WebSocket，Agent 上报后前端即时刷新                                      |
 | 告警通知      | 离线告警、恢复通知、到期提醒、资源负载告警                                                            |
 | 多语言       | 前端内置中文、英文和西班牙语（拉美）切换；通知消息支持中文、英文和西班牙语；文档提供中文与英文入口              |
@@ -81,7 +81,7 @@ Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控�
 
 ```mermaid
 flowchart LR
-  Agent["Server Agent<br/>Go / Shell / PowerShell"] -->|"POST /update"| Worker["Cloudflare Worker"]
+  Agent["Server Agent<br/>Rust"] -->|"POST /update"| Worker["Cloudflare Worker"]
   Worker --> D1["Cloudflare D1<br/>servers / settings / history"]
   Worker <--> DO["Durable Object<br/>WebSocket broadcast"]
   Worker --> Assets["Vue Dashboard<br/>Admin Panel"]
@@ -107,7 +107,7 @@ flowchart LR
 - `2.8.0`：新增主题商店，支持一键切换第三方主题。
 - `2.7.x`：重构数据库写入、月表轮换、通知模块、安全策略、服务器计费字段、导入导出和多项后台能力。
 
-Go Agent 的完整更新记录见 [serverless-monitor-agent releases](https://github.com/veegn/serverless-monitor-agent/releases)。
+Rust 探针的完整更新记录见 [serverless-monitor-agent releases](https://github.com/veegn/serverless-monitor-agent/releases)。
 
 ## 快速部署
 
@@ -432,7 +432,7 @@ smtp://<用户名>:<密码>@<host>:<port>?from=<发件人>&to=<收件人1,收件
 
 ### 升级 Agent
 
-Go 版本 Agent 会保留原配置，直接执行安装命令即可升级。
+Rust 探针会保留原配置，直接执行安装命令即可升级。
 
 Linux / OpenWrt / Synology DSM / FreeBSD / macOS：
 
@@ -454,7 +454,7 @@ PowerShell -ExecutionPolicy Bypass -File $script install
 curl -fsSL https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh | sh -s -- uninstall
 ```
 
-旧 Shell / PowerShell 版本已不再维护，下面命令仅用于清理历史 Shell / PowerShell 安装。请按当初安装时使用的系统脚本选择对应卸载命令；如果当前运行的是 Go Agent，请使用上面的 Go 卸载命令。
+旧 Shell / PowerShell 版本已不再维护，下面命令仅用于清理历史 Shell / PowerShell 安装。请按当初安装时使用的系统脚本选择对应卸载命令；如果当前运行的是 Rust 探针，请使用后台管理提供的卸载命令。
 
 | 旧版系统脚本 | 卸载命令 |
 | --- | --- |
@@ -471,7 +471,7 @@ irm https://你的 Worker 域名/cf-server-monitor.ps1 -OutFile cf-server-monito
 powershell -ExecutionPolicy Bypass -File .\cf-server-monitor.ps1 uninstall
 ```
 
-Go 版本和旧 Shell / PowerShell 版本卸载脚本只清理各自安装的服务和文件。如果曾经从 Shell / PowerShell 切换到 Go，或反向切换过，请分别执行对应版本的卸载命令，避免残留旧服务、定时任务或配置文件。
+Rust 探针和旧 Shell / PowerShell 版本卸载脚本只清理各自安装的服务和文件。如果曾经从旧 Shell / PowerShell 切换到 Rust 探针，请分别执行对应版本的卸载命令，避免残留旧服务、定时任务或配置文件。
 
 ### 数据库维护
 

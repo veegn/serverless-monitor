@@ -89,19 +89,9 @@
           >{{ trans.settings }}</button>
           <button
             class="tab-btn"
-            :class="{ active: activeTab === 'database' }"
-            @click="activeTab = 'database'"
-          >{{ trans.dbManagement }}</button>
-          <button
-            class="tab-btn"
             :class="{ active: activeTab === 'themeStore' }"
             @click="activeTab = 'themeStore'"
           >{{ trans.themeStore }}</button>
-          <button
-            class="tab-btn"
-            :class="{ active: activeTab === 'donation' }"
-            @click="activeTab = 'donation'"
-          >{{ trans.donation }}</button>
         </div>
 
         <ServerTable
@@ -145,8 +135,9 @@
           :saving="saving"
           :change-admin-password="changeAdminPassword"
           :test-notification-loading="testNotificationLoading"
-          :d1-usage-loading="d1UsageLoading"
           :generating-auto-register-token="generatingAutoRegisterToken"
+          :db-loading="dbLoading"
+          :selected-api-index="selectedApiIndex"
           @toggle-password="togglePassword"
           @toggle-admin-password-change="toggleAdminPasswordChange"
           @save-settings="saveSettings"
@@ -156,16 +147,8 @@
           @send-test-notification="sendTestNotification"
           @generate-auto-register-token="handleGenerateAutoRegisterToken"
           @open-auto-discovery="openAutoDiscoveryModal"
-          @query-d1-usage="queryD1Usage"
-          @alert-message="alertMessage = $event"
-        />
-
-        <DatabasePanel
-          :trans="trans"
-          :active-tab="activeTab"
-          :db-loading="dbLoading"
-          :selected-api-index="selectedApiIndex"
           @open-db-modal="openDbModal"
+          @alert-message="alertMessage = $event"
         />
 
         <ThemeStorePanel
@@ -177,11 +160,6 @@
           @theme-applied="settings.theme_url = $event"
           @theme-options-applied="handleThemeOptionsApplied"
           @alert-message="alertMessage = $event"
-        />
-
-        <DonationPanel
-          :trans="trans"
-          :active-tab="activeTab"
         />
       </div>
 
@@ -239,7 +217,6 @@
         :delete-server-id="deleteServerId"
         :current-server-name="currentServerName"
         :delete-target-os="deleteTargetOs"
-        :delete-version="deleteVersion"
         :delete-install-mode="deleteInstallMode"
         :uninstall-command="getUninstallCommand()"
         :uninstall-copied="uninstallCopied"
@@ -247,7 +224,6 @@
         @confirm-delete="confirmDelete"
         @copy-uninstall="copyUninstallCmd"
         @update:delete-target-os="deleteTargetOs = $event"
-        @update:delete-version="deleteVersion = $event"
         @update:delete-install-mode="deleteInstallMode = $event"
       />
 
@@ -259,24 +235,6 @@
         :target-os="targetOs"
         :install-mode="installMode"
         :install-version="installVersion"
-        :collect-interval="collectInterval"
-        :report-interval="reportInterval"
-        :wss-report-interval="wssReportInterval"
-        :connection-mode="connectionMode"
-        :ping-mode="pingMode"
-        :custom-ct="customCt"
-        :custom-cu="customCu"
-        :custom-cm="customCm"
-        :custom-bd="customBd"
-        :node-1="node1"
-        :node-2="node2"
-        :node-3="node3"
-        :node-4="node4"
-        :network-interface="networkInterface"
-        :reset-day="resetDay"
-        :rx-correction="rxCorrection"
-        :tx-correction="txCorrection"
-        :auto-update="autoUpdate"
         :install-command="getCustomInstallCommand()"
         :copied-cmd="copiedCmd"
         @close="closeCopyModal"
@@ -352,164 +310,7 @@
         </div>
       </div>
 
-      <div v-if="d1UsageResult" id="d1UsageModal" class="modal-overlay active">
-        <div class="modal-dialog">
-          <div class="modal-header">
-            <div class="modal-title">$ D1, Workers & Durable Objects quota --utc</div>
-            <button class="modal-close" @click="d1UsageResult = null">✕</button>
-          </div>
 
-          <div v-if="d1UsageResult.success" class="mb-4">
-            <div class="warning-box mb-4">
-              {{ getMessage(d1UsageResult.message) || trans.d1UsageQueried }}
-            </div>
-            <div class="quota-section">
-              <div class="quota-section-title">{{ trans.todayUsage }}</div>
-              <div class="quota-progress-list">
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.d1RowsRead }}：{{ formatNumber(d1UsageResult.usage.today.rowsRead) }} / {{ formatNumber(5000000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.today.rowsRead, 5000000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.rowsRead, 5000000) + '%' }"></div>
-                  </div>
-                </div>
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.d1RowsWritten }}：{{ formatNumber(d1UsageResult.usage.today.rowsWritten) }} / {{ formatNumber(100000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.today.rowsWritten, 100000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.rowsWritten, 100000) + '%' }"></div>
-                  </div>
-                </div>
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.workersRequests }}：{{ formatNumber(d1UsageResult.usage.today.workersRequests) }} / {{ formatNumber(100000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.today.workersRequests, 100000) }}%</span>
-                  </div>
-                  <div v-if="d1UsageResult.usage.today.workersRequests" class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.workersRequests, 100000) + '%' }"></div>
-                  </div>
-                </div>
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span class="quota-label-with-help">
-                      <span>{{ trans.durableObjectsRequests }}：{{ formatNumber(d1UsageResult.usage.today.durableObjectsRequests) }} / {{ formatNumber(100000) }}</span>
-                      <HelpTooltip>
-                        <template #default>
-                          <span v-for="row in getDurableObjectsUsageRows(d1UsageResult.usage.today)" :key="row.key" class="quota-help-row">
-                            <span class="quota-help-label">{{ row.label }}</span>
-                            <span class="quota-help-value">{{ row.value }}</span>
-                          </span>
-                        </template>
-                      </HelpTooltip>
-                    </span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.today.durableObjectsRequests, 100000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.durableObjectsRequests, 100000) + '%' }"></div>
-                  </div>
-                </div>
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span class="quota-label-with-help">
-                      <span>{{ trans.durableObjectsDuration }}：{{ formatNumber(d1UsageResult.usage.today.durableObjectsDuration, 2) }} / {{ formatNumber(13000) }}</span>
-                      <HelpTooltip :text="trans.durableObjectsDurationTip">
-                        <template #default>
-                          <span class="quota-help-row">{{ trans.durableObjectsDurationTip }}</span>
-                        </template>
-                      </HelpTooltip>
-                    </span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.today.durableObjectsDuration, 13000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.today.durableObjectsDuration, 13000) + '%' }"></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="quota-section mt-4">
-              <div class="quota-section-title">{{ trans.yesterdayUsage }}</div>
-              <div class="quota-progress-list">
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.d1RowsRead }}：{{ formatNumber(d1UsageResult.usage.yesterday.rowsRead) }} / {{ formatNumber(5000000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.rowsRead, 5000000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.rowsRead, 5000000) + '%' }"></div>
-                  </div>
-                </div>
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.d1RowsWritten }}：{{ formatNumber(d1UsageResult.usage.yesterday.rowsWritten) }} / {{ formatNumber(100000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.rowsWritten, 100000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.rowsWritten, 100000) + '%' }"></div>
-                  </div>
-                </div>
-                <div v-if="d1UsageResult.usage.yesterday.workersRequests" class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span>{{ trans.workersRequests }}：{{ formatNumber(d1UsageResult.usage.yesterday.workersRequests) }} / {{ formatNumber(100000) }}</span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.workersRequests, 100000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.workersRequests, 100000) + '%' }"></div>
-                  </div>
-                </div>
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span class="quota-label-with-help">
-                      <span>{{ trans.durableObjectsRequests }}：{{ formatNumber(d1UsageResult.usage.yesterday.durableObjectsRequests) }} / {{ formatNumber(100000) }}</span>
-                      <HelpTooltip>
-                        <template #default>
-                          <span v-for="row in getDurableObjectsUsageRows(d1UsageResult.usage.yesterday)" :key="row.key" class="quota-help-row">
-                            <span class="quota-help-label">{{ row.label }}</span>
-                            <span class="quota-help-value">{{ row.value }}</span>
-                          </span>
-                        </template>
-                      </HelpTooltip>
-                    </span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.durableObjectsRequests, 100000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.durableObjectsRequests, 100000) + '%' }"></div>
-                  </div>
-                </div>
-                <div class="quota-progress-item">
-                  <div class="flex-justify-between text-sm mb-1">
-                    <span class="quota-label-with-help">
-                      <span>{{ trans.durableObjectsDuration }}：{{ formatNumber(d1UsageResult.usage.yesterday.durableObjectsDuration, 2) }} / {{ formatNumber(13000) }}</span>
-                      <HelpTooltip :text="trans.durableObjectsDurationTip">
-                        <template #default>
-                          <span class="quota-help-row">{{ trans.durableObjectsDurationTip }}</span>
-                        </template>
-                      </HelpTooltip>
-                    </span>
-                    <span>{{ getUsagePercent(d1UsageResult.usage.yesterday.durableObjectsDuration, 13000) }}%</span>
-                  </div>
-                  <div class="quota-progress-bar">
-                    <div class="quota-progress-fill" :style="{ width: getUsageBarPercent(d1UsageResult.usage.yesterday.durableObjectsDuration, 13000) + '%' }"></div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div v-else class="danger-box mb-4">
-            {{ getMessage(d1UsageResult.error) }}
-          </div>
-
-          <div class="modal-footer flex-justify-between">
-            <div></div>
-            <button @click="d1UsageResult = null" class="btn">{{ trans.close }}</button>
-          </div>
-        </div>
-      </div>
 
       <div v-if="validationError" id="validationErrorModal" class="modal-overlay active">
         <div class="modal-dialog">
@@ -592,9 +393,7 @@ import HelpTooltip from '../../components/HelpTooltip.vue'
 import AdminLogin from './components/AdminLogin.vue'
 import ServerTable from './components/ServerTable.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
-import DatabasePanel from './components/DatabasePanel.vue'
 import ThemeStorePanel from './components/ThemeStorePanel.vue'
-import DonationPanel from './components/DonationPanel.vue'
 import EditServerModal from './components/EditServerModal.vue'
 import BatchEditServersModal from './components/BatchEditServersModal.vue'
 import DeleteServerModal from './components/DeleteServerModal.vue'
@@ -864,38 +663,7 @@ const parseThemeOptions = (value) => {
   }
 }
 
-const formatNumber = (value, maximumFractionDigits = 0) => (
-  Number(value || 0).toLocaleString(undefined, { maximumFractionDigits })
-)
-const getDurableObjectsUsageRows = (usage = {}) => ([
-  {
-    key: 'http',
-    label: trans.value.durableObjectsHttpRequests,
-    value: `${formatNumber(usage.durableObjectsHttpRequests)} · ${trans.value.billingRatioOneToOne}`
-  },
-  {
-    key: 'hibernation',
-    label: trans.value.durableObjectsHibernationWakeups,
-    value: `${formatNumber(usage.durableObjectsHibernationWakeups)} · ${trans.value.billingRatioOneToOne}`
-  },
-  {
-    key: 'inbound-ws',
-    label: trans.value.durableObjectsInboundWebSocketMessages,
-    value: `${formatNumber(usage.durableObjectsInboundWebSocketMessages)} · ${trans.value.billingRatioWebSocketIncoming}`
-  },
-  {
-    key: 'outbound-ws',
-    label: trans.value.durableObjectsOutboundWebSocketMessages,
-    value: `${formatNumber(usage.durableObjectsOutboundWebSocketMessages)} · ${trans.value.billingRatioNotBilled}`
-  }
-])
-const getUsagePercent = (used, limit) => {
-  if (!limit) return 0
-  return Number(((Number(used || 0) / Number(limit)) * 100).toFixed(2))
-}
-const getUsageBarPercent = (used, limit) => {
-  return Math.min(100, Math.max(0, getUsagePercent(used, limit)))
-}
+
 
 const isMultipleMode = computed(() => hasMultipleApiBases())
 const apiBases = getApiBases()
@@ -1109,7 +877,6 @@ const copiedServerId = ref(null)
 const copiedNoteServerId = ref(null)
 const copiedSpecKey = ref(null)
 const deleteTargetOs = ref('linux')
-const deleteVersion = ref('go')
 const deleteInstallMode = ref('current-user')
 const uninstallCopied = ref(false)
 const saving = ref(false)
@@ -1119,8 +886,6 @@ const showDbModal = ref(false)
 const dbOperation = ref('')
 const dbLoading = ref(false)
 const dbResult = ref(null)
-const d1UsageLoading = ref(false)
-const d1UsageResult = ref(null)
 const validationError = ref(null)
 const alertMessage = ref(null)
 const showAutoUpdateWarning = ref(false)
@@ -1138,24 +903,6 @@ const currentServerName = ref('')
 const targetOs = ref('linux')
 const installMode = ref('current-user')
 const installVersion = ref('')
-const collectInterval = ref(0)
-const reportInterval = ref(60)
-const wssReportInterval = ref(2)
-const connectionMode = ref('auto')
-const pingMode = ref('tcp')
-const customCt = ref('')
-const customCu = ref('')
-const customCm = ref('')
-const customBd = ref('')
-const node1 = ref('')
-const node2 = ref('')
-const node3 = ref('')
-const node4 = ref('')
-const explicitEmptyNodes = ref({})
-const networkInterface = ref('')
-const resetDay = ref(1)
-const rxCorrection = ref('')
-const txCorrection = ref('')
 const autoUpdate = ref(false)
 const copiedCmd = ref(false)
 
@@ -1170,7 +917,6 @@ const getEffectivePingMode = (value) => value === 'icmp' ? 'icmp' : 'tcp'
 watch(isWssReportEnabled, (enabled) => {
   if (!enabled) {
     editForm.value.connection_mode = 'http'
-    connectionMode.value = 'http'
   }
 })
 
@@ -1722,35 +1468,18 @@ const getInstallCommand = (serverId) => {
   return `curl -sL ${HOST}/install.sh | bash -s install -id=${serverId} -secret='${apiSecret.value}' -url=${HOST}/update`
 }
 
-const resolveServerPingNode = (server, field) => {
-  const value = server?.[field]
-  const explicitEmpty = value === 0 || value === '0'
-  return {
-    value: explicitEmpty ? '' : (value || settings.value[field] || ''),
-    explicitEmpty
-  }
-}
-
 const getUninstallCommand = () => {
-  const HOST = selectedApiBase.value
-  const isGo = deleteVersion.value === 'go'
-  if (isGo) {
-    if (deleteTargetOs.value === 'windows') {
-      const ghUrl = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1'
-      return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall`
-    }
-    const sudoPrefix = deleteTargetOs.value === 'mac' ? 'sudo ' : ''
-    const ghUrl = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh'
-    const uninstallCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | ${sudoPrefix}sh -s -- uninstall`
-    if (deleteTargetOs.value === 'linux' && deleteInstallMode.value === 'cfsm-user') {
-      return buildUninstallAsCfsmCommand(uninstallCommand)
-    }
-    return uninstallCommand
-  }
   if (deleteTargetOs.value === 'windows') {
-    return `$script = Join-Path (Get-Location) 'uninstall-cf-probe.ps1'; Invoke-WebRequest -Uri '${HOST}/uninstall.ps1' -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script`
+    const ghUrl = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1'
+    return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script uninstall`
   }
-  return `curl -fsSL '${HOST}/uninstall.sh' | sh -s`
+  const sudoPrefix = deleteTargetOs.value === 'mac' ? 'sudo ' : ''
+  const ghUrl = 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh'
+  const uninstallCommand = `curl -fsSL ${quotePosixShellArg(ghUrl)} | ${sudoPrefix}sh -s -- uninstall`
+  if (deleteTargetOs.value === 'linux' && deleteInstallMode.value === 'cfsm-user') {
+    return buildUninstallAsCfsmCommand(uninstallCommand)
+  }
+  return uninstallCommand
 }
 
 const copyCmd = (serverId) => {
@@ -1760,37 +1489,6 @@ const copyCmd = (serverId) => {
   targetOs.value = 'linux'
   installMode.value = 'current-user'
   installVersion.value = ''
-  collectInterval.value = server?.collect_interval ?? 0
-  reportInterval.value = server?.report_interval || 60
-  wssReportInterval.value = server?.wss_report_interval || 2
-  connectionMode.value = getEffectiveConnectionMode(server?.connection_mode)
-  pingMode.value = getEffectivePingMode(server?.ping_mode)
-  const customCtNode = resolveServerPingNode(server, 'custom_ct')
-  const customCuNode = resolveServerPingNode(server, 'custom_cu')
-  const customCmNode = resolveServerPingNode(server, 'custom_cm')
-  const customBdNode = resolveServerPingNode(server, 'custom_bd')
-  const node1Value = resolveServerPingNode(server, 'node_1')
-  const node2Value = resolveServerPingNode(server, 'node_2')
-  const node3Value = resolveServerPingNode(server, 'node_3')
-  const node4Value = resolveServerPingNode(server, 'node_4')
-  explicitEmptyNodes.value = {
-    custom_ct: customCtNode.explicitEmpty, custom_cu: customCuNode.explicitEmpty,
-    custom_cm: customCmNode.explicitEmpty, custom_bd: customBdNode.explicitEmpty,
-    node_1: node1Value.explicitEmpty, node_2: node2Value.explicitEmpty,
-    node_3: node3Value.explicitEmpty, node_4: node4Value.explicitEmpty
-  }
-  customCt.value = customCtNode.value
-  customCu.value = customCuNode.value
-  customCm.value = customCmNode.value
-  customBd.value = customBdNode.value
-  node1.value = node1Value.value
-  node2.value = node2Value.value
-  node3.value = node3Value.value
-  node4.value = node4Value.value
-  networkInterface.value = server?.interface || ''
-  resetDay.value = server?.reset_day ?? 1
-  rxCorrection.value = server?.rx_correction ?? ''
-  txCorrection.value = server?.tx_correction ?? ''
   autoUpdate.value = server?.auto_update === '1' || server?.auto_update === 1 || server?.auto_update === true
   copiedCmd.value = false
   showCopyModal.value = true
@@ -2149,7 +1847,6 @@ const openDeleteModal = (id) => {
   const server = servers.value.find(s => s.id === id)
   currentServerName.value = server?.name || ''
   deleteTargetOs.value = 'linux'
-  deleteVersion.value = 'go'
   deleteInstallMode.value = 'current-user'
   uninstallCopied.value = false
   showDeleteModal.value = true
@@ -2410,29 +2107,7 @@ const closeDbModal = () => {
   }
 }
 
-const queryD1Usage = async () => {
-  if (d1UsageLoading.value) return
-  d1UsageLoading.value = true
-  d1UsageResult.value = null
-  alertMessage.value = null
 
-  try {
-    const result = await adminApiForSite({
-      action: 'd1_usage',
-      cloudflare_account_id: settings.value.cloudflare_account_id,
-      cloudflare_token: settings.value.cloudflare_token
-    })
-    if (!result.error) {
-      d1UsageResult.value = result.data
-    } else {
-      alertMessage.value = getMessage(result.error) || result.error || trans.value.operationFailed
-    }
-  } catch (e) {
-    alertMessage.value = getMessage(e.message) || e.message || trans.value.operationFailed
-  } finally {
-    d1UsageLoading.value = false
-  }
-}
 
 const sendTestNotification = async () => {
   if (testNotificationLoading.value) return

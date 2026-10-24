@@ -2,7 +2,7 @@
   <div id="tab-settings" class="tab-content" :class="{ active: activeTab === 'settings' }">
     <div class="settings-grid">
       <div class="settings-section" v-if="currentOrigin === selectedApiBase">
-        <div class="section-title"><span>▸</span> {{ trans.appearance }} 1</div>
+        <div class="section-title"><span>▸</span> {{ trans.appearance }}</div>
 
         <div class="form-row">
           <div class="form-group flex-1">
@@ -107,10 +107,6 @@
             <p v-if="cspErrors.csp_api" class="text-danger text-sm">{{ cspErrors.csp_api }}</p>
           </div>
         </div>
-      </div>
-
-      <div class="settings-section" v-if="currentOrigin === selectedApiBase">
-        <div class="section-title"><span>▸</span> {{ trans.appearance }} 2</div>
 
         <div class="form-row">
           <div class="form-group flex-1">
@@ -138,7 +134,6 @@
             <textarea v-model="settings.theme_options" class="form-textarea" rows="5" placeholder='{"mikus":1}'></textarea>
           </div>
         </div>
-
       </div>
 
       <div class="settings-section">
@@ -715,59 +710,27 @@
           </div>
         </div>
 
-        <div v-if="settings.auto_register_enabled" class="form-group mt-2">
-          <label class="form-label">
-            {{ trans.autoRegisterCommand || '自动注册安装命令' }}
-            <HelpTooltip :text="trans.autoRegisterCommandTip || '在目标服务器直接执行此命令，探针启动后将自动注册并在前台上线。'" />
-          </label>
-          <div class="flex" style="gap: 8px;">
-            <select v-model="autoRegOs" class="form-select" style="max-width: 140px;">
-              <option value="linux">Linux (Go)</option>
-              <option value="windows">Windows</option>
-            </select>
-            <input type="text" readonly :value="autoRegisterInstallCommand" class="form-input flex-1" style="font-family: monospace; font-size: 12px;">
-            <button type="button" class="btn btn-margin-0" @click="copyAutoRegisterCommand">
-              📋 {{ trans.copy || '复制' }}
-            </button>
-            <button type="button" class="btn btn-blue btn-margin-0" @click="$emit('open-auto-discovery')">
-              ⚡ {{ trans.autoDiscoveryTitle || '弹窗设置与生成' }}
-            </button>
-          </div>
-          <p v-if="tokenStatus.isExpired" class="hint-text text-danger" style="margin-top: 6px;">
-            ⚠️ {{ trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key' }}
-          </p>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <div class="section-title"><span>▸</span> {{ trans.cloudflareSettings }}</div>
-
-        <div class="form-row">
+        <div v-if="settings.auto_register_enabled" class="form-row mt-2">
           <div class="form-group flex-1">
-            <label class="form-label">{{ trans.cloudflareAccountId }}</label>
-            <input type="text" name="cloudflare_account_id" autocomplete="off" v-model="settings.cloudflare_account_id" class="form-input" :placeholder="trans.cloudflareAccountIdPlaceholder">
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">
-              Cloudflare API Token
-              <HelpTooltip :text="trans.cloudflareTokenTip" />
-            </label>
-            <div class="password-input-wrapper">
-              <input type="text" name="cloudflare_token" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.cloudflare_token" :class="['form-input', { 'secret-input-masked': !passwordVisible.cloudflareToken }]" :placeholder="trans.cloudflareTokenPlaceholder">
-              <button type="button" class="password-toggle" @click="$emit('toggle-password', 'cloudflareToken')">
-                {{ passwordVisible.cloudflareToken ? '🙈' : '👁️' }}
+            <div class="flex-center-gap-sm" style="justify-content: flex-start; gap: 12px; align-items: center;">
+              <button
+                type="button"
+                class="btn btn-primary"
+                style="margin: 0;"
+                :disabled="tokenStatus.isExpired || !settings.auto_register_token"
+                @click="$emit('open-auto-discovery')"
+              >
+                ⚡ {{ trans.autoDiscoveryTitle || '生成自动注册部署脚本' }}
               </button>
+              <span v-if="tokenStatus.isExpired" class="text-sm text-danger">
+                ⚠️ {{ trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key' }}
+              </span>
+              <span v-else-if="!settings.auto_register_token" class="text-sm text-muted">
+                💡 {{ trans.autoRegisterTokenNotGenerated || '请先生成授权 Key 即可生成部署脚本' }}
+              </span>
             </div>
           </div>
         </div>
-
-        <div class="form-row">
-          <div class="form-group  flex-1">
-            <button type="button" @click="$emit('query-d1-usage')" class="btn btn-primary btn-lg" :disabled="d1UsageLoading">{{ d1UsageLoading ? '⏳' : '🔍' }} {{ trans.queryD1Quota }}</button>
-          </div>
-        </div>
-
       </div>
 
       <div class="settings-section">
@@ -886,8 +849,94 @@
       </div>
     </div>
 
-    <div class="text-right mt-5">
+    <div class="text-right mt-5 mb-5">
       <button @click="$emit('save-settings')" class="btn btn-primary btn-lg" :disabled="saving || hasPingNodeErrors">{{ saving ? '⏳' : '💾' }} {{ saving ? trans.saving : trans.saveConfig }}</button>
+    </div>
+
+    <div class="settings-grid mt-4">
+      <div class="settings-section">
+        <div class="section-title"><span>▸</span> {{ trans.dbManagement }}</div>
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.upgradeDatabase }}</label>
+            <p class="text-muted mb-2 text-sm">{{ trans.upgradeDesc }}</p>
+            <button type="button" @click="$emit('open-db-modal', 'upgrade')" class="btn btn-primary btn-lg" :disabled="dbLoading">⬆️ {{ trans.upgradeDatabase }}</button>
+          </div>
+
+          <div class="form-group flex-1">
+            <label class="form-label danger-label">⚠️ {{ trans.clearHistory }}</label>
+            <p class="text-muted mb-2 text-sm">{{ trans.clearHistoryDesc }}</p>
+            <button type="button" @click="$emit('open-db-modal', 'clearHistory')" class="btn btn-red btn-lg" :disabled="dbLoading">🗑️ {{ trans.clearHistory }}</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="section-title"><span>▸</span> {{ trans.exportServers }} / {{ trans.importServers }}</div>
+
+        <div class="form-row">
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.exportServers }}</label>
+            <p class="text-muted mb-2 text-sm">{{ trans.exportServersDesc }}</p>
+            <button type="button" @click="handleExport" class="btn btn-primary btn-lg" :disabled="dbLoading || exporting">
+              {{ exporting ? trans.exporting : '📤 ' + trans.exportServers }}
+            </button>
+          </div>
+
+          <div class="form-group flex-1">
+            <label class="form-label">{{ trans.importServers }}</label>
+            <p class="text-muted mb-2 text-sm">{{ trans.importServersDesc }}</p>
+            <input
+              ref="fileInput"
+              type="file"
+              accept=".json"
+              style="display: none"
+              @change="handleFileSelect"
+            >
+            <button type="button" @click="fileInput && fileInput.click()" class="btn btn-lg" :disabled="dbLoading || importing">
+              {{ importing ? trans.importing : '📥 ' + trans.importServers }}
+            </button>
+          </div>
+        </div>
+
+        <div v-if="importResult" class="mt-3">
+          <div :class="importResult.success ? 'warning-box' : 'danger-box'" class="mb-2">
+            <div class="flex-center-gap-sm">
+              <span :style="{ color: importResult.success ? 'var(--accent-green)' : 'var(--accent-red)', fontWeight: '600' }">
+                {{ importResult.success ? '✅' : '❌' }} {{ trans.importResult }}
+              </span>
+            </div>
+            <div class="mt-2 text-sm">
+              <span style="color: var(--accent-green)">{{ trans.importedCount }}: {{ importResult.imported }}</span>
+              <span class="ml-3" style="color: var(--accent-yellow)">{{ trans.skippedCount }}: {{ importResult.skipped }}</span>
+            </div>
+            <div v-if="importResult.skippedIds && importResult.skippedIds.length > 0" class="mt-2 text-sm text-muted">
+              {{ trans.skippedIds }}: {{ importResult.skippedIds.join(', ') }}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section donation-section mt-4">
+      <div class="section-title"><span>▸</span> {{ trans.donationTitle }}</div>
+
+      <div class="donation-content">
+        <div class="donation-qr-card">
+          <img
+            class="donation-qr"
+            src="/donate/wechat-reward.jpg"
+            :alt="trans.donationQrAlt"
+          >
+          <div class="donation-qr-caption">{{ trans.donationWechat }}</div>
+        </div>
+
+        <div class="donation-copy">
+          <p>{{ trans.donationDesc }}</p>
+          <p class="donation-token">🪙 {{ trans.donationToken }}</p>
+          <p class="text-secondary text-sm">{{ trans.donationThanks }}</p>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -897,7 +946,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import HelpTooltip from '../../../components/HelpTooltip.vue'
 import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../../utils/constants.js'
 import { PING_NODE_FIELDS, validatePingNode } from '../../../utils/pingNode.js'
-import { copyTextToClipboard } from '../../../utils/clipboard.js'
+import { adminApi } from '../../../utils/api.js'
 
 const props = defineProps({
   trans: { type: Object, required: true },
@@ -910,18 +959,18 @@ const props = defineProps({
   saving: { type: Boolean, default: false },
   changeAdminPassword: { type: Boolean, default: false },
   testNotificationLoading: { type: Boolean, default: false },
-  d1UsageLoading: { type: Boolean, default: false },
-  generatingAutoRegisterToken: { type: Boolean, default: false }
+  generatingAutoRegisterToken: { type: Boolean, default: false },
+  dbLoading: { type: Boolean, default: false },
+  selectedApiIndex: { type: Number, default: 0 }
 })
 
 const emit = defineEmits([
   'toggle-password', 'toggle-admin-password-change',
   'save-settings', 'upload-bg', 'upload-bg-mobile', 'upload-favicon',
-  'send-test-notification', 'query-d1-usage',
+  'send-test-notification', 'open-db-modal',
   'alert-message', 'generate-auto-register-token', 'open-auto-discovery'
 ])
 
-const autoRegOs = ref('linux')
 const currentTime = ref(Date.now())
 let autoRegTimer = null
 
@@ -959,31 +1008,72 @@ const tokenStatus = computed(() => {
   }
 })
 
-const autoRegisterInstallCommand = computed(() => {
-  const HOST = (props.selectedApiBase || (typeof window !== 'undefined' ? window.location.origin : '')).replace(/\/$/, '')
-  const token = props.settings?.auto_register_token || ''
-  if (!token) return props.trans.autoRegisterTokenNotGenerated || '请先生成授权 Key'
+const fileInput = ref(null)
+const exporting = ref(false)
+const importing = ref(false)
+const importResult = ref(null)
 
-  if (autoRegOs.value === 'windows') {
-    return `$script = "$env:TEMP\\install-sma.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.ps1" -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script install -token='${token}' -url='${HOST}/update'`
+const handleExport = async () => {
+  exporting.value = true
+  importResult.value = null
+  try {
+    const result = await adminApi({ action: 'export_servers' }, props.selectedApiIndex)
+    if (!result.error && result.data && result.data.servers) {
+      const blob = new Blob([JSON.stringify(result.data.servers, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `servers-backup-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    }
+  } catch (e) {
+    console.error('Export failed:', e)
+  } finally {
+    exporting.value = false
   }
-  return `curl -fsSL 'https://raw.githubusercontent.com/veegn/serverless-monitor-agent/refs/heads/main/install.sh' | sh -s -- install -token='${token}' -url='${HOST}/update'`
-})
+}
 
-const copyAutoRegisterCommand = async () => {
-  if (tokenStatus.value.isExpired) {
-    emit('alert-message', props.trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key')
-    return
-  }
-  if (!props.settings?.auto_register_token) {
-    emit('alert-message', props.trans.autoRegisterTokenNotGenerated || '请先生成授权 Key')
-    return
-  }
-  const copied = await copyTextToClipboard(autoRegisterInstallCommand.value)
-  if (copied) {
-    emit('alert-message', props.trans.autoRegisterCopied || '自动注册命令已复制到剪贴板')
-  } else {
-    emit('alert-message', props.trans.httpsRequired || '复制失败，请手动复制')
+const handleFileSelect = async (event) => {
+  const file = event.target.files[0]
+  if (!file) return
+
+  importing.value = true
+  importResult.value = null
+
+  try {
+    const text = await file.text()
+    const servers = JSON.parse(text)
+
+    if (!Array.isArray(servers)) {
+      importResult.value = { success: false, imported: 0, skipped: 0, skippedIds: [] }
+      return
+    }
+
+    const result = await adminApi({ action: 'import_servers', servers }, props.selectedApiIndex)
+    if (!result.error && result.data) {
+      importResult.value = {
+        success: result.data.success,
+        imported: result.data.imported || 0,
+        skipped: result.data.skipped || 0,
+        skippedIds: result.data.skippedIds || []
+      }
+      if (result.data.imported > 0) {
+        window.location.reload()
+      }
+    } else {
+      importResult.value = { success: false, imported: 0, skipped: 0, skippedIds: [] }
+    }
+  } catch (e) {
+    console.error('Import failed:', e)
+    importResult.value = { success: false, imported: 0, skipped: 0, skippedIds: [] }
+  } finally {
+    importing.value = false
+    if (fileInput.value) {
+      fileInput.value.value = ''
+    }
   }
 }
 

@@ -169,62 +169,69 @@
         </div>
       </div>
 
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label class="form-label">
-            {{ settings.custom_ct_name || trans.customCt }}
-            <HelpTooltip :text="trans.pingNodeTip" />
-          </label>
-          <input type="text" name="edit_custom_ct" autocomplete="off" v-model.trim="editForm.custom_ct" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_ct }]" :placeholder="settings.custom_ct || 'gd-ct-dualstack.ip.zstaticcdn.com'">
-          <p v-if="pingNodeErrors.custom_ct" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_ct }}</p>
+      <details class="advanced-ping-section mb-3" :open="hasCustomPingNodes">
+        <summary class="cursor-pointer text-sm font-medium mb-2 user-select-none" style="cursor: pointer; font-weight: 600; padding: 6px 0; color: var(--text-color);">
+          🌐 {{ trans.advancedPingNodes || '自定义 Ping 探测节点（留空沿用全局设置）' }}
+        </summary>
+        <div class="advanced-ping-content pt-2">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">
+                {{ settings.custom_ct_name || trans.customCt }}
+                <HelpTooltip :text="trans.pingNodeTip" />
+              </label>
+              <input type="text" name="edit_custom_ct" autocomplete="off" v-model.trim="editForm.custom_ct" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_ct }]" :placeholder="settings.custom_ct || 'gd-ct-dualstack.ip.zstaticcdn.com'">
+              <p v-if="pingNodeErrors.custom_ct" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_ct }}</p>
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">
+                {{ settings.custom_cu_name || trans.customCu }}
+                <HelpTooltip :text="trans.pingNodeTip" />
+              </label>
+              <input type="text" name="edit_custom_cu" autocomplete="off" v-model.trim="editForm.custom_cu" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cu }]" :placeholder="settings.custom_cu || 'gd-cu-dualstack.ip.zstaticcdn.com'">
+              <p v-if="pingNodeErrors.custom_cu" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cu }}</p>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">
+                {{ settings.custom_cm_name || trans.customCm }}
+                <HelpTooltip :text="trans.pingNodeTip" />
+              </label>
+              <input type="text" name="edit_custom_cm" autocomplete="off" v-model.trim="editForm.custom_cm" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cm }]" :placeholder="settings.custom_cm || 'gd-cm-dualstack.ip.zstaticcdn.com'">
+              <p v-if="pingNodeErrors.custom_cm" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cm }}</p>
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">
+                {{ settings.custom_bd_name || trans.customBd }}
+                <HelpTooltip :text="trans.pingNodeTip" />
+              </label>
+              <input type="text" name="edit_custom_bd" autocomplete="off" v-model.trim="editForm.custom_bd" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_bd }]" :placeholder="settings.custom_bd || 'ip.zstaticcdn.com'">
+              <p v-if="pingNodeErrors.custom_bd" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_bd }}</p>
+            </div>
+          </div>
+          <div class="form-row">
+            <div v-for="(field, index) in ['node_1', 'node_2']" :key="field" class="form-group flex-1">
+              <label class="form-label">
+                {{ settings[`${field}_name`] || `Node ${index + 1}` }}
+                <HelpTooltip :text="trans.pingNodeTip" />
+              </label>
+              <input type="text" :name="`edit_${field}`" autocomplete="off" v-model.trim="editForm[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" :placeholder="settings[field] || 'host[:port] / [IPv6]:port'">
+              <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
+            </div>
+          </div>
+          <div class="form-row">
+            <div v-for="(field, index) in ['node_3', 'node_4']" :key="field" class="form-group flex-1">
+              <label class="form-label">
+                {{ settings[`${field}_name`] || `Node ${index + 3}` }}
+                <HelpTooltip :text="trans.pingNodeTip" />
+              </label>
+              <input type="text" :name="`edit_${field}`" autocomplete="off" v-model.trim="editForm[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" :placeholder="settings[field] || 'host[:port] / [IPv6]:port'">
+              <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
+            </div>
+          </div>
         </div>
-        <div class="form-group flex-1">
-          <label class="form-label">
-            {{ settings.custom_cu_name || trans.customCu }}
-            <HelpTooltip :text="trans.pingNodeTip" />
-          </label>
-          <input type="text" name="edit_custom_cu" autocomplete="off" v-model.trim="editForm.custom_cu" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cu }]" :placeholder="settings.custom_cu || 'gd-cu-dualstack.ip.zstaticcdn.com'">
-          <p v-if="pingNodeErrors.custom_cu" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cu }}</p>
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group flex-1">
-          <label class="form-label">
-            {{ settings.custom_cm_name || trans.customCm }}
-            <HelpTooltip :text="trans.pingNodeTip" />
-          </label>
-          <input type="text" name="edit_custom_cm" autocomplete="off" v-model.trim="editForm.custom_cm" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_cm }]" :placeholder="settings.custom_cm || 'gd-cm-dualstack.ip.zstaticcdn.com'">
-          <p v-if="pingNodeErrors.custom_cm" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_cm }}</p>
-        </div>
-        <div class="form-group flex-1">
-          <label class="form-label">
-            {{ settings.custom_bd_name || trans.customBd }}
-            <HelpTooltip :text="trans.pingNodeTip" />
-          </label>
-          <input type="text" name="edit_custom_bd" autocomplete="off" v-model.trim="editForm.custom_bd" :class="['form-input', { 'input-invalid': pingNodeErrors.custom_bd }]" :placeholder="settings.custom_bd || 'ip.zstaticcdn.com'">
-          <p v-if="pingNodeErrors.custom_bd" class="text-red text-sm mt-1">{{ pingNodeErrors.custom_bd }}</p>
-        </div>
-      </div>
-      <div class="form-row">
-        <div v-for="(field, index) in ['node_1', 'node_2']" :key="field" class="form-group flex-1">
-          <label class="form-label">
-            {{ settings[`${field}_name`] || `Node ${index + 1}` }}
-            <HelpTooltip :text="trans.pingNodeTip" />
-          </label>
-          <input type="text" :name="`edit_${field}`" autocomplete="off" v-model.trim="editForm[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" :placeholder="settings[field] || 'host[:port] / [IPv6]:port'">
-          <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
-        </div>
-      </div>
-      <div class="form-row">
-        <div v-for="(field, index) in ['node_3', 'node_4']" :key="field" class="form-group flex-1">
-          <label class="form-label">
-            {{ settings[`${field}_name`] || `Node ${index + 3}` }}
-            <HelpTooltip :text="trans.pingNodeTip" />
-          </label>
-          <input type="text" :name="`edit_${field}`" autocomplete="off" v-model.trim="editForm[field]" :class="['form-input', { 'input-invalid': pingNodeErrors[field] }]" :placeholder="settings[field] || 'host[:port] / [IPv6]:port'">
-          <p v-if="pingNodeErrors[field]" class="text-red text-sm mt-1">{{ pingNodeErrors[field] }}</p>
-        </div>
-      </div>
+      </details>
       <div class="form-row">
         <div class="form-group flex-1">
           <div class="checkbox-item no-margin">
@@ -298,6 +305,15 @@ const pingNodeErrors = computed(() => Object.fromEntries(
 ))
 
 const hasPingNodeErrors = computed(() => Object.values(pingNodeErrors.value).some(Boolean))
+
+const hasCustomPingNodes = computed(() => {
+  const form = editForm.value || {}
+  return Boolean(
+    form.custom_ct || form.custom_cu || form.custom_cm || form.custom_bd ||
+    form.node_1 || form.node_2 || form.node_3 || form.node_4 ||
+    hasPingNodeErrors.value
+  )
+})
 
 const billingCycleOptions = BILLING_CYCLES
 const currencyOptions = CURRENCY_OPTIONS

@@ -239,7 +239,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
   X-Agent-Config-Schema: 5
   X-Agent-Config-Md5: <最后成功应用的配置 MD5，首次为 none>
   ```
-  动态配置请求头为新版探针使用的可选字段；当前新 Go Agent 使用 schema `5`。schema `3` / `4` 仍按旧兼容配置返回，未携带时保持旧版响应协议。
+  动态配置请求头为新版探针使用的可选字段；当前新 Rust 探针使用 schema `5`。schema `3` / `4` 仍按旧兼容配置返回，未携带时保持旧版响应协议。
 
   WebSocket 握手只能使用 `GET + Upgrade`，这是 WebSocket 协议限制；后端仍通过同一个 `/update` 路径区分 `POST` 与 `wss`。握手成功后服务端先发送：
 

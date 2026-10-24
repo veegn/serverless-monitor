@@ -45,70 +45,8 @@
         </div>
       </div>
 
-      <div class="config-list">
-        <div class="config-row">
-          <span class="config-label">{{ trans.collectInterval }}</span>
-          <span class="config-value">{{ formatWithUnit(collectInterval, 's') }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.reportInterval }}</span>
-          <span class="config-value">{{ formatWithUnit(reportInterval, 's') }}</span>
-        </div>
-        <div v-if="connectionMode === 'auto'" class="config-row">
-          <span class="config-label">{{ trans.wssReportInterval }}</span>
-          <span class="config-value">{{ formatWithUnit(wssReportInterval, 's') }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.connectionMode }}</span>
-          <span class="config-value">{{ connectionMode === 'http' ? trans.connectionModeHttp : trans.connectionModeAuto }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.pingMode }}</span>
-          <span class="config-value">{{ effectivePingMode === 'icmp' ? 'ICMP (root)' : 'TCP' }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.trafficResetDay }}</span>
-          <span class="config-value">{{ isBlank(resetDay) ? '-' : resetDay }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.autoUpdate }}</span>
-          <span class="config-value">
-            <span :class="['config-badge', autoUpdate ? 'is-enabled' : 'is-disabled']">
-              {{ autoUpdate ? trans.enabled : trans.disabled }}
-            </span>
-          </span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.networkInterface }}</span>
-          <span class="config-value">{{ isBlank(networkInterface) ? '-' : networkInterface }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.rxCorrection }} (GB)</span>
-          <span class="config-value">{{ formatWithUnit(rxCorrection, 'GB') }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ trans.txCorrection }} (GB)</span>
-          <span class="config-value">{{ formatWithUnit(txCorrection, 'GB') }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ settings.custom_ct_name || trans.customCt }}</span>
-          <span class="config-value">{{ isBlank(customCt) ? '-' : customCt }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ settings.custom_cu_name || trans.customCu }}</span>
-          <span class="config-value">{{ isBlank(customCu) ? '-' : customCu }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ settings.custom_cm_name || trans.customCm }}</span>
-          <span class="config-value">{{ isBlank(customCm) ? '-' : customCm }}</span>
-        </div>
-        <div class="config-row">
-          <span class="config-label">{{ settings.custom_bd_name || trans.customBd }}</span>
-          <span class="config-value">{{ isBlank(customBd) ? '-' : customBd }}</span>
-        </div>
-        <div v-for="(node, index) in [node1, node2, node3, node4]" :key="index" class="config-row">
-          <span class="config-label">{{ settings[`node_${index + 1}_name`] || `Node ${index + 1}` }}</span><span class="config-value">{{ isBlank(node) ? '-' : node }}</span>
-        </div>
+      <div class="server-config-tip mb-3">
+        💡 {{ trans.copyModalAgentTip || '探针运行参数（采集间隔、上报模式、Ping 节点、流量重置等）由后端动态下发，启动后自动拉取生效，无需写入命令中。如需修改请点击下方“编辑”。' }}
       </div>
 
       <div class="form-group">
@@ -140,21 +78,6 @@ const props = defineProps({
   targetOs: { type: String, default: 'linux' },
   installMode: { type: String, default: 'current-user' },
   installVersion: { type: String, default: '' },
-  collectInterval: { type: [Number, String], default: 0 },
-  reportInterval: { type: [Number, String], default: 60 },
-  wssReportInterval: { type: [Number, String], default: 2 },
-  connectionMode: { type: String, default: 'auto' },
-  pingMode: { type: String, default: 'tcp' },
-  customCt: { type: String, default: '' },
-  customCu: { type: String, default: '' },
-  customCm: { type: String, default: '' },
-  customBd: { type: String, default: '' },
-  node1: { type: String, default: '' }, node2: { type: String, default: '' }, node3: { type: String, default: '' }, node4: { type: String, default: '' },
-  networkInterface: { type: String, default: '' },
-  resetDay: { type: [Number, String], default: 1 },
-  rxCorrection: { type: [Number, String], default: '' },
-  txCorrection: { type: [Number, String], default: '' },
-  autoUpdate: { type: Boolean, default: false },
   installCommand: { type: String, default: '' },
   copiedCmd: { type: Boolean, default: false }
 })
@@ -167,13 +90,4 @@ const emit = defineEmits([
   'update:install-mode',
   'update:install-version'
 ])
-
-const effectivePingMode = computed(() => (
-  props.targetOs === 'linux' && props.installMode === 'cfsm-user'
-    ? 'tcp'
-    : (props.pingMode === 'icmp' ? 'icmp' : 'tcp')
-))
-
-const isBlank = (value) => value === '' || value === null || value === undefined
-const formatWithUnit = (value, unit) => (isBlank(value) ? '-' : `${value} ${unit}`)
 </script>
