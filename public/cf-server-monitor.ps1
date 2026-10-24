@@ -1,7 +1,7 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
-    CF-Server-Monitor Windows 探针 (PowerShell 版)
+    Serverless Monitor Windows 探针 (PowerShell 版)
 .DESCRIPTION
     无 Python 依赖，纯 PowerShell 实现，功能对齐 Linux install.sh
 .PARAMETER Action
@@ -97,7 +97,7 @@ $DebugPreference = "SilentlyContinue"
 
 $ErrorActionPreference = "Stop"
 
-$APP_NAME = "CF-Server-Monitor"
+$APP_NAME = "Serverless Monitor"
 $AGENT_VERSION = "1.3.8"
 $TASK_NAME = "CFProbe"
 # 获取脚本所在目录
@@ -1191,7 +1191,7 @@ function Invoke-TrayCollectLoop {
     $trayIcon = New-Object System.Windows.Forms.NotifyIcon
     $trayIcon.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon((Get-Command powershell).Source)
     $trayIcon.Visible = $true
-    $trayIcon.Text = "CF-Server-Monitor"
+    $trayIcon.Text = "Serverless Monitor"
     
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
     $statusItem = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -1200,14 +1200,14 @@ function Invoke-TrayCollectLoop {
         $config = Load-Config
         $effectiveStatusReportInterval = [math]::Max([int]$config.report_interval, 60)
         $statusAutoUpdate = ConvertTo-BinaryFlag -Value $config.auto_update -Default "0"
-        $msg = "CF-Server-Monitor 状态`n"
+        $msg = "Serverless Monitor 状态`n"
         $msg += "Server ID: $($config.server_id)`n"
         $msg += "Worker URL: $($config.worker_url)`n"
         $msg += "上报间隔: $($config.report_interval)秒`n"
         $msg += "实际上报间隔: $effectiveStatusReportInterval秒`n"
         $msg += "自动更新: $statusAutoUpdate`n"
         $msg += "日志文件: $LOG_FILE"
-        [System.Windows.Forms.MessageBox]::Show($msg, "CF-Server-Monitor", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        [System.Windows.Forms.MessageBox]::Show($msg, "Serverless Monitor", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
     })
     
     $stopItem = New-Object System.Windows.Forms.ToolStripMenuItem
@@ -1709,7 +1709,7 @@ function Start-TimerCollectLoop {
 function Install-Service {
     # 添加调试输出
     Write-Host "=============================================" -ForegroundColor Cyan
-    Write-Host "开始安装 CF-Server-Monitor" -ForegroundColor Cyan
+    Write-Host "开始安装 Serverless Monitor" -ForegroundColor Cyan
     Write-Host "=============================================" -ForegroundColor Cyan
     Write-Host "调试信息:" -ForegroundColor Cyan
     Write-Host "  Id: '$Id'" -ForegroundColor Cyan
@@ -1859,7 +1859,7 @@ function Install-Service {
 
     Write-Host ""
     Write-Host "=============================================" -ForegroundColor Green
-    Write-Host "       CF-Server-Monitor $AGENT_VERSION 安装成功" -ForegroundColor Green
+    Write-Host "       Serverless Monitor $AGENT_VERSION 安装成功" -ForegroundColor Green
     Write-Host "=============================================" -ForegroundColor Green
     Write-Host "  Server ID  : $($config.server_id)"
     Write-Host "  Worker URL : $($config.worker_url)"

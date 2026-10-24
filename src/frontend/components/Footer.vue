@@ -17,7 +17,7 @@
         role="tooltip"
       >{{ updateTitle }}</span>
     </span>
-    <span>Powered by <a href="https://github.com/huilang-me/CF-Server-Monitor" target="_blank">Serverless Monitor</a></span>
+    <span>Powered by <a href="https://github.com/veegn/serverless-monitor" target="_blank">Serverless Monitor</a></span>
   </footer>
 </template>
 

@@ -1,4 +1,4 @@
-const REMOTE_VERSION_URL = 'https://raw.githubusercontent.com/huilang-me/CF-Server-Monitor/refs/heads/main/version.json';
+const REMOTE_VERSION_URL = 'https://raw.githubusercontent.com/veegn/serverless-monitor/refs/heads/main/version.json';
 const AGENT_RELEASE_URL = 'https://api.github.com/repos/veegn/serverless-monitor-agent/releases/latest';
 const REMOTE_VERSION_TTL = 10 * 60 * 1000;
 const REMOTE_VERSION_FAILURE_TTL = 30 * 1000;
@@ -32,7 +32,7 @@ async function fetchRemoteVersion(now) {
   try {
     const [versionRes, releaseRes] = await Promise.allSettled([
       fetchWithTimeout(REMOTE_VERSION_URL, { headers: { Accept: 'application/json' } }),
-      fetchWithTimeout(AGENT_RELEASE_URL, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'CF-Server-Monitor' } })
+      fetchWithTimeout(AGENT_RELEASE_URL, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'Serverless-Monitor' } })
     ]);
 
     let workers;

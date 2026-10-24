@@ -50,7 +50,7 @@ jobs:
       - name: 📝 Create wrangler.toml
         run: |
           cat > wrangler.toml << 'WEOF'
-          name = "server-monitor-pro"
+          name = "serverless-monitor"
           main = "src/index.js"
           compatibility_date = "2024-12-01"
           compatibility_flags = ["nodejs_compat"]

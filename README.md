@@ -11,8 +11,8 @@
 </p>
 
 [![Workers](https://img.shields.io/badge/Workers-2.8.7%20Beta2-f38020?style=flat-square&logo=cloudflare&logoColor=white)](version.json)
-[![GitHub Stars](https://img.shields.io/github/stars/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/huilang-me/CF-Server-Monitor?style=flat-square&logo=github)](https://github.com/huilang-me/CF-Server-Monitor/forks)
+[![GitHub Stars](https://img.shields.io/github/stars/veegn/serverless-monitor?style=flat-square&logo=github)](https://github.com/veegn/serverless-monitor/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/veegn/serverless-monitor?style=flat-square&logo=github)](https://github.com/veegn/serverless-monitor/forks)
 [![License](https://img.shields.io/badge/License-MIT-16a34a?style=flat-square)](#许可证)
 
 [在线演示](https://demo.huilang.me/) · [API 文档](API.md) · [Agent 探针文档](https://github.com/veegn/serverless-monitor-agent) · [主题开发](theme-develop.md) · [主题开发 AI 提示词](theme-ai-prompt.md)
@@ -49,7 +49,7 @@ Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控�
 
 ## 对比优势
 
-相比传统主控式探针，CF-Server-Monitor 更适合低成本、低维护和安全优先的监控场景：
+相比传统主控式探针，Serverless Monitor 更适合低成本、低维护和安全优先的监控场景：
 
 - 免费托管：面板、API、数据库和实时推送都运行在 Cloudflare 上，按免费额度友好设计；默认 60 秒上报间隔可支持约 60 台服务器，改为 120 秒后理论上可翻倍。
 - 单向上报更安全：没有 WebSSH、没有远程命令下发、没有主控通道；Agent 只向 Worker 上报指标。
@@ -107,7 +107,7 @@ flowchart LR
 - `2.8.0`：新增主题商店，支持一键切换第三方主题。
 - `2.7.x`：重构数据库写入、月表轮换、通知模块、安全策略、服务器计费字段、导入导出和多项后台能力。
 
-Go Agent 的完整更新记录见 [cfsm-agent releases](https://github.com/huilang-me/cfsm-agent/releases)。
+Go Agent 的完整更新记录见 [serverless-monitor-agent releases](https://github.com/veegn/serverless-monitor-agent/releases)。
 
 ## 快速部署
 
@@ -155,7 +155,7 @@ Go Agent 的完整更新记录见 [cfsm-agent releases](https://github.com/huila
 
 ### 方式三：一键部署
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/huilang-me/CF-Server-Monitor)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/veegn/serverless-monitor)
 
 部署时请确认：
 
@@ -565,7 +565,7 @@ node test/api-check.js --help
 ## 项目结构
 
 ```text
-CF-Server-Monitor/
+serverless-monitor/
 ├── public/                  # 安装脚本、系统图标、旗帜、静态资源
 ├── scripts/                 # 构建脚本、GitHub Pages 构建、iOS 小组件
 ├── src/
@@ -594,7 +594,7 @@ CF-Server-Monitor/
 
 ### Agent 没有上报数据
 
-先确认服务器可以访问 Worker URL。如需开启调试，可在安装参数后追加 `-debug=1`。不同系统的日志查看命令不固定，请参考 [cfsm-agent 文档](https://github.com/huilang-me/cfsm-agent) 中对应系统的状态与日志说明。
+先确认服务器可以访问 Worker URL。如需开启调试，可在安装参数后追加 `-debug=1`。不同系统的日志查看命令不固定，请参考 [serverless-monitor-agent 文档](https://github.com/veegn/serverless-monitor-agent) 中对应系统的状态与日志说明。
 
 排查完成后移除 debug 参数并重新安装，避免日志持续增大。
 

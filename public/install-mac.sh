@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# CF-Server-Monitor 安装/卸载脚本 (macOS 适配版)
+# Serverless Monitor 安装/卸载脚本 (macOS 适配版)
 # 支持: macOS Intel / macOS Apple Silicon (M1/M2/M3/M4)
 # ==============================================================================
 
@@ -29,7 +29,7 @@ AUTO_UPDATE_DELAY_SECONDS=60
 
 print_banner() {
     echo -e "${CYAN}╔═════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║   CF-Server-Monitor (macOS Edition) ║${NC}"
+    echo -e "${CYAN}║  Serverless Monitor (macOS Edition) ║${NC}"
     echo -e "${CYAN}╚═════════════════════════════════════╝${NC}"
 }
 
@@ -1215,7 +1215,7 @@ wait_for_network() {
     return 0
 }
 
-echo "[INFO] CF-Server-Monitor Probe Engine Starting..."
+echo "[INFO] Serverless Monitor Probe Engine Starting..."
 echo "[INFO] Waiting for network availability..."
 wait_for_network
 echo "[INFO] Network ready, proceeding with initialization..."
@@ -1271,7 +1271,7 @@ else
     BOOT_TIME=0
 fi
 
-echo "[INFO] CF-Server-Monitor Probe Engine Started Successfully."
+echo "[INFO] Serverless Monitor Probe Engine Started Successfully."
 
 run_network_worker &
 WORKER_PID=$!
@@ -1736,7 +1736,7 @@ EOF
     verify_install
 
     echo -e "\n${GREEN}============================================="
-    echo -e "         CF-Server-Monitor ${AGENT_VERSION} 安装成功"
+    echo -e "         Serverless Monitor ${AGENT_VERSION} 安装成功"
     echo -e "=============================================${NC}"
     echo -e "  服务状态 : ${GREEN}Active (Running)${NC}"
     echo -e "  配置参数 :"

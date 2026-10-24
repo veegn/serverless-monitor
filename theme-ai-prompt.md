@@ -1,4 +1,4 @@
-# CF-Server-Monitor 主题开发 AI 提示词（直接粘贴给 AI 使用）
+# Serverless Monitor 主题开发 AI 提示词（直接粘贴给 AI 使用）
 
 > 使用方法：主题开发者把下面整段内容粘贴给 AI 编码助手，再附上自己的 UI 需求即可。
 > 本文是开发约束提示词；完整 API 字段定义见仓库根目录的 `theme-develop.md`，两者配套使用。
@@ -9,11 +9,11 @@
 
 ***
 
-你是一名前端主题开发者，正在为 **CF-Server-Monitor**（Cloudflare Workers + D1 的服务器监控平台）开发第三方主题。请严格遵守以下全部规则，违反任何一条"数据消耗规则"都可能会导致用户的 D1 数据库额度被耗尽，这是最严重的问题。
+你是一名前端主题开发者，正在为 **Serverless Monitor**（Cloudflare Workers + D1 的服务器监控平台）开发第三方主题。请严格遵守以下全部规则，违反任何一条"数据消耗规则"都可能会导致用户的 D1 数据库额度被耗尽，这是最严重的问题。
 
 ### 一、技术栈与项目结构
 
-主题是独立的 Vue 3 + Vite 单页应用（hash 路由），代码组织方式参考 CF-Server-Monitor 内置默认主题的 `src/frontend` 目录：
+主题是独立的 Vue 3 + Vite 单页应用（hash 路由），代码组织方式参考 Serverless Monitor 内置默认主题的 `src/frontend` 目录：
 
 ```
 src/
@@ -94,7 +94,7 @@ src/
 - 构建产物只有 `index.html` + `assets/` 两个东西；静态资源放 `assets/` 并用相对路径引用。
 - 旗帜用 `/flags/<code>.svg`、OS 图标用 `/os-icons/<filename>`（默认皮肤静态文件）。
 - 站点标题、背景图、自定义 head/脚本、深浅色（`preferred_theme`）、语言（`default_language`）由后台外观设置和 `/api/config` 控制，主题不得写死。
-- 页面底部必须展示 `Powered by CF-Server-Monitor` 并链接到 `https://github.com/huilang-me/CF-Server-Monitor/`，建议附带 `/api/config` 返回的 `version`。
+- 页面底部必须展示 `Powered by Serverless Monitor` 并链接到 `https://github.com/veegn/serverless-monitor/`，建议附带 `/api/config` 返回的 `version`。
 - 资源加载失败要让错误暴露出来，禁止静默跳转到其他页面。
 - 跨域部署时提醒用户：每个 Worker 需配置 `CORS_ALLOWED_ORIGINS` 环境变量（纯 origin、逗号分隔）。
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 # ==============================================================================
-# CF-Server-Monitor 安装/卸载脚本 (OpenWrt 专用版)
+# Serverless Monitor 安装/卸载脚本 (OpenWrt 专用版)
 # 支持: OpenWrt / LEDE / ImmortalWrt (procd + opkg)
 # 纯 POSIX sh 实现，无 bash 依赖
 # Fixes: 1. 独立协程无 wait 阻塞 2. 原子化原子覆盖 3. 兼容 procd 服务框架
@@ -43,7 +43,7 @@ mkdir -p /usr/local/bin /var/run /var/log 2>/dev/null || true
 # ---------------------------------------------------------------
 print_banner() {
     printf '%b╔═════════════════════════════════════╗%b\n' "${CYAN}" "${NC}"
-    printf '%b║     CF-Server-Monitor (OpenWrt)     ║%b\n' "${CYAN}" "${NC}"
+    printf '%b║     Serverless Monitor (OpenWrt)    ║%b\n' "${CYAN}" "${NC}"
     printf '%b╚═════════════════════════════════════╝%b\n' "${CYAN}" "${NC}"
 }
 
@@ -1189,7 +1189,7 @@ OS=""; ARCH=""; KERNEL_VERSION=""; BOOT_TIME=0; CPU_INFO=""; CPU_CORES=1
 GPU_INFO_VALUE="null"; LOAD_AVG="0 0 0"; PROCESSES=0; TCP_CONN=0; UDP_CONN=0
 RX_MONTHLY=0; TX_MONTHLY=0
 
-echo "[INFO] CF-Server-Monitor Probe Engine Started Successfully."
+echo "[INFO] Serverless Monitor Probe Engine Started Successfully."
 
 run_network_worker &
 WORKER_PID=$!
@@ -1414,7 +1414,7 @@ create_service() {
         cat > "${PROCD_FILE}" << EOF
 #!/bin/sh /etc/rc.common
 
-# CF-Server-Monitor Probe Agent (OpenWrt / procd)
+# Serverless Monitor Probe Agent (OpenWrt / procd)
 # 自动生成，请勿直接修改。
 
 START=99
@@ -1446,7 +1446,7 @@ EOF
         step "构建 OpenRC init 脚本..."
         cat > "${PROCD_FILE}" << EOF
 #!/sbin/openrc-run
-# CF-Server-Monitor Probe Agent (ImmortalWrt / OpenRC)
+# Serverless Monitor Probe Agent (ImmortalWrt / OpenRC)
 
 description="CF Server Monitor Probe Agent"
 command="/bin/sh"
@@ -1470,7 +1470,7 @@ EOF
     fi
 
     echo "#!/bin/sh
-# CF-Server-Monitor 手动启停脚本（OpenWrt 兼容）
+# Serverless Monitor 手动启停脚本（OpenWrt 兼容）
 START_CMD=\"${exec_line} >> ${LOG_FILE} 2>&1 &\"
 PID_FILE='${PID_FILE}'
 LOG_FILE='${LOG_FILE}'
@@ -1742,7 +1742,7 @@ EOF
     start_service
 
     printf '\n%b=============================================%b\n' "${GREEN}" "${NC}"
-    printf  '         CF-Server-Monitor %s 安装成功\n' "${AGENT_VERSION}"
+    printf  '         Serverless Monitor %s 安装成功\n' "${AGENT_VERSION}"
     printf  '%b=============================================%b\n' "${GREEN}" "${NC}"
     printf  '  服务状态 : %bActive (Running)%b\n' "${GREEN}" "${NC}"
     printf  '  配置参数 :\n'

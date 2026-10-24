@@ -1,6 +1,6 @@
 #!/bin/bash
 # 模拟数据发送脚本
-# 用于测试 CF-Server-Monitor 工作原理
+# 用于测试 Serverless Monitor 工作原理
 # bash test/mock-sender.sh 550e8400-e29b-41d4-a716-446655440001 123456 http://localhost:8787/update 10 1.3.0 2
 # 第6个参数为GPU数量，默认1
 # curl -k -i -X POST 'https://localhost:8787/update' \
@@ -46,7 +46,7 @@ escape_json() {
 }
 
 echo -e "${BLUE}╔══════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║       CF-Server-Monitor Mock Data Sender         ║${NC}"
+echo -e "${BLUE}║       Serverless Monitor Mock Data Sender        ║${NC}"
 echo -e "${BLUE}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
 info "服务器ID: $SERVER_ID"

@@ -1,7 +1,7 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
-    卸载 CF-Server-Monitor Windows PowerShell 探针。
+    卸载 Serverless Monitor Windows PowerShell 探针。
 .EXAMPLE
     .\uninstall.ps1
 .EXAMPLE
@@ -117,4 +117,4 @@ foreach ($directory in @($env:TEMP, $env:TMP, $ScriptDir) | Select-Object -Uniqu
     }
 }
 
-Write-Host 'CF-Server-Monitor Windows probe has been completely removed.' -ForegroundColor Green
+Write-Host 'Serverless Monitor Windows probe has been completely removed.' -ForegroundColor Green

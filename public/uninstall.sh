@@ -1,5 +1,5 @@
 #!/bin/sh
-# CF-Server-Monitor 通用卸载脚本
+# Serverless Monitor 通用卸载脚本
 # 支持: systemd、OpenRC、OpenWrt procd、Synology DSM rc.d、macOS launchd
 
 set -eu
@@ -35,7 +35,7 @@ done
 [ "$(id -u)" -eq 0 ] || die "请以 root 权限运行，例如：sudo sh uninstall.sh"
 
 if [ "$ASSUME_YES" -ne 1 ]; then
-    printf '%s' "这会停止并删除 CF-Server-Monitor 探针及其数据。继续吗？[y/N] "
+    printf '%s' "这会停止并删除 Serverless Monitor 探针及其数据。继续吗？[y/N] "
     read -r answer || answer=""
     case "$answer" in
         y|Y|yes|YES) ;;
@@ -131,4 +131,4 @@ rm -rf \
     /var/lib/cf-probe \
     /tmp/cf-probe
 
-info "CF-Server-Monitor 探针已卸载完成。"
+info "Serverless Monitor 探针已卸载完成。"
