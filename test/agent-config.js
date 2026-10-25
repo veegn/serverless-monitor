@@ -24,7 +24,7 @@ const server = {
 };
 const expected = 'collect_interval=1&report_interval=60&reset_day=15&schema_version=7&custom_ct=&custom_cu=&custom_cm=&custom_bd=&interface=&node_1=&node_2=&node_3=&node_4=&connection_mode=http&ping_mode=tcp';
 const expectedWssEnabled = 'collect_interval=1&report_interval=60&reset_day=15&schema_version=7&custom_ct=&custom_cu=&custom_cm=&custom_bd=&interface=&node_1=&node_2=&node_3=&node_4=&connection_mode=auto&wss_report_interval=2&ping_mode=tcp';
-const expectedLegacy = 'collect_interval=1&report_interval=60&reset_day=15&schema_version=3&custom_ct=&custom_cu=&custom_cm=&custom_bd=&interface=';
+const expectedLegacy = 'collect_interval=1&report_interval=60&reset_day=15&schema_version=1&custom_ct=&custom_cu=&custom_cm=&custom_bd=&interface=';
 
 const config = buildAgentConfig(server);
 assert.equal(serializeAgentConfig(config), expected);
@@ -159,25 +159,19 @@ clearSiteSettingsCache();
   const defaultSettings = await loadSiteSettings(emptySettingsDb, { forceRefresh: true });
   assert.equal(defaultSettings.show_three_net_details, 'true');
   assert.equal(defaultSettings.wss_report_enabled, 'true');
-  assert.deepEqual(defaultSettings.wss_report_hours, Array.from({ length: 24 }, (_, hour) => hour));
   assert.equal(isWssReportEnabled(defaultSettings, new Date('2026-08-20T10:00:00Z')), true);
 
   clearSiteSettingsCache();
   const initializedSiteOptions = await saveSiteOptions(createEmptySettingsDb(), { servers_optimized: 'true' });
   assert.equal(initializedSiteOptions.show_three_net_details, 'true');
   assert.equal(initializedSiteOptions.wss_report_enabled, 'true');
-  assert.deepEqual(initializedSiteOptions.wss_report_hours, Array.from({ length: 24 }, (_, hour) => hour));
 }
 assert.equal(isWssReportEnabled(
-  { wss_report_enabled: 'true', wss_report_hours: [8, 9] },
+  { wss_report_enabled: 'true' },
   new Date('2026-08-20T08:30:00Z')
 ), true);
 assert.equal(isWssReportEnabled(
-  { wss_report_enabled: 'true', wss_report_hours: [8, 9] },
-  new Date('2026-08-20T10:00:00Z')
-), false);
-assert.equal(isWssReportEnabled(
-  { wss_report_enabled: 'false', wss_report_hours: [8] },
+  { wss_report_enabled: 'false' },
   new Date('2026-08-20T08:30:00Z')
 ), false);
 assert.equal(validateAgentConfigInput({ ...server, connection_mode: 'http' }).config.connection_mode, 'http');
