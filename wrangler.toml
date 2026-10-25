@@ -6,6 +6,10 @@ compatibility_flags = ["nodejs_compat"]
 
 keep_vars = true
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 # 定时任务配置（UTC）
 # - 每分钟：执行离线节点、资源告警
 # - 每小时：合并执行其他定时任务（表轮换、旧表清理、按配置时区/小时触发服务器到期检测）
