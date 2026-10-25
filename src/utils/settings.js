@@ -660,7 +660,7 @@ export async function loadSiteSettings(db, options = {}) {
     result.auto_register_enabled = normalizeBooleanSetting(result.auto_register_enabled);
     result.auto_register_default_group = String(result.auto_register_default_group || 'Default').trim().slice(0, 50) || 'Default';
   } catch (e) {
-    console.error('加载站点设置失败:', e);
+    console.error('Failed to load site settings:', e);
   }
 
   cachedSiteSettings = result;
@@ -706,7 +706,7 @@ export async function loadAppearanceOptions(db) {
     result.preferred_theme = normalizePreferredTheme(result.preferred_theme);
     result.default_language = normalizeDefaultLanguage(result.default_language);
   } catch (e) {
-    console.error('加载外观设置失败:', e);
+    console.error('Failed to load appearance options:', e);
   }
 
   cachedAppearanceOptions = result;
@@ -812,7 +812,7 @@ let isDebugEnabled = false;
 
 export function setDebug(debug) {
   isDebugEnabled = debug === 1 || debug === '1' || debug === true;
-  if(isDebugEnabled) console.log('DEBUG模式:', isDebugEnabled);
+  if(isDebugEnabled) console.log('DEBUG mode:', isDebugEnabled);
 }
 
 export function debug(...args) {

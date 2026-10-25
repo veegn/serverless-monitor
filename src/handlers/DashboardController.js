@@ -239,8 +239,8 @@ export class DashboardController {
     DatabaseService.getLatestMetrics(env.DB, id, server).catch(() => null),
     DashboardController.getRealtimeStateForServers(env, [id])
   ]);
-  let effectiveMetrics = latestMetrics;
-  if (!effectiveMetrics && realtimeState?.latestReportUpdates?.length > 0) {
+  let effectiveMetrics = null;
+  if (realtimeState?.latestReportUpdates?.length > 0) {
     const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === id) || realtimeState.latestReportUpdates[0];
     if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
       const lastSample = doReport.samples[doReport.samples.length - 1];
@@ -249,6 +249,9 @@ export class DashboardController {
         ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
       };
     }
+  }
+  if (!effectiveMetrics) {
+    effectiveMetrics = latestMetrics;
   }
   mergeMetricsIntoServer(server, effectiveMetrics);
   let latestReportUpdates = realtimeState.latestReportUpdates;
@@ -299,8 +302,8 @@ export class DashboardController {
   const regionStats = {};
   
   for (const server of results) {
-    let latestMetrics = latestMetricsMap.get(server.id);
-    if (!latestMetrics && realtimeState?.latestReportUpdates) {
+    let latestMetrics = null;
+    if (realtimeState?.latestReportUpdates) {
       const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === server.id);
       if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
         const lastSample = doReport.samples[doReport.samples.length - 1];
@@ -309,6 +312,9 @@ export class DashboardController {
           ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
         };
       }
+    }
+    if (!latestMetrics) {
+      latestMetrics = latestMetricsMap.get(server.id);
     }
     
     let isOnline = false;

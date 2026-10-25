@@ -1216,7 +1216,7 @@ test('reportId batch idempotency and conflict rejection', async () => {
   assert.equal(agentSent[0].acceptedSamples, 2);
   assert.equal(agentSent[0].realtimeHint, undefined);
   assert.equal(agentSent[0].nextWssReportAfterMs, undefined);
-  assert.equal(savedBatches.length, 1);
+  assert.equal(savedBatches.length, 0); // 0 D1 writes (metrics stored exclusively in DO)
 
   // Duplicate submission with identical content: idempotent retry, no new D1 write
   await broadcaster._handleAgentReportMessage(ws, JSON.stringify(batchPayload));
@@ -1226,7 +1226,7 @@ test('reportId batch idempotency and conflict rejection', async () => {
   assert.equal(agentSent[1].accepted, true);
   assert.equal(agentSent[1].persisted, true);
   assert.equal(agentSent[1].acceptedSamples, 2);
-  assert.equal(savedBatches.length, 1); // Still 1! No duplicate batch written!
+  assert.equal(savedBatches.length, 0); // Still 0! No D1 batch written!
 
   // Conflicting submission with same reportId but altered content: must be rejected with 400
   const conflictingPayload = {
@@ -1240,7 +1240,7 @@ test('reportId batch idempotency and conflict rejection', async () => {
   assert.equal(closed[0].code, 1008);
 });
 
-test('Atomic batch persistence failure returns accepted: false and persisted: false', async () => {
+test('Batch persistence succeeds with DO storage regardless of D1 state', async () => {
   const failingDb = {
     prepare() {
       return {
@@ -1301,9 +1301,9 @@ test('Atomic batch persistence failure returns accepted: false and persisted: fa
   assert.equal(agentSent[0].type, 'ack');
   assert.equal(agentSent[0].ackFor, 'report');
   assert.equal(agentSent[0].reportId, 'rep-fail-01');
-  assert.equal(agentSent[0].accepted, false);
-  assert.equal(agentSent[0].persisted, false);
-  assert.equal(agentSent[0].acceptedSamples, 0);
+  assert.equal(agentSent[0].accepted, true);
+  assert.equal(agentSent[0].persisted, true);
+  assert.equal(agentSent[0].acceptedSamples, 2);
 });
 
 test('resource alert rule batches are capped at 20 rules', () => {
@@ -1613,10 +1613,7 @@ test('WSS history persistence carries pending history aggregates into next D1 wr
     });
 
     assert.equal(persisted.persisted, true);
-    assert.equal(savedRows.length, 1);
-    assert.equal(savedRows[0][4], 11);
-    assert.equal(savedRows[0][6], 40 * 1024 * 1024);
-    assert.equal(savedRows[0][7], 9 * 1024 * 1024);
+    assert.equal(savedRows.length, 0); // Metrics are no longer written to D1; handled by DO storage
     assert.equal(
       Object.prototype.hasOwnProperty.call(
         broadcaster.agentHistoryWrites.get('server-1'),
@@ -1629,31 +1626,8 @@ test('WSS history persistence carries pending history aggregates into next D1 wr
   }
 });
 
-test('WSS history persistence keeps samples received during a D1 flush for the next write', async () => {
-  const savedRows = [];
-  let releaseFirstRun = null;
-  let holdNextRun = true;
-  const db = {
-    prepare() {
-      return {
-        bind(...args) {
-          return {
-            async run() {
-              savedRows.push(args);
-              if (holdNextRun) {
-                holdNextRun = false;
-                return new Promise(resolve => {
-                  releaseFirstRun = () => resolve({ meta: { changes: 1 } });
-                });
-              }
-              return { meta: { changes: 1 } };
-            }
-          };
-        }
-      };
-    }
-  };
-  const broadcaster = makeBroadcaster([], { DB: db });
+test('WSS history persistence keeps samples received during a flush for the next interval', async () => {
+  const broadcaster = makeBroadcaster([], { DB: {} });
   const originalNow = Date.now;
   let now = Date.UTC(2026, 0, 1, 0, 0, 0);
   let attachment = {
@@ -1671,7 +1645,7 @@ test('WSS history persistence keeps samples received during a D1 flush for the n
 
   try {
     Date.now = () => now;
-    const firstWrite = broadcaster._persistAgentHistoryIfDue(ws, attachment, {
+    const firstWrite = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
       serverId: 'server-1',
       historyPartitionId: 42,
       metrics: {
@@ -1685,12 +1659,10 @@ test('WSS history persistence keeps samples received during a D1 flush for the n
       reportIntervalMs: 30_000
     });
 
-    await Promise.resolve();
-    assert.equal(savedRows.length, 1);
-    assert.equal(broadcaster.agentHistoryWrites.get('server-1').flushing, true);
+    assert.equal(firstWrite.persisted, true);
 
     now += 1_000;
-    const skippedDuringFlush = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
+    const skippedDuringInterval = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
       serverId: 'server-1',
       historyPartitionId: 42,
       metrics: {
@@ -1704,17 +1676,11 @@ test('WSS history persistence keeps samples received during a D1 flush for the n
       reportIntervalMs: 30_000
     });
 
-    assert.equal(skippedDuringFlush.persisted, false);
-    assert.equal(savedRows.length, 1);
+    assert.equal(skippedDuringInterval.persisted, false);
     assert.equal(
       broadcaster.agentHistoryWrites.get('server-1').pendingHistoryAggregate.max.net_in_speed,
       5 * 1024 * 1024
     );
-
-    releaseFirstRun();
-    const firstResult = await firstWrite;
-    assert.equal(firstResult.persisted, true);
-    assert.equal(savedRows[0][6], 10 * 1024);
 
     now += 31_000;
     const secondResult = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
@@ -1732,8 +1698,6 @@ test('WSS history persistence keeps samples received during a D1 flush for the n
     });
 
     assert.equal(secondResult.persisted, true);
-    assert.equal(savedRows.length, 2);
-    assert.equal(savedRows[1][6], 5 * 1024 * 1024);
   } finally {
     Date.now = originalNow;
   }

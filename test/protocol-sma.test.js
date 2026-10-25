@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { UpdateController } from '../src/handlers/UpdateController.js';
+import { DatabaseService } from '../src/database/DatabaseService.js';
 
 const {
   handleUpdate,
@@ -324,8 +325,10 @@ test('PROTOCOL: batch backfill (batch: true) persists all samples', async () => 
   assert.ok(res.headers.get('date'));
   assert.ok(res.headers.get(AGENT_WSS_MODE_HEADER));
 
-  // Verify that all 50 samples were persisted into metrics_history
-  assert.equal(historyInserts.length, 50, 'All 50 samples must be persisted to database');
+  // Verify that metrics are NOT written to D1; handled exclusively by DO
+  assert.equal(historyInserts.length, 0, 'No metrics inserted to D1');
+  const queued = UpdateController.batchQueue.get('srv-us-east-01')?.samples || [];
+  assert.equal(queued.length, 50, 'All 50 samples must be queued for DO');
 });
 
 test('PROTOCOL: Mode Push frame conforms to ADAPTIVE_REPORTING_SPEC', async () => {
@@ -451,17 +454,16 @@ test('PROTOCOL: batch backfill merges baseline metrics into samples when persist
 
   const res = await handleUpdate(req, env, { waitUntil() {} });
   assert.equal(res.status, 200);
-  assert.equal(historyInserts.length, 2);
+  assert.equal(historyInserts.length, 0, 'No metrics inserted to D1');
 
-  // Verify that the baseline metrics (disk_total, tcp_conn, load_avg) are preserved across all samples
-  for (const insert of historyInserts) {
-    const args = insert.args;
-    // load_avg is index 5
-    assert.equal(args[5], '1.2 1.5 1.8');
-    // tcp_conn is index 11
-    assert.equal(args[11], 42);
-    // disk_total is index 33
-    assert.equal(args[33], 50000000);
+  // Verify that the baseline metrics (disk_total, tcp_conn, load_avg) are preserved across samples queued for DO
+  const queued = UpdateController.batchQueue.get('srv-batch-base-01')?.samples || [];
+  assert.equal(queued.length, 2);
+  for (const sample of queued) {
+    const payload = sample.payload;
+    assert.equal(payload.load_avg, '1.2 1.5 1.8');
+    assert.equal(payload.tcp_conn, 42);
+    assert.equal(payload.disk_total, 50000000);
   }
 });
 
@@ -512,19 +514,16 @@ test('PROTOCOL: batch backfill downsamples multiple high-frequency samples in th
 
   const res = await handleUpdate(req, env, { waitUntil() {} });
   assert.equal(res.status, 200);
-  // 30 samples within the same minute bucket must be downsampled to exactly 1 insert
-  assert.equal(historyInserts.length, 1);
+  // D1 is not touched
+  assert.equal(historyInserts.length, 0);
 
-  const insert = historyInserts[0];
-  const args = insert.args;
-  // cpu is average of 10 and 20 -> 15 (args[4])
-  assert.equal(args[4], 15);
-  // net_in_speed is max of 1000 + i * 100 -> 3900 (args[6])
-  assert.equal(args[6], 3900);
-  // tcp_conn baseline preserved -> 42 (args[11])
-  assert.equal(args[11], 42);
-  // disk_total baseline preserved -> 50000000 (args[33])
-  assert.equal(args[33], 50000000);
+  // Downsampling logic verification
+  const downsampled = DatabaseService.downsampleHistorySamples(samples, { disk_total: 50000000, tcp_conn: 42 });
+  assert.equal(downsampled.length, 1);
+  assert.equal(downsampled[0].metrics.cpu, 15);
+  assert.equal(downsampled[0].metrics.net_in_speed, 3900);
+  assert.equal(downsampled[0].metrics.tcp_conn, 42);
+  assert.equal(downsampled[0].metrics.disk_total, 50000000);
 });
 
 test('DO WebSocket pushes cached batchUpdate on initial connect', async () => {

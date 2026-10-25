@@ -43,6 +43,7 @@ export class DatabaseService {
     .flatMap(field => [`ping_${field}`, `loss_${field}`]);
   static dashboardLatencyHistoryCache = new Map();
   static LATEST_QUERY_CHUNK_SIZE = 30;
+  static D1_BATCH_CHUNK_SIZE = 25;
   static DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
     DISK_IO_METRIC_FIELDS.map(field => [DISK_IO_FIELD_TO_COLUMN[field], field])
   ));
@@ -433,7 +434,7 @@ export class DatabaseService {
       debug('✅ 数据库初始化完成');
       DatabaseService.dbInitialized = true;
     } catch (e) {
-      console.error('❌ 数据库初始化失败:', e);
+      console.error('Failed to initialize database:', e);
     }
   }
 
@@ -461,7 +462,7 @@ export class DatabaseService {
         message: 'databaseRebuiltSuccess'
       };
     } catch (e) {
-      console.error('❌ 数据库清理失败:', e);
+      console.error('Failed to clean up database:', e);
       return {
         success: false,
         message: 'databaseRebuiltFailed',
@@ -499,7 +500,7 @@ export class DatabaseService {
         message: '表轮换成功'
       };
     } catch (e) {
-      console.error('[Cleanup] 表轮换失败:', e);
+      console.error('[Cleanup] Table rotation failed:', e);
       return { success: false, error: e.message };
     }
   }
@@ -589,21 +590,34 @@ export class DatabaseService {
     );
   }
 
+  async _executeStatementsBatch(statements) {
+    if (!Array.isArray(statements) || statements.length === 0) return;
+    if (typeof this.db.batch === 'function') {
+      for (let i = 0; i < statements.length; i += DatabaseService.D1_BATCH_CHUNK_SIZE) {
+        await this.db.batch(statements.slice(i, i + DatabaseService.D1_BATCH_CHUNK_SIZE));
+      }
+    } else {
+      for (const stmt of statements) {
+        await stmt.run();
+      }
+    }
+  }
+
   async saveMetricsHistory(serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
     try {
       await this.buildHistoryInsertStatement(serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion).run();
     } catch (e) {
       if (e?.message && /has no column/i.test(e.message)) {
-        console.warn('检测到数据库字段缺失，尝试添加缺失字段...');
+        console.warn('Detected missing database columns, attempting to add them...');
         await addHistoryColumns(this.db);
         try {
           await this.buildHistoryInsertStatement(serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion).run();
         } catch (retryError) {
-          console.error('保存历史数据失败:', retryError);
+          console.error('Failed to save metrics history:', retryError?.message || retryError);
         }
         return;
       }
-      console.error('保存历史数据失败:', e);
+      console.error('Failed to save metrics history:', e?.message || e);
     }
   }
 
@@ -625,32 +639,20 @@ export class DatabaseService {
     });
 
     try {
-      if (typeof this.db.batch === 'function') {
-        await this.db.batch(buildStatements());
-      } else {
-        for (const stmt of buildStatements()) {
-          await stmt.run();
-        }
-      }
+      await this._executeStatementsBatch(buildStatements());
     } catch (e) {
       if (e?.message && /has no column/i.test(e.message)) {
-        console.warn('检测到数据库字段缺失，尝试添加缺失字段...');
+        console.warn('Detected missing database columns, attempting to add them...');
         await addHistoryColumns(this.db);
         try {
-          if (typeof this.db.batch === 'function') {
-            await this.db.batch(buildStatements());
-          } else {
-            for (const stmt of buildStatements()) {
-              await stmt.run();
-            }
-          }
+          await this._executeStatementsBatch(buildStatements());
         } catch (retryError) {
-          console.error('批量保存历史数据失败:', retryError);
+          console.error('Failed to save batch metrics history:', retryError?.message || retryError);
           throw retryError;
         }
         return;
       }
-      console.error('批量保存历史数据失败:', e);
+      console.error('Failed to save batch metrics history:', e?.message || e);
       throw e;
     }
   }
@@ -675,7 +677,7 @@ export class DatabaseService {
       `).bind(startId, endId).first();
       return result ? normalizeProbeMetricRow(result) : null;
     } catch (e) {
-      console.error('获取最新指标数据失败:', e);
+      console.error('Failed to get latest metrics:', e);
       return null;
     }
   }
@@ -736,7 +738,7 @@ export class DatabaseService {
       setLatestMetricsCache(result);
       return result;
     } catch (e) {
-      console.error('获取所有服务器最新指标数据失败:', e);
+      console.error('Failed to get latest metrics for all servers:', e);
       const fallback = getLatestMetricsCache();
       return fallback.cache || new Map();
     }
@@ -783,7 +785,7 @@ export class DatabaseService {
       }
       return collected;
     } catch (e) {
-      console.error('获取所有服务器最新时间戳失败:', e);
+      console.error('Failed to get latest timestamps for all servers:', e);
       return cacheInfo.cache ? DatabaseService.extractTimestampsFromMetricsCache(cacheInfo.cache) : null;
     }
   }

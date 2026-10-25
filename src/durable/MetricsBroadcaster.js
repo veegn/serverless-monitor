@@ -310,6 +310,7 @@ export class MetricsBroadcaster {
     this.pendingFrontendBroadcasts = new Map();
     this.frontendBroadcastTimer = null;
     this.pendingFrontendBroadcastTs = 0;
+    this.d1QuotaExceededUntil = 0;
 
     // 自动响应 ping 心跳，DO 无需被唤醒
     // @ts-ignore - Cloudflare Workers 运行时提供 WebSocketRequestResponsePair
@@ -1285,16 +1286,7 @@ export class MetricsBroadcaster {
     this.agentHistoryWrites.set(serverId, state);
     try {
       const metrics = UpdateController.applyHistoryMetricAggregates(payload.metrics, aggregateForWrite);
-      await DatabaseService.saveMetricsHistory(
-        this.env.DB,
-        serverId,
-        payload.historyPartitionId,
-        metrics,
-        payload.regionCode,
-        payload.timestamp,
-        payload.agentVersion
-      );
-      // 月流量阈值告警：写入成功后台非阻塞执行（waitUntil），不阻塞 WebSocket 消息循环
+      // D1 入库已完全移除，仅保留 DO 存储；月流量阈值告警非阻塞后台执行（waitUntil）
       if (typeof this.state?.waitUntil === 'function') {
         this.state.waitUntil((async () => {
           try {
@@ -1440,35 +1432,15 @@ export class MetricsBroadcaster {
     let accepted = true;
 
     if (data.batch === true && samples.length > 0) {
-      const d1Start = Date.now();
-      try {
-        await DatabaseService.saveMetricsHistoryBatch(
-          this.env.DB,
-          context.serverId,
-          context.historyPartitionId,
-          samples,
-          context.regionCode,
-          context.agentVersion,
-          latestMetrics
-        );
-        persisted = { persisted: true, nextD1WriteAfterMs: 0 };
-        acceptedSamples = samples.length;
-        logD1BatchPersist({
-          serverId: context.serverId,
-          sampleCount: samples.length,
-          durationMs: Date.now() - d1Start
-        }, true);
-      } catch (err) {
-        console.error('[update-ws] Failed to persist batch metrics:', err?.message || err);
-        persisted = { persisted: false, nextD1WriteAfterMs: 0 };
-        acceptedSamples = 0;
-        accepted = false;
-        logD1BatchPersist({
-          serverId: context.serverId,
-          sampleCount: samples.length,
-          durationMs: Date.now() - d1Start
-        }, false, err);
-      }
+      // D1 入库已完全移除，指标数据纯由 DO 内存与 DO Storage 接管（方案 A）
+      persisted = { persisted: true, nextD1WriteAfterMs: 0 };
+      acceptedSamples = samples.length;
+      accepted = true;
+      logD1BatchPersist({
+        serverId: context.serverId,
+        sampleCount: samples.length,
+        durationMs: 0
+      }, true);
     } else {
       try {
         persisted = await this._persistAgentHistoryIfDue(ws, context.attachment, {

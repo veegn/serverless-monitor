@@ -971,34 +971,7 @@ export class UpdateController {
     const latestMetrics = UpdateController.getReportMetrics(data, latestSample);
     const isBatchBackfill = data.batch === true && samples.length > 1;
 
-    // D1 写入容错降级：优先尝试写入 D1，若超限或数据库异常绝不中断上报和实时流
-    try {
-      if (isBatchBackfill) {
-        await DatabaseService.saveMetricsHistoryBatch(
-          env.DB,
-          serverId,
-          historyPartitionId,
-          samples,
-          regionCode,
-          agentVersion,
-          latestMetrics
-        );
-      } else {
-        const historyMetrics = UpdateController.getHistoryMetrics(data, samples, latestSample);
-        await DatabaseService.saveMetricsHistory(
-          env.DB,
-          serverId,
-          historyPartitionId,
-          historyMetrics,
-          regionCode,
-          latestSample.ts,
-          agentVersion
-        );
-      }
-    } catch (d1Err) {
-      console.warn(`[Update] D1 metrics persist degraded to DO storage:`, d1Err?.message || d1Err);
-    }
-
+    // D1 入库已完全移除，指标数据纯由 DO 内存与 DO Storage 接管（方案 A）
     const broadcastSamples = UpdateController.toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);
 
     cacheLatestReportUpdate(serverId, broadcastSamples, Date.now());
@@ -1006,7 +979,7 @@ export class UpdateController {
     UpdateController.queueBroadcastSamples(serverId, broadcastSamples);
     if (ctx && ctx.waitUntil) {
       ctx.waitUntil(UpdateController._ensureBatchFlush(env));
-      // 月流量阈值告警：复用已加载的 serverDetail 与刚入库的 historyMetrics，非阻塞后台执行
+      // 月流量阈值告警：复用已加载的 serverDetail 与 latestMetrics，非阻塞后台执行
       ctx.waitUntil(NotificationService.evaluateTrafficAlert(env, serverDetail, latestMetrics, {
         patchCache: (sid, value) => patchServerDetailCache(sid, { traffic_alert_state: value })
       }));

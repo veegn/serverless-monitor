@@ -1126,7 +1126,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       });
     }
   } catch (e) {
-    console.error('离线检测失败:', e);
+    console.error('Offline detection failed:', e);
   }
 }
 
@@ -1313,7 +1313,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       }
     }
   } catch (e) {
-    console.error('资源负载告警检测失败:', e);
+    console.error('Resource alert evaluation failed:', e);
   }
 }
 
@@ -1383,7 +1383,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
             message: renewalList
           });
         } catch (e) {
-          console.error('自动续费成功通知发送失败:', e);
+          console.error('Failed to send auto-renewal notification:', e);
         }
       }
     }
@@ -1401,12 +1401,12 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
           message: serverList
         });
       } catch (e) {
-        console.error('服务器到期提醒通知发送失败:', e);
+        console.error('Failed to send expiration reminder notification:', e);
       }
     }
     return true;
   } catch (e) {
-    console.error('到期检测失败:', e);
+    console.error('Expiration check failed:', e);
     return false;
   }
 }

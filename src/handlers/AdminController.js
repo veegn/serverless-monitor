@@ -86,7 +86,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
 
   static async handleServerMutationError(db, error, fallbackMessage) {
   if (AdminController.isMissingColumnError(error)) {
-    console.warn('检测到数据库字段缺失，尝试添加缺失字段...');
+    console.warn('Detected missing database columns, attempting to add them...');
     await addServerColumns(db);
     return createBadRequestResponse('dbColumnsAdded');
   }
@@ -973,7 +973,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       try {
         await addServerColumns(env.DB);
       } catch (e) {
-        console.error('[settings-save] 保存设置后补列失败:', e);
+        console.error('[settings-save] Failed to add missing columns after saving settings:', e);
       }
       const shouldCloseAgentWssReports = !isWssReportEnabled({ ...sys, ...siteOptions });
       // Keep existing states on rule edits so threshold increases can emit recovery notifications.
@@ -1215,7 +1215,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       try {
         await addServerColumns(env.DB);
       } catch (e) {
-        console.error('[import_servers] 导入前补列失败:', e);
+        console.error('[import_servers] Failed to add missing columns before importing servers:', e);
       }
 
       const existingServers = await env.DB.prepare('SELECT id FROM servers').all();
@@ -1336,7 +1336,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
     return createBadRequestResponse('unknownAction');
     
   } catch (e) {
-    console.error('Admin API 错误:', e);
+    console.error('Admin API error:', e);
     return createErrorResponse(e);
   }
 }
