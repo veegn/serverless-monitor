@@ -14,14 +14,30 @@ import {
 } from '../utils/csp.js';
 import { checkAuth } from '../middleware/auth.js';
 
-const IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
-const PREVIEW_COOKIE = 'cfsm_theme_preview';
-const PREVIEW_AUTH_COOKIE = 'cfsm_theme_preview_auth';
+/**
+ * FrontendController
+ * 负责内置前端 HTML/静态资源加载、主题注入以及 CSP 策略配置
+ */
+export class FrontendController {
+  constructor(env, ctx = null) {
+    this.env = env;
+    this.ctx = ctx;
+  }
 
-let filesCache = null;
+  // --- 实例代理方法 ---
 
-async function loadFrontendFiles(env) {
-  if (filesCache) return filesCache;
+  async serve(request, settings = null) {
+    return FrontendController.serveFrontend(request, this.env, settings);
+  }
+
+static IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+  static PREVIEW_COOKIE = 'cfsm_theme_preview';
+  static PREVIEW_AUTH_COOKIE = 'cfsm_theme_preview_auth';
+
+  static filesCache = null;
+
+  static async loadFrontendFiles(env) {
+  if (FrontendController.filesCache) return FrontendController.filesCache;
 
   try {
     const files = {};
@@ -44,15 +60,15 @@ async function loadFrontendFiles(env) {
       }
     }
 
-    filesCache = files;
-    return filesCache;
+    FrontendController.filesCache = files;
+    return FrontendController.filesCache;
   } catch (e) {
     console.error('[ERROR] Failed to load frontend files:', e);
     return {};
   }
 }
 
-function escapeHtml(str) {
+  static escapeHtml(str) {
   return String(str)
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -61,41 +77,41 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-function insertBeforeHeadClose(html, content) {
+  static insertBeforeHeadClose(html, content) {
   if (/<\/head>/i.test(html)) {
     return html.replace(/<\/head>/i, `${content}\n</head>`);
   }
   return `${content}\n${html}`;
 }
 
-function injectTitle(html, title) {
-  const safeTitle = escapeHtml(title || DEFAULT_SITE_TITLE);
+  static injectTitle(html, title) {
+  const safeTitle = FrontendController.escapeHtml(title || DEFAULT_SITE_TITLE);
   if (/<title>.*?<\/title>/is.test(html)) {
     return html.replace(/<title>.*?<\/title>/is, `<title>${safeTitle}</title>`);
   }
-  return insertBeforeHeadClose(html, `<title>${safeTitle}</title>`);
+  return FrontendController.insertBeforeHeadClose(html, `<title>${safeTitle}</title>`);
 }
 
-function injectFavicon(html, favicon) {
+  static injectFavicon(html, favicon) {
   const value = String(favicon || '').trim();
   if (!value) return html;
 
   const withoutExistingIcons = html.replace(/<link\b(?=[^>]*\brel=["'][^"']*(?:shortcut\s+icon|icon)[^"']*["'])[^>]*>\s*/gi, '');
-  const safeFavicon = escapeHtml(value);
-  return insertBeforeHeadClose(withoutExistingIcons, `<link rel="icon" href="${safeFavicon}">`);
+  const safeFavicon = FrontendController.escapeHtml(value);
+  return FrontendController.insertBeforeHeadClose(withoutExistingIcons, `<link rel="icon" href="${safeFavicon}">`);
 }
 
-function getEnvApiBases(env) {
+  static getEnvApiBases(env) {
   return parseCspOrigins(env?.API_BASE || '');
 }
 
-function injectAppearanceSettings(html, settings, env = {}) {
+  static injectAppearanceSettings(html, settings, env = {}) {
   let modifiedHtml = stripCspMeta(html);
 
-  modifiedHtml = injectTitle(modifiedHtml, settings.site_title || DEFAULT_SITE_TITLE);
-  modifiedHtml = injectFavicon(modifiedHtml, settings.favicon);
+  modifiedHtml = FrontendController.injectTitle(modifiedHtml, settings.site_title || DEFAULT_SITE_TITLE);
+  modifiedHtml = FrontendController.injectFavicon(modifiedHtml, settings.favicon);
 
-  const envApiBases = getEnvApiBases(env);
+  const envApiBases = FrontendController.getEnvApiBases(env);
   modifiedHtml = injectApiBase(modifiedHtml, envApiBases);
 
   const cspStatic = settings.csp_static || '';
@@ -109,7 +125,7 @@ function injectAppearanceSettings(html, settings, env = {}) {
   const csp = buildCspHeader({ staticDomains, apiDomains });
 
   if (settings.custom_head) {
-    modifiedHtml = insertBeforeHeadClose(modifiedHtml, settings.custom_head);
+    modifiedHtml = FrontendController.insertBeforeHeadClose(modifiedHtml, settings.custom_head);
   }
 
   if (settings.custom_script) {
@@ -121,7 +137,7 @@ function injectAppearanceSettings(html, settings, env = {}) {
   }
 
   if (settings.custom_bg || settings.custom_bg_mobile) {
-    modifiedHtml = insertBeforeHeadClose(modifiedHtml, buildBackgroundStyle(settings.custom_bg, settings.custom_bg_mobile));
+    modifiedHtml = FrontendController.insertBeforeHeadClose(modifiedHtml, buildBackgroundStyle(settings.custom_bg, settings.custom_bg_mobile));
   }
 
   return {
@@ -130,7 +146,7 @@ function injectAppearanceSettings(html, settings, env = {}) {
   };
 }
 
-function getContentType(path) {
+  static getContentType(path) {
   const cleanPath = String(path || '').split('?')[0].toLowerCase();
   if (cleanPath.endsWith('.html')) return 'text/html;charset=UTF-8';
   if (cleanPath.endsWith('.js') || cleanPath.endsWith('.mjs')) return 'application/javascript;charset=UTF-8';
@@ -151,7 +167,7 @@ function getContentType(path) {
   return 'application/octet-stream';
 }
 
-function normalizeThemeUrl(value) {
+  static normalizeThemeUrl(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
 
@@ -179,8 +195,8 @@ function normalizeThemeUrl(value) {
   }
 }
 
-function parseThemeUrl(themeUrl) {
-  const normalized = normalizeThemeUrl(themeUrl);
+  static parseThemeUrl(themeUrl) {
+  const normalized = FrontendController.normalizeThemeUrl(themeUrl);
   if (!normalized) return null;
 
   const url = new URL(normalized);
@@ -201,22 +217,22 @@ function parseThemeUrl(themeUrl) {
   };
 }
 
-function isCommitRef(ref) {
+  static isCommitRef(ref) {
   return /^[a-f0-9]{40}$/i.test(ref);
 }
 
-function getThemeWorkerCacheTtl(parsedTheme) {
-  return isCommitRef(parsedTheme.ref) ? THEME_COMMIT_CACHE_TTL_SECONDS : THEME_ASSET_CACHE_TTL_SECONDS;
+  static getThemeWorkerCacheTtl(parsedTheme) {
+  return FrontendController.isCommitRef(parsedTheme.ref) ? THEME_COMMIT_CACHE_TTL_SECONDS : THEME_ASSET_CACHE_TTL_SECONDS;
 }
 
-function getThemeAssetBrowserCacheControl(parsedTheme) {
-  if (isCommitRef(parsedTheme.ref)) {
-    return IMMUTABLE_ASSET_CACHE_CONTROL;
+  static getThemeAssetBrowserCacheControl(parsedTheme) {
+  if (FrontendController.isCommitRef(parsedTheme.ref)) {
+    return FrontendController.IMMUTABLE_ASSET_CACHE_CONTROL;
   }
   return `public, max-age=${THEME_ASSET_CACHE_TTL_SECONDS}`;
 }
 
-function getCookie(request, name) {
+  static getCookie(request, name) {
   const cookie = request.headers.get('Cookie') || '';
   for (const part of cookie.split(';')) {
     const [key, ...valueParts] = part.trim().split('=');
@@ -227,28 +243,28 @@ function getCookie(request, name) {
   return '';
 }
 
-function getPreviewThemeUrlFromCookie(request) {
-  const value = getCookie(request, PREVIEW_COOKIE);
+  static getPreviewThemeUrlFromCookie(request) {
+  const value = FrontendController.getCookie(request, FrontendController.PREVIEW_COOKIE);
   if (!value) return '';
   try {
-    return normalizeThemeUrl(decodeURIComponent(value));
+    return FrontendController.normalizeThemeUrl(decodeURIComponent(value));
   } catch (_) {
     return '';
   }
 }
 
-function buildPreviewCookie(request, themeUrl) {
+  static buildPreviewCookie(request, themeUrl) {
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  return `${PREVIEW_COOKIE}=${encodeURIComponent(themeUrl)}; Max-Age=${THEME_ASSET_CACHE_TTL_SECONDS}; Path=/; SameSite=Lax${secure}`;
+  return `${FrontendController.PREVIEW_COOKIE}=${encodeURIComponent(themeUrl)}; Max-Age=${THEME_ASSET_CACHE_TTL_SECONDS}; Path=/; SameSite=Lax${secure}`;
 }
 
-function buildClearPreviewCookie(request) {
+  static buildClearPreviewCookie(request) {
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  return `${PREVIEW_COOKIE}=; Max-Age=0; Path=/; SameSite=Lax${secure}`;
+  return `${FrontendController.PREVIEW_COOKIE}=; Max-Age=0; Path=/; SameSite=Lax${secure}`;
 }
 
-async function checkPreviewAuth(request, env, settings) {
-  const token = getCookie(request, PREVIEW_AUTH_COOKIE);
+  static async checkPreviewAuth(request, env, settings) {
+  const token = FrontendController.getCookie(request, FrontendController.PREVIEW_AUTH_COOKIE);
   if (!token) return false;
 
   try {
@@ -268,12 +284,12 @@ async function checkPreviewAuth(request, env, settings) {
   }
 }
 
-function getPreviewThemeUrlFromQuery(url) {
+  static getPreviewThemeUrlFromQuery(url) {
   if (!url.searchParams.has('theme_url')) return '';
-  return normalizeThemeUrl(url.searchParams.get('theme_url'));
+  return FrontendController.normalizeThemeUrl(url.searchParams.get('theme_url'));
 }
 
-function normalizeAssetPath(pathname) {
+  static normalizeAssetPath(pathname) {
   const raw = pathname.slice('/assets/'.length);
   if (!raw) return '';
 
@@ -288,11 +304,11 @@ function normalizeAssetPath(pathname) {
   }
 }
 
-function normalizeThemeAssetUrls(html) {
+  static normalizeThemeAssetUrls(html) {
   return html.replace(/\b(src|href)=(["'])\.?\/?assets\//gi, '$1=$2/assets/');
 }
 
-function stripBrowserCacheHeaders(response) {
+  static stripBrowserCacheHeaders(response) {
   const headers = new Headers(response.headers);
   headers.delete('Cache-Control');
   headers.delete('CDN-Cache-Control');
@@ -306,14 +322,14 @@ function stripBrowserCacheHeaders(response) {
   });
 }
 
-async function fetchWithCache(rawUrl, contentType, workerCacheUrl, workerCacheTtl = THEME_ASSET_CACHE_TTL_SECONDS) {
+  static async fetchWithCache(rawUrl, contentType, workerCacheUrl, workerCacheTtl = THEME_ASSET_CACHE_TTL_SECONDS) {
   const cacheKey = new Request(workerCacheUrl || rawUrl, { method: 'GET' });
   const cache = typeof caches !== 'undefined' ? caches.default : null;
 
   if (cache) {
     const cached = await cache.match(cacheKey);
     if (cached) {
-      return stripBrowserCacheHeaders(cached);
+      return FrontendController.stripBrowserCacheHeaders(cached);
     }
   }
 
@@ -346,13 +362,13 @@ async function fetchWithCache(rawUrl, contentType, workerCacheUrl, workerCacheTt
     await cache.put(cacheKey, response.clone()).catch(() => {});
   }
 
-  return stripBrowserCacheHeaders(response);
+  return FrontendController.stripBrowserCacheHeaders(response);
 }
 
-async function serveThemeAsset(request, themeUrl) {
-  const parsedTheme = parseThemeUrl(themeUrl);
+  static async serveThemeAsset(request, themeUrl) {
+  const parsedTheme = FrontendController.parseThemeUrl(themeUrl);
   const url = new URL(request.url);
-  const assetPath = normalizeAssetPath(url.pathname);
+  const assetPath = FrontendController.normalizeAssetPath(url.pathname);
 
   if (!parsedTheme || !assetPath) {
     return new Response('Not Found', {
@@ -364,17 +380,17 @@ async function serveThemeAsset(request, themeUrl) {
     });
   }
 
-  const contentType = getContentType(assetPath);
-  const response = await fetchWithCache(
+  const contentType = FrontendController.getContentType(assetPath);
+  const response = await FrontendController.fetchWithCache(
     `${parsedTheme.rawBase}/assets/${assetPath}`,
     contentType,
     `${parsedTheme.cacheBase}/assets/${assetPath}`,
-    getThemeWorkerCacheTtl(parsedTheme)
+    FrontendController.getThemeWorkerCacheTtl(parsedTheme)
   );
   const headers = new Headers(response.headers);
   headers.set('X-CFSM-Theme-Asset', '1');
   if (response.ok) {
-    headers.set('Cache-Control', getThemeAssetBrowserCacheControl(parsedTheme));
+    headers.set('Cache-Control', FrontendController.getThemeAssetBrowserCacheControl(parsedTheme));
   }
 
   return new Response(response.body, {
@@ -384,23 +400,23 @@ async function serveThemeAsset(request, themeUrl) {
   });
 }
 
-async function loadThemeIndex(themeUrl) {
-  const parsedTheme = parseThemeUrl(themeUrl);
+  static async loadThemeIndex(themeUrl) {
+  const parsedTheme = FrontendController.parseThemeUrl(themeUrl);
   if (!parsedTheme) return null;
 
-  const response = await fetchWithCache(
+  const response = await FrontendController.fetchWithCache(
     `${parsedTheme.rawBase}/index.html`,
     'text/html;charset=UTF-8',
     `${parsedTheme.cacheBase}/index.html`,
-    getThemeWorkerCacheTtl(parsedTheme)
+    FrontendController.getThemeWorkerCacheTtl(parsedTheme)
   );
 
   if (!response.ok) return null;
-  return normalizeThemeAssetUrls(await response.text());
+  return FrontendController.normalizeThemeAssetUrls(await response.text());
 }
 
-function buildHtmlResponse(html, settings, request, env = {}, previewThemeUrl = '') {
-  const rendered = injectAppearanceSettings(html, settings, env);
+  static buildHtmlResponse(html, settings, request, env = {}, previewThemeUrl = '') {
+  const rendered = FrontendController.injectAppearanceSettings(html, settings, env);
   const headers = new Headers({
     'Content-Type': 'text/html;charset=UTF-8',
     'X-Content-Type-Options': 'nosniff',
@@ -409,15 +425,15 @@ function buildHtmlResponse(html, settings, request, env = {}, previewThemeUrl = 
   });
 
   if (previewThemeUrl) {
-    headers.append('Set-Cookie', buildPreviewCookie(request, previewThemeUrl));
-  } else if (getPreviewThemeUrlFromCookie(request)) {
-    headers.append('Set-Cookie', buildClearPreviewCookie(request));
+    headers.append('Set-Cookie', FrontendController.buildPreviewCookie(request, previewThemeUrl));
+  } else if (FrontendController.getPreviewThemeUrlFromCookie(request)) {
+    headers.append('Set-Cookie', FrontendController.buildClearPreviewCookie(request));
   }
 
   return new Response(rendered.html, { headers });
 }
 
-function buildThemeIndexErrorResponse() {
+  static buildThemeIndexErrorResponse() {
   return new Response('Theme index.html is unavailable', {
     status: 502,
     headers: {
@@ -427,11 +443,11 @@ function buildThemeIndexErrorResponse() {
   });
 }
 
-function buildPreviewUnauthorizedResponse(request, isAsset = false) {
+  static buildPreviewUnauthorizedResponse(request, isAsset = false) {
   const headers = new Headers({
     'Content-Type': 'text/plain;charset=UTF-8',
     'X-Content-Type-Options': 'nosniff',
-    'Set-Cookie': buildClearPreviewCookie(request)
+    'Set-Cookie': FrontendController.buildClearPreviewCookie(request)
   });
 
   if (isAsset) {
@@ -444,29 +460,29 @@ function buildPreviewUnauthorizedResponse(request, isAsset = false) {
   });
 }
 
-function resolveThemeUrlForAsset(request, settings) {
+  static resolveThemeUrlForAsset(request, settings) {
   const url = new URL(request.url);
-  const queryThemeUrl = getPreviewThemeUrlFromQuery(url);
+  const queryThemeUrl = FrontendController.getPreviewThemeUrlFromQuery(url);
   if (queryThemeUrl) {
     return { themeUrl: queryThemeUrl, preview: true };
   }
 
-  const cookieThemeUrl = getPreviewThemeUrlFromCookie(request);
+  const cookieThemeUrl = FrontendController.getPreviewThemeUrlFromCookie(request);
   if (cookieThemeUrl) {
     return { themeUrl: cookieThemeUrl, preview: true };
   }
 
   return {
-    themeUrl: normalizeThemeUrl(settings?.theme_url),
+    themeUrl: FrontendController.normalizeThemeUrl(settings?.theme_url),
     preview: false
   };
 }
 
-function shouldUseBuiltinFrontend(path) {
+  static shouldUseBuiltinFrontend(path) {
   return path === '/admin' || path.startsWith('/admin/');
 }
 
-export async function serveFrontend(request, env, settings = null) {
+  static async serveFrontend(request, env, settings = null) {
   const url = new URL(request.url);
   const path = url.pathname;
 
@@ -475,40 +491,40 @@ export async function serveFrontend(request, env, settings = null) {
   }
 
   if (request.method === 'GET' && path.startsWith('/assets/')) {
-    const resolvedTheme = resolveThemeUrlForAsset(request, settings);
+    const resolvedTheme = FrontendController.resolveThemeUrlForAsset(request, settings);
     if (!resolvedTheme.themeUrl) {
       return new Response('Not Found', {
         status: 404,
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
       });
     }
-    if (resolvedTheme.preview && !await checkPreviewAuth(request, env, settings)) {
-      return buildPreviewUnauthorizedResponse(request, true);
+    if (resolvedTheme.preview && !await FrontendController.checkPreviewAuth(request, env, settings)) {
+      return FrontendController.buildPreviewUnauthorizedResponse(request, true);
     }
-    return serveThemeAsset(request, resolvedTheme.themeUrl);
+    return FrontendController.serveThemeAsset(request, resolvedTheme.themeUrl);
   }
 
-  const previewThemeUrl = getPreviewThemeUrlFromQuery(url);
-  const configuredThemeUrl = normalizeThemeUrl(settings.theme_url);
+  const previewThemeUrl = FrontendController.getPreviewThemeUrlFromQuery(url);
+  const configuredThemeUrl = FrontendController.normalizeThemeUrl(settings.theme_url);
   const effectiveThemeUrl = previewThemeUrl || configuredThemeUrl;
 
-  if (previewThemeUrl && !await checkPreviewAuth(request, env, settings)) {
-    return buildPreviewUnauthorizedResponse(request);
+  if (previewThemeUrl && !await FrontendController.checkPreviewAuth(request, env, settings)) {
+    return FrontendController.buildPreviewUnauthorizedResponse(request);
   }
 
-  if (!shouldUseBuiltinFrontend(path) && effectiveThemeUrl) {
-    const themeHtml = await loadThemeIndex(effectiveThemeUrl);
+  if (!FrontendController.shouldUseBuiltinFrontend(path) && effectiveThemeUrl) {
+    const themeHtml = await FrontendController.loadThemeIndex(effectiveThemeUrl);
     if (themeHtml) {
-      return buildHtmlResponse(themeHtml, settings, request, env, previewThemeUrl);
+      return FrontendController.buildHtmlResponse(themeHtml, settings, request, env, previewThemeUrl);
     }
-    return buildThemeIndexErrorResponse();
+    return FrontendController.buildThemeIndexErrorResponse();
   }
 
-  const files = await loadFrontendFiles(env);
+  const files = await FrontendController.loadFrontendFiles(env);
   const html = files['dashboard.html'];
 
   if (html) {
-    return buildHtmlResponse(html, settings, request, env);
+    return FrontendController.buildHtmlResponse(html, settings, request, env);
   }
 
   return new Response('Frontend not available. Please build the frontend first with `npm run build:frontend`.', {
@@ -516,18 +532,4 @@ export async function serveFrontend(request, env, settings = null) {
     headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
   });
 }
-
-/**
- * FrontendController
- * 负责内置前端 HTML/静态资源加载、主题注入以及 CSP 策略配置
- */
-export class FrontendController {
-  constructor(env, ctx = null) {
-    this.env = env;
-    this.ctx = ctx;
-  }
-
-  async serve(request, settings = null) {
-    return serveFrontend(request, this.env, settings);
-  }
 }

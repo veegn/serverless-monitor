@@ -1,5 +1,5 @@
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
-import { getLatestMetricsForAllServers } from '../database/schema.js';
+import { DatabaseService } from '../database/DatabaseService.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
 import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
@@ -7,7 +7,7 @@ import { normalizePctOrNull } from '../utils/traffic.js';
 import { verifyTurnstileToken, hashPassword } from '../utils/common.js';
 import { AppError, createSuccessResponse, createBadRequestResponse, createUnauthorizedResponse, createErrorResponse } from '../utils/errors.js';
 import { addServerColumns } from '../database/updateDatabase.js';
-import { clearResourceAlertState, isSmtpNotificationTarget, sendNotification } from '../services/notification.js';
+import { NotificationService } from '../services/NotificationService.js';
 import { getNotificationMessages } from '../services/notificationMessages.js';
 import { getNextServerHistoryPartitionId, HISTORY_MAX_PARTITION_ID } from '../database/indexOptimization.js';
 import { isValidTrafficCorrection, normalizeConnectionMode, normalizePingMode, normalizeWssReportInterval, validateAgentConfigInput, validatePingNode, validateNetworkInterfaces } from '../utils/agentConfig.js';
@@ -15,32 +15,48 @@ import { scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../u
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import { THEME_PREVIEW_AUTH_TTL_SECONDS } from '../utils/config.js';
 
-const PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4'];
-const THEME_PREVIEW_AUTH_COOKIE = 'cfsm_theme_preview_auth';
-const DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
+/**
+ * AdminController
+ * 负责管理后台 API 操作（服务器增删改查、站点配置、凭据与通知测试等）
+ */
+export class AdminController {
+  constructor(env, ctx = null) {
+    this.env = env;
+    this.ctx = ctx;
+  }
 
-function toUsageNumber(value) {
+  // --- 实例代理方法 ---
+
+  async handle(request, sys, loadFullSettings = null) {
+    return AdminController.handleAdminAPI(request, this.env, sys, loadFullSettings, this.ctx);
+  }
+
+static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4'];
+  static THEME_PREVIEW_AUTH_COOKIE = 'cfsm_theme_preview_auth';
+  static DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO = 20;
+
+  static toUsageNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
-function isDurableObjectsHibernationInvocationType(value) {
+  static isDurableObjectsHibernationInvocationType(value) {
   const type = String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
   if (!type) return false;
   return type.includes('hibernation') || (type.includes('websocket') && type.includes('message'));
 }
 
-function normalizeBooleanFlag(value) {
+  static normalizeBooleanFlag(value) {
   return value === true || value === 1 || value === '1' || value === 'true' ? '1' : '0';
 }
 
-function normalizeServerRegion(value) {
+  static normalizeServerRegion(value) {
   return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 16);
 }
 
-function normalizeServerBillingData(data = {}) {
+  static normalizeServerBillingData(data = {}) {
   const billingCycle = normalizeBillingCycle(data.billing_cycle || detectBillingCycle(data.price));
-  const autoRenewal = normalizeBooleanFlag(data.auto_renewal);
+  const autoRenewal = AdminController.normalizeBooleanFlag(data.auto_renewal);
 
   return {
     price: normalizePrice(data.price),
@@ -55,21 +71,21 @@ function normalizeServerBillingData(data = {}) {
   };
 }
 
-function isValidUUID(id) {
+  static isValidUUID(id) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
 }
 
-function isValidName(name) {
+  static isValidName(name) {
   return name && typeof name === 'string' && name.trim().length > 0 && name.length <= 100;
 }
 
-function isMissingColumnError(error) {
+  static isMissingColumnError(error) {
   const message = error?.message || String(error);
   return /no such column|has no column/i.test(message);
 }
 
-async function handleServerMutationError(db, error, fallbackMessage) {
-  if (isMissingColumnError(error)) {
+  static async handleServerMutationError(db, error, fallbackMessage) {
+  if (AdminController.isMissingColumnError(error)) {
     console.warn('检测到数据库字段缺失，尝试添加缺失字段...');
     await addServerColumns(db);
     return createBadRequestResponse('dbColumnsAdded');
@@ -79,7 +95,7 @@ async function handleServerMutationError(db, error, fallbackMessage) {
   return createBadRequestResponse(errMsg || fallbackMessage);
 }
 
-function sanitizeCspDomains(input) {
+  static sanitizeCspDomains(input) {
   if (!input || typeof input !== 'string') return '';
   return input
     .split(',')
@@ -90,7 +106,7 @@ function sanitizeCspDomains(input) {
     .join(',');
 }
 
-function normalizeCspOrigin(value) {
+  static normalizeCspOrigin(value) {
   const raw = String(value || '').trim();
   if (!raw || /[\s;"']/.test(raw)) return '';
   try {
@@ -104,7 +120,7 @@ function normalizeCspOrigin(value) {
   }
 }
 
-function normalizePingNodeFields(source, fields = PING_NODE_FIELDS) {
+  static normalizePingNodeFields(source, fields = AdminController.PING_NODE_FIELDS) {
   const values = {};
   for (const field of fields) {
     if (source?.[field] === undefined) continue;
@@ -118,11 +134,11 @@ function normalizePingNodeFields(source, fields = PING_NODE_FIELDS) {
   return { valid: true, values };
 }
 
-function normalizeImportedPingNodeValue(value) {
+  static normalizeImportedPingNodeValue(value) {
   return value === null || value === undefined ? '' : value;
 }
 
-function normalizeNetworkInterfaceField(value) {
+  static normalizeNetworkInterfaceField(value) {
   const result = validateNetworkInterfaces(value);
   if (!result.valid) {
     return { valid: false, value: '' };
@@ -130,36 +146,36 @@ function normalizeNetworkInterfaceField(value) {
   return { valid: true, value: result.value };
 }
 
-function hasAppearanceInput(settings) {
+  static hasAppearanceInput(settings) {
   if (settings.appearance_options !== undefined) return true;
   return APPEARANCE_FIELDS
     .filter(field => field !== 'theme_options')
     .some(field => settings[field] !== undefined);
 }
 
-function extractBearerToken(request) {
+  static extractBearerToken(request) {
   const authHeader = request.headers.get('Authorization') || '';
   const parts = authHeader.trim().split(/\s+/);
   return parts[0] === 'Bearer' && parts[1] ? parts[1] : '';
 }
 
-function buildThemePreviewUrl(request, themeUrl) {
+  static buildThemePreviewUrl(request, themeUrl) {
   const previewUrl = new URL('/', request.url);
   previewUrl.searchParams.set('theme_url', themeUrl);
   return previewUrl.toString();
 }
 
-function buildThemePreviewAuthCookie(request, token) {
+  static buildThemePreviewAuthCookie(request, token) {
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  return `${THEME_PREVIEW_AUTH_COOKIE}=${encodeURIComponent(token)}; Max-Age=${THEME_PREVIEW_AUTH_TTL_SECONDS}; Path=/; HttpOnly; SameSite=Lax${secure}`;
+  return `${AdminController.THEME_PREVIEW_AUTH_COOKIE}=${encodeURIComponent(token)}; Max-Age=${THEME_PREVIEW_AUTH_TTL_SECONDS}; Path=/; HttpOnly; SameSite=Lax${secure}`;
 }
 
-function buildClearThemePreviewAuthCookie(request) {
+  static buildClearThemePreviewAuthCookie(request) {
   const secure = new URL(request.url).protocol === 'https:' ? '; Secure' : '';
-  return `${THEME_PREVIEW_AUTH_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${secure}`;
+  return `${AdminController.THEME_PREVIEW_AUTH_COOKIE}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${secure}`;
 }
 
-function createSuccessResponseWithCookies(data, cookies = []) {
+  static createSuccessResponseWithCookies(data, cookies = []) {
   const headers = new Headers({ 'Content-Type': 'application/json' });
   for (const cookie of cookies) {
     if (cookie) headers.append('Set-Cookie', cookie);
@@ -167,7 +183,7 @@ function createSuccessResponseWithCookies(data, cookies = []) {
   return new Response(JSON.stringify(data), { status: 200, headers });
 }
 
-function normalizeThemeUrl(value) {
+  static normalizeThemeUrl(value) {
   if (value === undefined) return undefined;
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -197,8 +213,8 @@ function normalizeThemeUrl(value) {
   }
 }
 
-function getThemeRawIndexUrl(themeUrl) {
-  const normalized = normalizeThemeUrl(themeUrl);
+  static getThemeRawIndexUrl(themeUrl) {
+  const normalized = AdminController.normalizeThemeUrl(themeUrl);
   if (!normalized) return '';
 
   const url = new URL(normalized);
@@ -212,10 +228,10 @@ function getThemeRawIndexUrl(themeUrl) {
   return `https://raw.githubusercontent.com/${themePath}/index.html`;
 }
 
-async function validateThemeUrlAvailable(themeUrl) {
+  static async validateThemeUrlAvailable(themeUrl) {
   if (!themeUrl) return true;
 
-  const rawIndexUrl = getThemeRawIndexUrl(themeUrl);
+  const rawIndexUrl = AdminController.getThemeRawIndexUrl(themeUrl);
   if (!rawIndexUrl) return false;
 
   try {
@@ -229,7 +245,7 @@ async function validateThemeUrlAvailable(themeUrl) {
   }
 }
 
-async function deleteServer(db, id) {
+  static async deleteServer(db, id) {
   try {
     const stmt1 = db.prepare(`PRAGMA foreign_key_list(metrics_history)`);
     const result1 = await stmt1.all();
@@ -249,7 +265,7 @@ async function deleteServer(db, id) {
   }
 }
 
-function getUtcTodayRange() {
+  static getUtcTodayRange() {
   const now = new Date();
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const end = new Date(start.getTime() + 86400000 - 1);
@@ -262,7 +278,7 @@ function getUtcTodayRange() {
   };
 }
 
-function getUtcYesterdayRange() {
+  static getUtcYesterdayRange() {
   const now = new Date();
   const todayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const start = new Date(todayStart.getTime() - 86400000);
@@ -276,7 +292,7 @@ function getUtcYesterdayRange() {
   };
 }
 
-async function cloudflareGraphql(query, variables, token) {
+  static async cloudflareGraphql(query, variables, token) {
   const response = await fetch('https://api.cloudflare.com/client/v4/graphql', {
     method: 'POST',
     headers: {
@@ -293,27 +309,27 @@ async function cloudflareGraphql(query, variables, token) {
   return data.data;
 }
 
-function estimateDurableObjectsWebSocketBillableRequests(messages) {
-  const count = toUsageNumber(messages);
+  static estimateDurableObjectsWebSocketBillableRequests(messages) {
+  const count = AdminController.toUsageNumber(messages);
   if (count <= 0) return 0;
-  return Math.ceil(count / DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO);
+  return Math.ceil(count / AdminController.DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO);
 }
 
-export function estimateDurableObjectsBillableRequests(breakdown = {}) {
+  static estimateDurableObjectsBillableRequests(breakdown = {}) {
   if (breakdown === null || typeof breakdown !== 'object') {
-    return estimateDurableObjectsWebSocketBillableRequests(breakdown);
+    return AdminController.estimateDurableObjectsWebSocketBillableRequests(breakdown);
   }
 
-  const httpRequests = toUsageNumber(breakdown.httpRequests);
-  const hibernationWakeups = toUsageNumber(breakdown.hibernationWakeups);
-  const inboundWebSocketMessages = toUsageNumber(breakdown.inboundWebSocketMessages);
+  const httpRequests = AdminController.toUsageNumber(breakdown.httpRequests);
+  const hibernationWakeups = AdminController.toUsageNumber(breakdown.hibernationWakeups);
+  const inboundWebSocketMessages = AdminController.toUsageNumber(breakdown.inboundWebSocketMessages);
 
   return Math.ceil(httpRequests) +
     Math.ceil(hibernationWakeups) +
-    estimateDurableObjectsWebSocketBillableRequests(inboundWebSocketMessages);
+    AdminController.estimateDurableObjectsWebSocketBillableRequests(inboundWebSocketMessages);
 }
 
-export function summarizeDurableObjectsUsage(invocationGroups = [], periodicGroups = []) {
+  static summarizeDurableObjectsUsage(invocationGroups = [], periodicGroups = []) {
   const summary = {
     httpRequests: 0,
     hibernationWakeups: 0,
@@ -324,9 +340,9 @@ export function summarizeDurableObjectsUsage(invocationGroups = [], periodicGrou
   };
 
   for (const group of invocationGroups || []) {
-    const requests = toUsageNumber(group?.sum?.requests);
+    const requests = AdminController.toUsageNumber(group?.sum?.requests);
     summary.rawRequests += requests;
-    if (isDurableObjectsHibernationInvocationType(group?.dimensions?.type)) {
+    if (AdminController.isDurableObjectsHibernationInvocationType(group?.dimensions?.type)) {
       summary.hibernationWakeups += requests;
     } else {
       summary.httpRequests += requests;
@@ -334,15 +350,15 @@ export function summarizeDurableObjectsUsage(invocationGroups = [], periodicGrou
   }
 
   for (const group of periodicGroups || []) {
-    summary.inboundWebSocketMessages += toUsageNumber(group?.sum?.inboundWebsocketMsgCount);
-    summary.outboundWebSocketMessages += toUsageNumber(group?.sum?.outboundWebsocketMsgCount);
+    summary.inboundWebSocketMessages += AdminController.toUsageNumber(group?.sum?.inboundWebsocketMsgCount);
+    summary.outboundWebSocketMessages += AdminController.toUsageNumber(group?.sum?.outboundWebsocketMsgCount);
   }
 
-  summary.billableRequests = estimateDurableObjectsBillableRequests(summary);
+  summary.billableRequests = AdminController.estimateDurableObjectsBillableRequests(summary);
   return summary;
 }
 
-async function fetchCloudflareUsage(token, accountId, range) {
+  static async fetchCloudflareUsage(token, accountId, range) {
   const query = `query CloudflareUsage($accountTag: string!, $start: Date, $end: Date, $startTime: Time!, $endTime: Time!) {
     viewer {
       accounts(filter: { accountTag: $accountTag }) {
@@ -375,7 +391,7 @@ async function fetchCloudflareUsage(token, accountId, range) {
       }
     }
   }`;
-  const data = await cloudflareGraphql(query, {
+  const data = await AdminController.cloudflareGraphql(query, {
     accountTag: accountId,
     start: range.start,
     end: range.end,
@@ -392,7 +408,7 @@ async function fetchCloudflareUsage(token, accountId, range) {
   const workersRequests = (account.workersInvocationsAdaptive || []).reduce((total, group) => {
     return total + Number(group.sum?.requests || 0);
   }, 0);
-  const durableObjectsUsage = summarizeDurableObjectsUsage(
+  const durableObjectsUsage = AdminController.summarizeDurableObjectsUsage(
     account.durableObjectsInvocationsAdaptiveGroups || [],
     account.durableObjectsPeriodicGroups || []
   );
@@ -410,22 +426,22 @@ async function fetchCloudflareUsage(token, accountId, range) {
     durableObjectsOutboundWebSocketMessages: durableObjectsUsage.outboundWebSocketMessages,
     durableObjectsRawRequests: durableObjectsUsage.rawRequests,
     durableObjectsRequestsEstimated: true,
-    durableObjectsRequestBillingRatio: DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO,
+    durableObjectsRequestBillingRatio: AdminController.DURABLE_OBJECTS_WEBSOCKET_MESSAGE_BILLING_RATIO,
     durableObjectsDuration,
     databaseCount: groups.length
   };
 }
 
-async function getD1DailyUsage(token, accountId) {
+  static async getD1DailyUsage(token, accountId) {
   if (!token) throw new Error('cloudflareTokenRequired');
   if (!accountId) throw new Error('cloudflareAccountIdRequired');
 
-  const todayRange = getUtcTodayRange();
-  const yesterdayRange = getUtcYesterdayRange();
+  const todayRange = AdminController.getUtcTodayRange();
+  const yesterdayRange = AdminController.getUtcYesterdayRange();
 
   const [todayUsage, yesterdayUsage] = await Promise.all([
-    fetchCloudflareUsage(token, accountId, todayRange),
-    fetchCloudflareUsage(token, accountId, yesterdayRange)
+    AdminController.fetchCloudflareUsage(token, accountId, todayRange),
+    AdminController.fetchCloudflareUsage(token, accountId, yesterdayRange)
   ]);
 
   const yesterday = {
@@ -462,7 +478,7 @@ async function getD1DailyUsage(token, accountId) {
   };
 }
 
-async function handleLoginAction({ request, env, sys, data }) {
+  static async handleLoginAction({ request, env, sys, data }) {
   const { username, password } = data;
 
   if (!username || !password) {
@@ -514,30 +530,30 @@ async function handleLoginAction({ request, env, sys, data }) {
   }
 }
 
-function handleLogoutAction({ request }) {
-  return createSuccessResponseWithCookies({
+  static handleLogoutAction({ request }) {
+  return AdminController.createSuccessResponseWithCookies({
     success: true
   }, [
     buildClearAuthCookie(request),
-    buildClearThemePreviewAuthCookie(request)
+    AdminController.buildClearThemePreviewAuthCookie(request)
   ]);
 }
 
-function handleClearThemePreviewAuthAction({ request }) {
-  return createSuccessResponseWithCookies({
+  static handleClearThemePreviewAuthAction({ request }) {
+  return AdminController.createSuccessResponseWithCookies({
     success: true
   }, [
-    buildClearThemePreviewAuthCookie(request)
+    AdminController.buildClearThemePreviewAuthCookie(request)
   ]);
 }
 
-const PUBLIC_ADMIN_ACTION_HANDLERS = {
-  login: handleLoginAction,
-  logout: handleLogoutAction,
-  clear_theme_preview_auth: handleClearThemePreviewAuthAction
+  static PUBLIC_ADMIN_ACTION_HANDLERS = {
+  login: AdminController.handleLoginAction,
+  logout: AdminController.handleLogoutAction,
+  clear_theme_preview_auth: AdminController.handleClearThemePreviewAuthAction
 };
 
-export function sanitizeAdminSettings(fullSettings = {}) {
+  static sanitizeAdminSettings(fullSettings = {}) {
   const { jwt_secret, password, ...safeSettings } = fullSettings || {};
   return {
     ...safeSettings,
@@ -545,38 +561,38 @@ export function sanitizeAdminSettings(fullSettings = {}) {
   };
 }
 
-async function handleGetSettingsAction({ env, sys, loadFullSettings }) {
+  static async handleGetSettingsAction({ env, sys, loadFullSettings }) {
   const fullSettings = loadFullSettings ? await loadFullSettings() : sys;
   return createSuccessResponse({
     success: true,
-    settings: sanitizeAdminSettings(fullSettings),
+    settings: AdminController.sanitizeAdminSettings(fullSettings),
     api_secret: env.API_SECRET
   });
 }
 
-async function handleStartThemePreviewAction({ request, data }) {
-  const normalizedThemeUrl = normalizeThemeUrl(data.theme_url);
+  static async handleStartThemePreviewAction({ request, data }) {
+  const normalizedThemeUrl = AdminController.normalizeThemeUrl(data.theme_url);
   if (!normalizedThemeUrl) {
     return createBadRequestResponse('invalidThemeUrl');
   }
-  if (!await validateThemeUrlAvailable(normalizedThemeUrl)) {
+  if (!await AdminController.validateThemeUrlAvailable(normalizedThemeUrl)) {
     return createBadRequestResponse('invalidThemeUrl');
   }
 
-  const token = extractBearerToken(request);
+  const token = AdminController.extractBearerToken(request);
   if (!token) {
     return simpleAuthResponse();
   }
 
   return createSuccessResponse({
     success: true,
-    preview_url: buildThemePreviewUrl(request, normalizedThemeUrl)
+    preview_url: AdminController.buildThemePreviewUrl(request, normalizedThemeUrl)
   }, {
-    'Set-Cookie': buildThemePreviewAuthCookie(request, token)
+    'Set-Cookie': AdminController.buildThemePreviewAuthCookie(request, token)
   });
 }
 
-async function handleSaveThemeOptionsAction({ env, sys, data }) {
+  static async handleSaveThemeOptionsAction({ env, sys, data }) {
   const themeOptions = data.theme_options ?? data.settings?.theme_options;
   if (!isValidThemeOptions(themeOptions)) {
     return createBadRequestResponse('invalidThemeOptionsFormat');
@@ -594,9 +610,9 @@ async function handleSaveThemeOptionsAction({ env, sys, data }) {
   });
 }
 
-async function handleListAction({ env }) {
+  static async handleListAction({ env }) {
   const servers = await getAllServers(env.DB);
-  const latestMetricsMap = await getLatestMetricsForAllServers(env.DB);
+  const latestMetricsMap = await DatabaseService.getLatestMetricsForAllServers(env.DB);
 
   const now = Date.now();
   const ONLINE_THRESHOLD = 300000;
@@ -659,14 +675,14 @@ async function handleListAction({ env }) {
   });
 }
 
-async function handleD1UsageAction({ data, sys }) {
+  static async handleD1UsageAction({ data, sys }) {
   const hasCloudflareToken = Object.prototype.hasOwnProperty.call(data, 'cloudflare_token');
   const hasCloudflareAccountId = Object.prototype.hasOwnProperty.call(data, 'cloudflare_account_id');
   const cloudflareToken = hasCloudflareToken ? data.cloudflare_token : (sys?.cloudflare_token || '');
   const cloudflareAccountId = hasCloudflareAccountId ? data.cloudflare_account_id : (sys?.cloudflare_account_id || '');
 
   try {
-    const usage = await getD1DailyUsage(String(cloudflareToken || '').trim(), String(cloudflareAccountId || '').trim());
+    const usage = await AdminController.getD1DailyUsage(String(cloudflareToken || '').trim(), String(cloudflareAccountId || '').trim());
     return createSuccessResponse({
       success: true,
       usage,
@@ -677,7 +693,7 @@ async function handleD1UsageAction({ data, sys }) {
   }
 }
 
-async function handleSendTestNotificationAction({ data }) {
+  static async handleSendTestNotificationAction({ data }) {
   const {
     tg_bot_token,
     tg_chat_id,
@@ -697,7 +713,7 @@ async function handleSendTestNotificationAction({ data }) {
     if (!notification_webhook_url || String(notification_webhook_url).trim().length === 0) {
       return createBadRequestResponse('notificationWebhookUrlRequired');
     }
-  } else if (isSmtpNotificationTarget(tg_bot_token)) {
+  } else if (NotificationService.isSmtpNotificationTarget(tg_bot_token)) {
     // SMTP 邮件渠道（smtp:// 前缀）视为有效的内置通知目标
   } else if (!tg_bot_token || tg_bot_token.trim().length === 0) {
     return createBadRequestResponse('tgBotTokenRequired');
@@ -705,7 +721,7 @@ async function handleSendTestNotificationAction({ data }) {
   try {
     const notificationLanguage = normalizeNotificationLanguage(notification_language);
     const messages = getNotificationMessages({ notification_language: notificationLanguage });
-    const result = await sendNotification({
+    const result = await NotificationService.sendNotification({
       tg_bot_token,
       tg_chat_id: tg_chat_id || '',
       notification_webhook_enabled: normalizeBooleanSetting(notification_webhook_enabled),
@@ -736,7 +752,7 @@ async function handleSendTestNotificationAction({ data }) {
   }
 }
 
-async function handleGenerateAutoRegisterTokenAction({ env, sys, loadFullSettings }) {
+  static async handleGenerateAutoRegisterTokenAction({ env, sys, loadFullSettings }) {
   const token = `sma_${crypto.randomUUID().replace(/-/g, '')}`;
   const expiresAt = Date.now() + 30 * 60 * 1000;
   await saveSiteOptions(env.DB, {
@@ -764,21 +780,21 @@ async function handleGenerateAutoRegisterTokenAction({ env, sys, loadFullSetting
   });
 }
 
-const AUTHENTICATED_ADMIN_ACTION_HANDLERS = {
-  get_settings: handleGetSettingsAction,
-  start_theme_preview: handleStartThemePreviewAction,
-  save_theme_options: handleSaveThemeOptionsAction,
-  list: handleListAction,
-  d1_usage: handleD1UsageAction,
-  send_test_notification: handleSendTestNotificationAction,
-  generate_auto_register_token: handleGenerateAutoRegisterTokenAction
+  static AUTHENTICATED_ADMIN_ACTION_HANDLERS = {
+  get_settings: AdminController.handleGetSettingsAction,
+  start_theme_preview: AdminController.handleStartThemePreviewAction,
+  save_theme_options: AdminController.handleSaveThemeOptionsAction,
+  list: AdminController.handleListAction,
+  d1_usage: AdminController.handleD1UsageAction,
+  send_test_notification: AdminController.handleSendTestNotificationAction,
+  generate_auto_register_token: AdminController.handleGenerateAutoRegisterTokenAction
 };
 
-export async function handleAdminAPI(request, env, sys, loadFullSettings = null, ctx = null) {
+  static async handleAdminAPI(request, env, sys, loadFullSettings = null, ctx = null) {
   try {
     const data = await request.json();
 
-    const publicActionHandler = PUBLIC_ADMIN_ACTION_HANDLERS[data.action];
+    const publicActionHandler = AdminController.PUBLIC_ADMIN_ACTION_HANDLERS[data.action];
     if (publicActionHandler) {
       return publicActionHandler({ request, env, sys, data, loadFullSettings, ctx });
     }
@@ -787,7 +803,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       return simpleAuthResponse();
     }
 
-    const authenticatedActionHandler = AUTHENTICATED_ADMIN_ACTION_HANDLERS[data.action];
+    const authenticatedActionHandler = AdminController.AUTHENTICATED_ADMIN_ACTION_HANDLERS[data.action];
     if (authenticatedActionHandler) {
       return authenticatedActionHandler({ request, env, sys, data, loadFullSettings, ctx });
     }
@@ -797,11 +813,11 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       if (!String(sys?.password || '').trim() && !String(settings.password || '')) {
         return createBadRequestResponse('passwordRequired');
       }
-      const normalizedThemeUrl = normalizeThemeUrl(settings.theme_url);
+      const normalizedThemeUrl = AdminController.normalizeThemeUrl(settings.theme_url);
       if (normalizedThemeUrl === null) {
         return createBadRequestResponse('invalidThemeUrl');
       }
-      if (normalizedThemeUrl && !await validateThemeUrlAvailable(normalizedThemeUrl)) {
+      if (normalizedThemeUrl && !await AdminController.validateThemeUrlAvailable(normalizedThemeUrl)) {
         return createBadRequestResponse('invalidThemeUrl');
       }
 
@@ -842,14 +858,14 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
           if (!effectiveWebhookUrl || String(effectiveWebhookUrl).trim().length === 0) {
             return createBadRequestResponse('notificationWebhookUrlRequired');
           }
-        } else if (isSmtpNotificationTarget(effectiveTgBotToken)) {
+        } else if (NotificationService.isSmtpNotificationTarget(effectiveTgBotToken)) {
           // SMTP 邮件渠道（smtp:// 前缀）视为有效的内置通知目标，允许通过告警门槛校验
         } else if (!effectiveTgBotToken || String(effectiveTgBotToken).trim().length === 0) {
           return createBadRequestResponse('tgBotTokenRequired');
         }
       }
 
-      const pingNodes = normalizePingNodeFields(settings);
+      const pingNodes = AdminController.normalizePingNodeFields(settings);
       if (!pingNodes.valid) {
         return createBadRequestResponse('invalidPingNodeFormat');
       }
@@ -862,7 +878,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         return createBadRequestResponse('invalidThemeOptionsFormat');
       }
 
-      const shouldSaveAppearanceOptions = hasAppearanceInput(settings);
+      const shouldSaveAppearanceOptions = AdminController.hasAppearanceInput(settings);
       const appearanceOptions = {};
 
       if (shouldSaveAppearanceOptions) {
@@ -872,7 +888,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
           if (value !== undefined) {
             // CSP 字段格式校验：只允许 https:// 开头的域名，逗号分隔
             if (field === 'csp_static' || field === 'csp_api') {
-              appearanceOptions[field] = sanitizeCspDomains(value);
+              appearanceOptions[field] = AdminController.sanitizeCspDomains(value);
             } else if (field === 'display_mode') {
               appearanceOptions[field] = normalizeDisplayMode(value);
             } else if (field === 'preferred_theme') {
@@ -902,7 +918,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             if (settings[field] && settings[field].length > 0) {
               siteOptions[field] = await hashPassword(settings[field]);
             }
-          } else if (PING_NODE_FIELDS.includes(field)) {
+          } else if (AdminController.PING_NODE_FIELDS.includes(field)) {
             siteOptions[field] = pingNodes.values[field];
           } else if (field === 'tg_notify') {
             siteOptions[field] = tgNotify;
@@ -963,7 +979,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       // Keep existing states on rule edits so threshold increases can emit recovery notifications.
       // checkResourceAlerts prunes states for removed rules or servers on the next evaluation.
       if (hasResourceAlertRulesInput && !resourceAlertEnabled) {
-        await clearResourceAlertState(env.DB);
+        await NotificationService.clearResourceAlertState(env.DB);
       }
       Object.assign(sys, shouldSaveAppearanceOptions ? appearanceOptions : {}, siteOptions);
       if (shouldCloseAgentWssReports && settings.wss_report_enabled !== undefined) {
@@ -976,17 +992,17 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
     } 
     else if (data.action === 'add') {
       const name = data.name || 'New Server';
-      if (!isValidName(name)) {
+      if (!AdminController.isValidName(name)) {
         return createBadRequestResponse('invalidServerName');
       }
-      const networkInterfaces = normalizeNetworkInterfaceField(data.interface);
+      const networkInterfaces = AdminController.normalizeNetworkInterfaceField(data.interface);
       if (!networkInterfaces.valid) {
         return createBadRequestResponse('invalidNetworkInterface');
       }
       
       const id = crypto.randomUUID();
       const group = data.server_group || 'Default';
-      const region = normalizeServerRegion(data.region);
+      const region = AdminController.normalizeServerRegion(data.region);
 
       try {
         const { max_order } = await env.DB.prepare('SELECT COALESCE(MAX(sort_order), -1) as max_order FROM servers').first();
@@ -1000,7 +1016,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `).bind(id, name, group, region, networkInterfaces.value, sortOrder, historyPartitionId, Date.now()).run();
       } catch (e) {
-        return handleServerMutationError(env.DB, e, 'serverAddFailed');
+        return AdminController.handleServerMutationError(env.DB, e, 'serverAddFailed');
       }
       
       clearServersListCache();
@@ -1013,11 +1029,11 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
     } 
     else if (data.action === 'delete') {
       const { id } = data;
-      if (!id || !isValidUUID(id)) {
+      if (!id || !AdminController.isValidUUID(id)) {
         return createBadRequestResponse('invalidServerId');
       }
       
-      await deleteServer(env.DB, id);
+      await AdminController.deleteServer(env.DB, id);
       
       clearServersListCache();
       
@@ -1033,7 +1049,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       }
       
       for (let i = 0; i < orders.length; i++) {
-        if (!isValidUUID(orders[i])) {
+        if (!AdminController.isValidUUID(orders[i])) {
           return createBadRequestResponse('invalidSortId');
         }
         await env.DB.prepare('UPDATE servers SET sort_order = ? WHERE id = ?').bind(i, orders[i]).run();
@@ -1048,7 +1064,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
     }
     else if (data.action === 'edit') {
       const { id, name, server_group, region, tags, note, price, billing_cycle, auto_renewal, currency, expire_date, traffic_limit, traffic_calc_type, traffic_alert_percent, interface: networkInterfaceInput, reset_day, collect_interval, report_interval, wss_report_interval, connection_mode, ping_mode, auto_update, custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4, rx_correction, tx_correction, offline_notify_disabled, is_hidden } = data;
-      if (!id || !isValidUUID(id)) {
+      if (!id || !AdminController.isValidUUID(id)) {
         return createBadRequestResponse('invalidServerId');
       }
       const effectiveConnectionMode = isWssReportConfigured(sys) ? connection_mode : 'http';
@@ -1065,11 +1081,11 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       }
       const normalizedAgentConfig = agentConfigResult.config;
 
-      const pingNodes = normalizePingNodeFields({ custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4 });
+      const pingNodes = AdminController.normalizePingNodeFields({ custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4 });
       if (!pingNodes.valid) {
         return createBadRequestResponse('invalidPingNodeFormat');
       }
-      const networkInterfaces = normalizeNetworkInterfaceField(networkInterfaceInput);
+      const networkInterfaces = AdminController.normalizeNetworkInterfaceField(networkInterfaceInput);
       if (!networkInterfaces.valid) {
         return createBadRequestResponse('invalidNetworkInterface');
       }
@@ -1091,7 +1107,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         return createBadRequestResponse('invalidTrafficCorrection');
       }
 
-      const billingData = normalizeServerBillingData({
+      const billingData = AdminController.normalizeServerBillingData({
         price,
         billing_cycle,
         auto_renewal,
@@ -1107,7 +1123,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         `).bind(
           name || '',
           server_group || 'Default',
-          normalizeServerRegion(region),
+          AdminController.normalizeServerRegion(region),
           safeTags,
           safeNote,
           billingData.price,
@@ -1124,7 +1140,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
           normalizedAgentConfig.wss_report_interval,
           normalizedAgentConfig.connection_mode,
           normalizedAgentConfig.ping_mode,
-          normalizeBooleanFlag(auto_update),
+          AdminController.normalizeBooleanFlag(auto_update),
           pingNodes.values.custom_ct ?? null,
           pingNodes.values.custom_cu ?? null,
           pingNodes.values.custom_cm ?? null,
@@ -1135,13 +1151,13 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
           pingNodes.values.node_4 ?? null,
           safeRx,
           safeTx,
-          normalizeBooleanFlag(offline_notify_disabled),
-          normalizeBooleanFlag(is_hidden),
+          AdminController.normalizeBooleanFlag(offline_notify_disabled),
+          AdminController.normalizeBooleanFlag(is_hidden),
           normalizePctOrNull(traffic_alert_percent),
           id
         ).run();
       } catch (e) {
-        return handleServerMutationError(env.DB, e, 'serverUpdateFailed');
+        return AdminController.handleServerMutationError(env.DB, e, 'serverUpdateFailed');
       }
       
       clearServersListCache();
@@ -1159,13 +1175,13 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       }
       
       for (const id of ids) {
-        if (!isValidUUID(id)) {
+        if (!AdminController.isValidUUID(id)) {
           return createBadRequestResponse('invalidServerIdInList');
         }
       }
       
       for (const id of ids) {
-        await deleteServer(env.DB, id);
+        await AdminController.deleteServer(env.DB, id);
       }
       
       clearServersListCache();
@@ -1215,7 +1231,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
       const skippedIds = [];
 
       for (const server of importData) {
-        if (!server.id || !isValidUUID(server.id)) {
+        if (!server.id || !AdminController.isValidUUID(server.id)) {
           skipped++;
           skippedIds.push(server.id || '(invalid)');
           continue;
@@ -1246,8 +1262,8 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
         usedPartitionIds.add(partitionId);
         existingIds.add(server.id);
 
-        const billingData = normalizeServerBillingData(server);
-        const networkInterfaces = normalizeNetworkInterfaceField(server.interface);
+        const billingData = AdminController.normalizeServerBillingData(server);
+        const networkInterfaces = AdminController.normalizeNetworkInterfaceField(server.interface);
         if (!networkInterfaces.valid) {
           skipped++;
           skippedIds.push(server.id);
@@ -1266,7 +1282,7 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             server.id,
             server.name || '',
             server.server_group || 'Default',
-            normalizeServerRegion(server.region),
+            AdminController.normalizeServerRegion(server.region),
             server.tags || '',
             server.note || '',
             billingData.price,
@@ -1283,17 +1299,17 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
             normalizeWssReportInterval(server.wss_report_interval),
             normalizeConnectionMode(server.connection_mode) || 'auto',
             normalizePingMode(server.ping_mode) || 'tcp',
-            normalizeBooleanFlag(server.auto_update),
-            normalizeImportedPingNodeValue(server.custom_ct),
-            normalizeImportedPingNodeValue(server.custom_cu),
-            normalizeImportedPingNodeValue(server.custom_cm),
-            normalizeImportedPingNodeValue(server.custom_bd),
-            normalizeImportedPingNodeValue(server.node_1), normalizeImportedPingNodeValue(server.node_2),
-            normalizeImportedPingNodeValue(server.node_3), normalizeImportedPingNodeValue(server.node_4),
+            AdminController.normalizeBooleanFlag(server.auto_update),
+            AdminController.normalizeImportedPingNodeValue(server.custom_ct),
+            AdminController.normalizeImportedPingNodeValue(server.custom_cu),
+            AdminController.normalizeImportedPingNodeValue(server.custom_cm),
+            AdminController.normalizeImportedPingNodeValue(server.custom_bd),
+            AdminController.normalizeImportedPingNodeValue(server.node_1), AdminController.normalizeImportedPingNodeValue(server.node_2),
+            AdminController.normalizeImportedPingNodeValue(server.node_3), AdminController.normalizeImportedPingNodeValue(server.node_4),
             server.rx_correction ?? null,
             server.tx_correction ?? null,
-            normalizeBooleanFlag(server.offline_notify_disabled),
-            normalizeBooleanFlag(server.is_hidden),
+            AdminController.normalizeBooleanFlag(server.offline_notify_disabled),
+            AdminController.normalizeBooleanFlag(server.is_hidden),
             server.sort_order ?? 0,
             partitionId,
             server.timestamp || Date.now(),
@@ -1324,18 +1340,4 @@ export async function handleAdminAPI(request, env, sys, loadFullSettings = null,
     return createErrorResponse(e);
   }
 }
-
-/**
- * AdminController
- * 负责管理后台 API 操作（服务器增删改查、站点配置、凭据与通知测试等）
- */
-export class AdminController {
-  constructor(env, ctx = null) {
-    this.env = env;
-    this.ctx = ctx;
-  }
-
-  async handle(request, sys, loadFullSettings = null) {
-    return handleAdminAPI(request, this.env, sys, loadFullSettings, this.ctx);
-  }
 }

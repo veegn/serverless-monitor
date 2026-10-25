@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MetricsBroadcaster } from '../src/durable/MetricsBroadcaster.js';
-import { getHistoryMetrics, handleUpdateWebSocketUpgrade, handleWebSocketUpgrade } from '../src/handlers/update.js';
+import { UpdateController } from '../src/handlers/UpdateController.js';
 import { buildAuthCookie, generateToken } from '../src/middleware/auth.js';
-import { buildResourceAlertNotificationPayloads } from '../src/services/notification.js';
+import { NotificationService } from '../src/services/NotificationService.js';
+
+const { getHistoryMetrics, handleUpdateWebSocketUpgrade, handleWebSocketUpgrade } = UpdateController;
+const { buildResourceAlertNotificationPayloads } = NotificationService;
 import { clearSiteSettingsCache, DEFAULT_NOTIFICATION_TEMPLATE, normalizeNotificationTemplate, normalizeResourceAlertRules } from '../src/utils/settings.js';
 import { UPDATE_MAX_REQUEST_BYTES } from '../src/utils/config.js';
 

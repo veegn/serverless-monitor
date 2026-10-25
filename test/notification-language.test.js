@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildResourceAlertNotificationPayloads, evaluateTrafficAlert } from '../src/services/notification.js';
+import { NotificationService } from '../src/services/NotificationService.js';
+const { buildResourceAlertNotificationPayloads, evaluateTrafficAlert } = NotificationService;
 import { clearSiteSettingsCache, normalizeNotificationLanguage } from '../src/utils/settings.js';
 
 const netInAlert = [{

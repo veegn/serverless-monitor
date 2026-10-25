@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Miniflare } from 'miniflare';
 
-import { getDashboardLatencyHistory } from '../src/database/schema.js';
+import { DatabaseService } from '../src/database/DatabaseService.js';
+const getDashboardLatencyHistory = DatabaseService.getDashboardLatencyHistory;
 import { buildHistoryId } from '../src/database/indexOptimization.js';
 import {
   DASHBOARD_LATENCY_WINDOW_HOURS,

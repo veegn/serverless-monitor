@@ -7,7 +7,8 @@ import {
   normalizePctOrNull,
   normalizeTrafficLimitGb
 } from '../src/utils/traffic.js';
-import { evaluateTrafficAlert } from '../src/services/notification.js';
+import { NotificationService } from '../src/services/NotificationService.js';
+const { evaluateTrafficAlert } = NotificationService;
 import { clearSiteSettingsCache } from '../src/utils/settings.js';
 
 // ---- test doubles -------------------------------------------------------

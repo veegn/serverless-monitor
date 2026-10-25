@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { serveFrontend } from '../src/handlers/frontend.js'
+import { FrontendController } from '../src/handlers/FrontendController.js'
+const { serveFrontend } = FrontendController
 
 const dashboardHtml = '<!doctype html><html><head><title>Old</title><meta name="apiBase" content=""></head><body></body></html>'
 

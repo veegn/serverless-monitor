@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleUpdate, normalizeMetricSamples } from '../src/handlers/update.js';
+import { UpdateController } from '../src/handlers/UpdateController.js';
+const { handleUpdate, normalizeMetricSamples } = UpdateController;
 import { UPDATE_MAX_BATCH_SAMPLES, UPDATE_MAX_REQUEST_BYTES } from '../src/utils/config.js';
 
 function createRequest(body, headers = {}) {

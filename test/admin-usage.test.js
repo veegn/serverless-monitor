@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
-import {
+import { AdminController } from '../src/handlers/AdminController.js';
+const {
   estimateDurableObjectsBillableRequests,
   sanitizeAdminSettings,
   summarizeDurableObjectsUsage
-} from '../src/handlers/admin.js';
+} = AdminController;
 import {
   isValidThemeOptions,
   saveThemeOptions

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { Miniflare } from 'miniflare';
 
-import { getLatestMetricsForAllServers } from '../src/database/schema.js';
+import { DatabaseService } from '../src/database/DatabaseService.js';
+const getLatestMetricsForAllServers = DatabaseService.getLatestMetricsForAllServers;
 import { buildHistoryId } from '../src/database/indexOptimization.js';
 import { clearAllCaches, getLatestMetricsCache, setLatestMetricsCache } from '../src/utils/cache.js';
 

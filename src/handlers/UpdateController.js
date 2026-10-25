@@ -1,6 +1,6 @@
-import { saveMetricsHistory, saveMetricsHistoryBatch } from '../database/schema.js';
+import { DatabaseService } from '../database/DatabaseService.js';
 import { getServerDetail, clearServerDetailCache, patchServerDetailCache, clearServersListCache, getAllServers } from '../utils/cache.js';
-import { evaluateTrafficAlert, sendNotification } from '../services/notification.js';
+import { NotificationService } from '../services/NotificationService.js';
 import { getNotificationMessages } from '../services/notificationMessages.js';
 import { addServerColumns } from '../database/updateDatabase.js';
 import {
@@ -39,9 +39,37 @@ import {
   UPDATE_RESOURCE_ALERT_BATCH_WINDOW_MS
 } from '../utils/config.js';
 
+/**
+ * UpdateController
+ * 负责 Agent 指标上报、自动注册以及 Agent/Frontend WebSocket 协议升级
+ */
+export class UpdateController {
+  constructor(env, ctx = null) {
+    this.env = env;
+    this.ctx = ctx;
+  }
+
+  // --- 实例代理方法 ---
+
+  async handle(request) {
+    return UpdateController.handleUpdate(request, this.env, this.ctx);
+  }
+
+  async handleFrontendWebSocket(request) {
+    return UpdateController.handleWebSocketUpgrade(request, this.env);
+  }
+
+  async handleAgentWebSocket(request) {
+    return UpdateController.handleUpdateWebSocketUpgrade(request, this.env);
+  }
+
+  async autoRegister(serverId, data, secret, settings, regionCode = '') {
+    return UpdateController.autoRegisterServer(this.env.DB, serverId, data, secret, settings, regionCode);
+  }
+
 // 将最新一次上报打包成前端可直接消费的 "当前状态" 对象
 // 与 /api/server 和 /api/servers 返回的字段保持一致，便于页面直接合并
-function buildPayloadForBroadcast(id, metrics = {}, extra = {}) {
+  static buildPayloadForBroadcast(id, metrics = {}, extra = {}) {
   const payload = {};
   mergeMetricsIntoServer(payload, metrics);
   payload.id = id;
@@ -53,47 +81,47 @@ function buildPayloadForBroadcast(id, metrics = {}, extra = {}) {
 }
 
 // 批量推送：前端实时使用短窗口；仅资源告警缓存时使用较长窗口降低 DO 请求。
-const DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
+  static DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
   DISK_IO_METRIC_FIELDS.map(field => [DISK_IO_FIELD_TO_COLUMN[field], field])
 ));
-export const AGENT_AUTO_DISCOVERY_HEADER = 'x-sma-auto-discovery';
-export const AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER = 'x-sma-server-id';
-export const LEGACY_AGENT_AUTO_DISCOVERY_HEADER = 'x-cfsm-auto-discovery';
-export const LEGACY_AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER = 'x-cfsm-server-id';
-export const AGENT_AUTO_DISCOVERY_CREATED = 'created';
-export const AGENT_AUTO_DISCOVERY_REUSED = 'reused';
-export const AGENT_AUTO_DISCOVERY_FAILED = 'failed';
-export const AGENT_AUTO_DISCOVERY_DISABLED = 'disabled';
-export const AGENT_WSS_MODE_HEADER = 'x-agent-wss-mode';
-export const AGENT_WSS_REASON_HEADER = 'x-agent-wss-reason';
-export const AGENT_WSS_SCHEDULE_INACTIVE = 'wss_schedule_inactive';
-export const AGENT_WSS_SCHEDULE_DISABLED = 'wss_disabled';
+  static AGENT_AUTO_DISCOVERY_HEADER = 'x-sma-auto-discovery';
+  static AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER = 'x-sma-server-id';
+  static LEGACY_AGENT_AUTO_DISCOVERY_HEADER = 'x-cfsm-auto-discovery';
+  static LEGACY_AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER = 'x-cfsm-server-id';
+  static AGENT_AUTO_DISCOVERY_CREATED = 'created';
+  static AGENT_AUTO_DISCOVERY_REUSED = 'reused';
+  static AGENT_AUTO_DISCOVERY_FAILED = 'failed';
+  static AGENT_AUTO_DISCOVERY_DISABLED = 'disabled';
+  static AGENT_WSS_MODE_HEADER = 'x-agent-wss-mode';
+  static AGENT_WSS_REASON_HEADER = 'x-agent-wss-reason';
+  static AGENT_WSS_SCHEDULE_INACTIVE = 'wss_schedule_inactive';
+  static AGENT_WSS_SCHEDULE_DISABLED = 'wss_disabled';
 
-export function buildAutoDiscoveryHeaders(status, serverId = null) {
+  static buildAutoDiscoveryHeaders(status, serverId = null) {
   const headers = {
-    [AGENT_AUTO_DISCOVERY_HEADER]: status,
-    [LEGACY_AGENT_AUTO_DISCOVERY_HEADER]: status
+    [UpdateController.AGENT_AUTO_DISCOVERY_HEADER]: status,
+    [UpdateController.LEGACY_AGENT_AUTO_DISCOVERY_HEADER]: status
   };
   if (serverId) {
-    headers[AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER] = serverId;
-    headers[LEGACY_AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER] = serverId;
+    headers[UpdateController.AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER] = serverId;
+    headers[UpdateController.LEGACY_AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER] = serverId;
   }
   return headers;
 }
-let batchQueue = new Map();
-let flushingPromise = null;
-let flushTimer = null;
-let flushDueAt = 0;
-let resolveFlushingPromise = null;
-let frontendSubscriberSnapshot = { checkedAt: 0, count: 0 };
+  static batchQueue = new Map();
+  static flushingPromise = null;
+  static flushTimer = null;
+  static flushDueAt = 0;
+  static resolveFlushingPromise = null;
+  static frontendSubscriberSnapshot = { checkedAt: 0, count: 0 };
 
-function normalizeTimestamp(value, fallback = Date.now()) {
+  static normalizeTimestamp(value, fallback = Date.now()) {
   const ts = Number(value);
   if (!Number.isFinite(ts) || ts <= 0) return fallback;
   return ts < 10000000000 ? ts * 1000 : ts;
 }
 
-export function normalizeAgentVersion(value) {
+  static normalizeAgentVersion(value) {
   if (value === null || value === undefined) return '';
   return String(value)
     .trim()
@@ -101,18 +129,18 @@ export function normalizeAgentVersion(value) {
     .slice(0, 64);
 }
 
-function logUpdateBadRequest(reason, details = {}) {
+  static logUpdateBadRequest(reason, details = {}) {
   console.warn('[Update] 400 Bad Request:', reason, details);
 }
 
-function getDeclaredContentLength(request) {
+  static getDeclaredContentLength(request) {
   const raw = request.headers.get('Content-Length');
   if (!raw) return null;
   const length = Number(raw);
   return Number.isFinite(length) && length >= 0 ? length : null;
 }
 
-function createPayloadTooLargeResponse() {
+  static createPayloadTooLargeResponse() {
   return new Response(JSON.stringify({
     error: 'Payload too large',
     code: 413,
@@ -131,7 +159,7 @@ function createPayloadTooLargeResponse() {
 
 // 保持 404 兼容旧版 Agent：Agent 的 isAuthConfigHTTPStatus 只认 401/403/404，
 // 改 410 会让 WSS 失去 120s 协议退避。
-function createServerNotFoundResponse() {
+  static createServerNotFoundResponse() {
   return new Response(JSON.stringify({
     error: 'Server not found',
     code: 404,
@@ -148,12 +176,12 @@ function createServerNotFoundResponse() {
   });
 }
 
-export function normalizeCorrectionValue(value) {
+  static normalizeCorrectionValue(value) {
   if (value === null || value === undefined || value === '') return 0;
   return isValidTrafficCorrection(value) ? Number(value) : null;
 }
 
-export function normalizeMetricSamples(data) {
+  static normalizeMetricSamples(data) {
   const now = Date.now();
   const rawSamples = Array.isArray(data.samples)
     ? data.samples
@@ -173,13 +201,13 @@ export function normalizeMetricSamples(data) {
     if (!item || typeof item !== 'object') return null;
     const metrics = item.metrics || item.data || item.payload || item;
     if (!metrics || typeof metrics !== 'object') return null;
-    const ts = normalizeTimestamp(item.ts ?? item.timestamp ?? metrics.timestamp, now);
+    const ts = UpdateController.normalizeTimestamp(item.ts ?? item.timestamp ?? metrics.timestamp, now);
     return { ts, metrics };
   }).filter(Boolean);
 
   if (samples.length === 0 && data.metrics && typeof data.metrics === 'object') {
     samples.push({
-      ts: normalizeTimestamp(data.metrics.timestamp, now),
+      ts: UpdateController.normalizeTimestamp(data.metrics.timestamp, now),
       metrics: data.metrics
     });
   }
@@ -188,7 +216,7 @@ export function normalizeMetricSamples(data) {
   return samples.slice(-UPDATE_MAX_BATCH_SAMPLES);
 }
 
-export function getReportMetrics(data, latestSample) {
+  static getReportMetrics(data, latestSample) {
   const reportMetrics = data?.metrics && typeof data.metrics === 'object' ? data.metrics : null;
   if (!reportMetrics) return latestSample?.metrics || {};
   return {
@@ -197,64 +225,64 @@ export function getReportMetrics(data, latestSample) {
   };
 }
 
-function hasOwnMetric(source, field) {
+  static hasOwnMetric(source, field) {
   return !!source && Object.prototype.hasOwnProperty.call(source, field);
 }
 
-function isPlainMetricObject(value) {
+  static isPlainMetricObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function toFiniteHistoryMetricNumber(value) {
+  static toFiniteHistoryMetricNumber(value) {
   if (value === false || value === 'false' || value === null || value === undefined || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function getHistoryMetricSourceValue(source, field) {
-  if (!isPlainMetricObject(source)) return null;
+  static getHistoryMetricSourceValue(source, field) {
+  if (!UpdateController.isPlainMetricObject(source)) return null;
 
-  if (hasOwnMetric(source, field)) {
+  if (UpdateController.hasOwnMetric(source, field)) {
     return source[field];
   }
 
-  const diskField = DISK_IO_COLUMN_TO_FIELD[field];
-  if (diskField && isPlainMetricObject(source.disk) && hasOwnMetric(source.disk, diskField)) {
+  const diskField = UpdateController.DISK_IO_COLUMN_TO_FIELD[field];
+  if (diskField && UpdateController.isPlainMetricObject(source.disk) && UpdateController.hasOwnMetric(source.disk, diskField)) {
     return source.disk[diskField];
   }
 
   return null;
 }
 
-function getSampleMetricSource(sample) {
-  if (!isPlainMetricObject(sample)) return null;
+  static getSampleMetricSource(sample) {
+  if (!UpdateController.isPlainMetricObject(sample)) return null;
   return sample.metrics || sample.data || sample.payload || sample;
 }
 
-function createEmptyHistoryMetricAggregate() {
+  static createEmptyHistoryMetricAggregate() {
   return { max: {}, avg: {} };
 }
 
-export function mergeHistoryMetricAggregates(...aggregates) {
-  const result = createEmptyHistoryMetricAggregate();
+  static mergeHistoryMetricAggregates(...aggregates) {
+  const result = UpdateController.createEmptyHistoryMetricAggregate();
 
   for (const aggregate of aggregates) {
-    if (!isPlainMetricObject(aggregate)) continue;
+    if (!UpdateController.isPlainMetricObject(aggregate)) continue;
 
-    if (isPlainMetricObject(aggregate.max)) {
+    if (UpdateController.isPlainMetricObject(aggregate.max)) {
       for (const [field, value] of Object.entries(aggregate.max)) {
-        const number = toFiniteHistoryMetricNumber(value);
+        const number = UpdateController.toFiniteHistoryMetricNumber(value);
         if (number === null) continue;
-        if (!hasOwnMetric(result.max, field) || number > result.max[field]) {
+        if (!UpdateController.hasOwnMetric(result.max, field) || number > result.max[field]) {
           result.max[field] = number;
         }
       }
     }
 
-    if (isPlainMetricObject(aggregate.avg)) {
+    if (UpdateController.isPlainMetricObject(aggregate.avg)) {
       for (const [field, item] of Object.entries(aggregate.avg)) {
-        if (!isPlainMetricObject(item)) continue;
-        const sum = toFiniteHistoryMetricNumber(item.sum);
+        if (!UpdateController.isPlainMetricObject(item)) continue;
+        const sum = UpdateController.toFiniteHistoryMetricNumber(item.sum);
         const count = Number(item.count);
         if (sum === null || !Number.isFinite(count) || count <= 0) continue;
         if (!result.avg[field]) {
@@ -269,15 +297,15 @@ export function mergeHistoryMetricAggregates(...aggregates) {
   return result;
 }
 
-function addHistoryMetricAggregateSource(aggregate, source) {
-  if (!isPlainMetricObject(source)) return;
+  static addHistoryMetricAggregateSource(aggregate, source) {
+  if (!UpdateController.isPlainMetricObject(source)) return;
 
   for (const [field, policy] of Object.entries(HISTORY_METRIC_AGGREGATION_POLICY)) {
-    const value = toFiniteHistoryMetricNumber(getHistoryMetricSourceValue(source, field));
+    const value = UpdateController.toFiniteHistoryMetricNumber(UpdateController.getHistoryMetricSourceValue(source, field));
     if (value === null) continue;
 
     if (policy === 'max') {
-      if (!hasOwnMetric(aggregate.max, field) || value > aggregate.max[field]) {
+      if (!UpdateController.hasOwnMetric(aggregate.max, field) || value > aggregate.max[field]) {
         aggregate.max[field] = value;
       }
     } else if (policy === 'avg') {
@@ -290,19 +318,19 @@ function addHistoryMetricAggregateSource(aggregate, source) {
   }
 }
 
-export function collectHistoryMetricAggregates(samples = [], previousAggregate = null) {
-  const aggregate = mergeHistoryMetricAggregates(previousAggregate);
+  static collectHistoryMetricAggregates(samples = [], previousAggregate = null) {
+  const aggregate = UpdateController.mergeHistoryMetricAggregates(previousAggregate);
   for (const sample of Array.isArray(samples) ? samples : []) {
-    addHistoryMetricAggregateSource(aggregate, getSampleMetricSource(sample));
+    UpdateController.addHistoryMetricAggregateSource(aggregate, UpdateController.getSampleMetricSource(sample));
   }
   return aggregate;
 }
 
-function setHistoryMetricResultValue(result, field, value) {
-  const diskField = DISK_IO_COLUMN_TO_FIELD[field];
+  static setHistoryMetricResultValue(result, field, value) {
+  const diskField = UpdateController.DISK_IO_COLUMN_TO_FIELD[field];
   if (diskField) {
     result[field] = value;
-    result.disk = isPlainMetricObject(result.disk)
+    result.disk = UpdateController.isPlainMetricObject(result.disk)
       ? { ...result.disk, [diskField]: value }
       : { [diskField]: value };
     return;
@@ -311,30 +339,30 @@ function setHistoryMetricResultValue(result, field, value) {
   result[field] = value;
 }
 
-export function applyHistoryMetricAggregates(metrics = {}, aggregate = null) {
+  static applyHistoryMetricAggregates(metrics = {}, aggregate = null) {
   const result = { ...(metrics || {}) };
-  const mergedAggregate = mergeHistoryMetricAggregates(aggregate);
+  const mergedAggregate = UpdateController.mergeHistoryMetricAggregates(aggregate);
 
   for (const [field, value] of Object.entries(mergedAggregate.max)) {
-    setHistoryMetricResultValue(result, field, value);
+    UpdateController.setHistoryMetricResultValue(result, field, value);
   }
 
   for (const [field, item] of Object.entries(mergedAggregate.avg)) {
     if (!item || !Number.isFinite(item.sum) || !Number.isFinite(item.count) || item.count <= 0) continue;
-    setHistoryMetricResultValue(result, field, item.sum / item.count);
+    UpdateController.setHistoryMetricResultValue(result, field, item.sum / item.count);
   }
 
   return result;
 }
 
-export function getHistoryMetrics(data, samples, latestSample) {
-  return applyHistoryMetricAggregates(
-    getReportMetrics(data, latestSample),
-    collectHistoryMetricAggregates(samples)
+  static getHistoryMetrics(data, samples, latestSample) {
+  return UpdateController.applyHistoryMetricAggregates(
+    UpdateController.getReportMetrics(data, latestSample),
+    UpdateController.collectHistoryMetricAggregates(samples)
   );
 }
 
-function buildSamplePayloadForBroadcast(metrics = {}, timestamp = Date.now()) {
+  static buildSamplePayloadForBroadcast(metrics = {}, timestamp = Date.now()) {
   const payload = metrics && typeof metrics === 'object' ? { ...metrics } : {};
   BROADCAST_DELETE_FIELDS.forEach(field => delete payload[field]);
   payload.last_updated = timestamp;
@@ -342,7 +370,7 @@ function buildSamplePayloadForBroadcast(metrics = {}, timestamp = Date.now()) {
   return coerceNumericMetricFields(payload);
 }
 
-export function toBroadcastSamples(id, samples, regionCode, agentVersion = '', reportMetrics = null) {
+  static toBroadcastSamples(id, samples, regionCode, agentVersion = '', reportMetrics = null) {
   const lastIndex = samples.length - 1;
   const base = reportMetrics && typeof reportMetrics === 'object' ? reportMetrics : null;
   return samples.map((sample, index) => {
@@ -350,10 +378,10 @@ export function toBroadcastSamples(id, samples, regionCode, agentVersion = '', r
       ? { ...base, ...(sample.metrics || {}) }
       : (sample.metrics || {});
     if (index !== lastIndex) {
-      return { ts: sample.ts, payload: buildSamplePayloadForBroadcast(metrics, sample.ts) };
+      return { ts: sample.ts, payload: UpdateController.buildSamplePayloadForBroadcast(metrics, sample.ts) };
     }
 
-    const payload = buildPayloadForBroadcast(id, metrics, {
+    const payload = UpdateController.buildPayloadForBroadcast(id, metrics, {
       region: regionCode,
       agentVersion,
       timestamp: sample.ts
@@ -365,19 +393,19 @@ export function toBroadcastSamples(id, samples, regionCode, agentVersion = '', r
   });
 }
 
-function queueBroadcastSamples(serverId, samples) {
+  static queueBroadcastSamples(serverId, samples) {
   if (!serverId || !Array.isArray(samples) || samples.length === 0) return;
-  const existing = batchQueue.get(serverId);
+  const existing = UpdateController.batchQueue.get(serverId);
   const merged = existing && Array.isArray(existing.samples)
     ? existing.samples.concat(samples)
     : samples;
-  batchQueue.set(serverId, { samples: merged.slice(-UPDATE_MAX_BATCH_SAMPLES) });
+  UpdateController.batchQueue.set(serverId, { samples: merged.slice(-UPDATE_MAX_BATCH_SAMPLES) });
 }
 
-async function getCachedFrontendSubscriberCount(env) {
+  static async getCachedFrontendSubscriberCount(env) {
   const now = Date.now();
-  if (now - frontendSubscriberSnapshot.checkedAt < UPDATE_FRONTEND_SUBSCRIBER_CHECK_INTERVAL_MS) {
-    return frontendSubscriberSnapshot.count;
+  if (now - UpdateController.frontendSubscriberSnapshot.checkedAt < UPDATE_FRONTEND_SUBSCRIBER_CHECK_INTERVAL_MS) {
+    return UpdateController.frontendSubscriberSnapshot.count;
   }
 
   let count = 0;
@@ -395,24 +423,24 @@ async function getCachedFrontendSubscriberCount(env) {
     console.warn('[broadcast] subscriber check failed:', e?.message || e);
   }
 
-  frontendSubscriberSnapshot = { checkedAt: now, count };
+  UpdateController.frontendSubscriberSnapshot = { checkedAt: now, count };
   return count;
 }
 
-function hasResourceAlertNotificationTarget(settings = {}) {
+  static hasResourceAlertNotificationTarget(settings = {}) {
   if (normalizeBooleanSetting(settings.notification_webhook_enabled) === 'true') {
     return String(settings.notification_webhook_url || '').trim().length > 0;
   }
   return String(settings.tg_bot_token || '').trim().length > 0;
 }
 
-async function getRealtimeBatchIntent(env) {
+  static async getRealtimeBatchIntent(env) {
   if (!env?.METRICS_BROADCASTER) return null;
 
   let resourceAlertEnabled = false;
   try {
     const settings = await loadSiteSettings(env.DB);
-    resourceAlertEnabled = hasResourceAlertNotificationTarget(settings) && getResourceAlertConfig(settings).enabled;
+    resourceAlertEnabled = UpdateController.hasResourceAlertNotificationTarget(settings) && getResourceAlertConfig(settings).enabled;
   } catch (e) {
     console.warn('[broadcast] failed to load realtime gate settings:', e?.message || e);
   }
@@ -430,7 +458,7 @@ async function getRealtimeBatchIntent(env) {
     };
   }
 
-  const subscribers = await getCachedFrontendSubscriberCount(env);
+  const subscribers = await UpdateController.getCachedFrontendSubscriberCount(env);
   if (subscribers > 0) {
     return {
       maintainState: false
@@ -443,12 +471,12 @@ async function getRealtimeBatchIntent(env) {
   };
 }
 
-async function getBatchFlushDelayMs(env, now = Date.now()) {
+  static async getBatchFlushDelayMs(env, now = Date.now()) {
   if (hasRecentFrontendRealtimeActivity(now)) return UPDATE_REALTIME_BATCH_WINDOW_MS;
 
   try {
     const settings = await loadSiteSettings(env.DB);
-    if (hasResourceAlertNotificationTarget(settings) && getResourceAlertConfig(settings).enabled) {
+    if (UpdateController.hasResourceAlertNotificationTarget(settings) && getResourceAlertConfig(settings).enabled) {
       return UPDATE_RESOURCE_ALERT_BATCH_WINDOW_MS;
     }
   } catch (e) {
@@ -458,53 +486,53 @@ async function getBatchFlushDelayMs(env, now = Date.now()) {
   return UPDATE_REALTIME_BATCH_WINDOW_MS;
 }
 
-function buildAgentWssStateHeaders(settings = {}, now = Date.now()) {
+  static buildAgentWssStateHeaders(settings = {}, now = Date.now()) {
   const state = getWssReportScheduleState(settings, now);
   return {
-    [AGENT_WSS_MODE_HEADER]: state.mode,
-    [AGENT_WSS_REASON_HEADER]: state.reason
+    [UpdateController.AGENT_WSS_MODE_HEADER]: state.mode,
+    [UpdateController.AGENT_WSS_REASON_HEADER]: state.reason
   };
 }
 
-function createAgentWssScheduleInactiveResponse(settings = {}) {
+  static createAgentWssScheduleInactiveResponse(settings = {}) {
   return new Response(JSON.stringify({
     error: 'Agent WSS report outside active hours',
     code: 409,
-    text: AGENT_WSS_SCHEDULE_INACTIVE,
+    text: UpdateController.AGENT_WSS_SCHEDULE_INACTIVE,
     connection_mode: 'http'
   }), {
     status: 409,
     headers: {
       'Cache-Control': 'no-store',
       'Content-Type': 'application/json',
-      ...buildAgentWssStateHeaders(settings)
+      ...UpdateController.buildAgentWssStateHeaders(settings)
     }
   });
 }
 
-function createAgentWssDisabledResponse() {
+  static createAgentWssDisabledResponse() {
   return new Response(JSON.stringify({
     error: 'Agent WSS report disabled',
     code: 409,
-    text: AGENT_WSS_SCHEDULE_DISABLED,
+    text: UpdateController.AGENT_WSS_SCHEDULE_DISABLED,
     connection_mode: 'http'
   }), {
     status: 409,
     headers: {
       'Cache-Control': 'no-store',
       'Content-Type': 'application/json',
-      [AGENT_WSS_MODE_HEADER]: 'disabled',
-      [AGENT_WSS_REASON_HEADER]: AGENT_WSS_SCHEDULE_DISABLED
+      [UpdateController.AGENT_WSS_MODE_HEADER]: 'disabled',
+      [UpdateController.AGENT_WSS_REASON_HEADER]: UpdateController.AGENT_WSS_SCHEDULE_DISABLED
     }
   });
 }
 
-async function _flushBatch(env) {
-  if (batchQueue.size === 0) return;
+  static async _flushBatch(env) {
+  if (UpdateController.batchQueue.size === 0) return;
 
   // 原子性地取出当前队列，避免并发写入干扰
-  const queue = batchQueue;
-  batchQueue = new Map();
+  const queue = UpdateController.batchQueue;
+  UpdateController.batchQueue = new Map();
 
   const updates = [];
   for (const [serverId, item] of queue) {
@@ -520,7 +548,7 @@ async function _flushBatch(env) {
   if (updates.length === 0) return;
 
   try {
-    const intent = await getRealtimeBatchIntent(env);
+    const intent = await UpdateController.getRealtimeBatchIntent(env);
     if (!intent) return;
 
     const id = env.METRICS_BROADCASTER.idFromName('global');
@@ -539,49 +567,49 @@ async function _flushBatch(env) {
   }
 }
 
-function _ensureBatchFlush(env) {
+  static _ensureBatchFlush(env) {
   const now = Date.now();
-  if (flushingPromise) {
+  if (UpdateController.flushingPromise) {
     if (
       hasRecentFrontendRealtimeActivity(now) &&
-      flushDueAt > now + UPDATE_REALTIME_BATCH_WINDOW_MS
+      UpdateController.flushDueAt > now + UPDATE_REALTIME_BATCH_WINDOW_MS
     ) {
-      if (flushTimer) clearTimeout(flushTimer);
-      flushDueAt = now + UPDATE_REALTIME_BATCH_WINDOW_MS;
-      flushTimer = setTimeout(() => {
-        const resolve = resolveFlushingPromise;
-        flushTimer = null;
-        flushDueAt = 0;
-        resolveFlushingPromise = null;
-        _flushBatch(env).finally(() => {
-          flushingPromise = null;
+      if (UpdateController.flushTimer) clearTimeout(UpdateController.flushTimer);
+      UpdateController.flushDueAt = now + UPDATE_REALTIME_BATCH_WINDOW_MS;
+      UpdateController.flushTimer = setTimeout(() => {
+        const resolve = UpdateController.resolveFlushingPromise;
+        UpdateController.flushTimer = null;
+        UpdateController.flushDueAt = 0;
+        UpdateController.resolveFlushingPromise = null;
+        UpdateController._flushBatch(env).finally(() => {
+          UpdateController.flushingPromise = null;
           if (resolve) resolve();
         });
       }, UPDATE_REALTIME_BATCH_WINDOW_MS);
     }
-    return flushingPromise;
+    return UpdateController.flushingPromise;
   }
 
-  flushingPromise = getBatchFlushDelayMs(env, now).then(delayMs => new Promise(resolve => {
-    resolveFlushingPromise = resolve;
+  UpdateController.flushingPromise = UpdateController.getBatchFlushDelayMs(env, now).then(delayMs => new Promise(resolve => {
+    UpdateController.resolveFlushingPromise = resolve;
     const normalizedDelayMs = Math.max(0, Number(delayMs) || UPDATE_REALTIME_BATCH_WINDOW_MS);
-    flushDueAt = Date.now() + normalizedDelayMs;
-    flushTimer = setTimeout(() => {
-      const currentResolve = resolveFlushingPromise;
-      flushTimer = null;
-      flushDueAt = 0;
-      resolveFlushingPromise = null;
-      _flushBatch(env).finally(() => {
-        flushingPromise = null;
+    UpdateController.flushDueAt = Date.now() + normalizedDelayMs;
+    UpdateController.flushTimer = setTimeout(() => {
+      const currentResolve = UpdateController.resolveFlushingPromise;
+      UpdateController.flushTimer = null;
+      UpdateController.flushDueAt = 0;
+      UpdateController.resolveFlushingPromise = null;
+      UpdateController._flushBatch(env).finally(() => {
+        UpdateController.flushingPromise = null;
         if (currentResolve) currentResolve();
       });
     }, normalizedDelayMs);
   }));
 
-  return flushingPromise;
+  return UpdateController.flushingPromise;
 }
 
-export function checkSecretAuthorization(secret, serverDetail, settings, env) {
+  static checkSecretAuthorization(secret, serverDetail, settings, env) {
   const isMaster = secret === env?.API_SECRET;
   const isServer = Boolean(serverDetail && serverDetail.secret && secret === serverDetail.secret);
   const token = settings?.auto_register_token;
@@ -601,7 +629,7 @@ export function checkSecretAuthorization(secret, serverDetail, settings, env) {
   };
 }
 
-export async function autoRegisterServer(db, serverId, data, secret, settings, regionCode = '') {
+  static async autoRegisterServer(db, serverId, data, secret, settings, regionCode = '') {
   const currentServers = await getAllServers(db, true);
   if (currentServers.length >= HISTORY_MAX_PARTITION_ID) {
     throw new Error('Maximum registered server limit reached');
@@ -653,17 +681,17 @@ export async function autoRegisterServer(db, serverId, data, secret, settings, r
   };
 }
 
-export async function handleUpdate(request, env, ctx) {
+  static async handleUpdate(request, env, ctx) {
   try {
     // 必须在 request.json() 之前：超大 body 的解析本身就可能耗尽 Worker CPU。
     // 注意这是防呆而非硬上限：chunked 或缺少 Content-Length 的请求会跳过该检查。
-    const declaredLength = getDeclaredContentLength(request);
+    const declaredLength = UpdateController.getDeclaredContentLength(request);
     if (declaredLength !== null && declaredLength > UPDATE_MAX_REQUEST_BYTES) {
       console.warn('[Update] 413 Payload too large:', {
         content_length: declaredLength,
         limit: UPDATE_MAX_REQUEST_BYTES
       });
-      return createPayloadTooLargeResponse();
+      return UpdateController.createPayloadTooLargeResponse();
     }
 
     const data = await request.json();
@@ -677,7 +705,7 @@ export async function handleUpdate(request, env, ctx) {
       settings = {};
     }
 
-    const wssStateHeaders = buildAgentWssStateHeaders(settings);
+    const wssStateHeaders = UpdateController.buildAgentWssStateHeaders(settings);
     const dateHeader = { 'Date': new Date().toUTCString() };
 
     let serverId = '';
@@ -696,13 +724,13 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            ...buildAutoDiscoveryHeaders(AGENT_AUTO_DISCOVERY_DISABLED),
+            ...UpdateController.buildAutoDiscoveryHeaders(UpdateController.AGENT_AUTO_DISCOVERY_DISABLED),
             ...wssStateHeaders
           }
         });
       }
 
-      const auth = checkSecretAuthorization(secret, null, settings, env);
+      const auth = UpdateController.checkSecretAuthorization(secret, null, settings, env);
       if (auth.isTokenMatch && auth.isTokenExpired) {
         return new Response(JSON.stringify({
           error: 'Auto registration key expired',
@@ -714,7 +742,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:key_expired`),
+            ...UpdateController.buildAutoDiscoveryHeaders(`${UpdateController.AGENT_AUTO_DISCOVERY_FAILED}:key_expired`),
             ...wssStateHeaders
           }
         });
@@ -731,7 +759,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:unauthorized`),
+            ...UpdateController.buildAutoDiscoveryHeaders(`${UpdateController.AGENT_AUTO_DISCOVERY_FAILED}:unauthorized`),
             ...wssStateHeaders
           }
         });
@@ -751,7 +779,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:no_name`),
+            ...UpdateController.buildAutoDiscoveryHeaders(`${UpdateController.AGENT_AUTO_DISCOVERY_FAILED}:no_name`),
             ...wssStateHeaders
           }
         });
@@ -766,7 +794,7 @@ export async function handleUpdate(request, env, ctx) {
               'Content-Type': 'text/plain; charset=utf-8',
               'Cache-Control': 'no-store',
               ...dateHeader,
-              ...buildAutoDiscoveryHeaders(AGENT_AUTO_DISCOVERY_REUSED),
+              ...UpdateController.buildAutoDiscoveryHeaders(UpdateController.AGENT_AUTO_DISCOVERY_REUSED),
               ...wssStateHeaders
             }
           });
@@ -778,7 +806,7 @@ export async function handleUpdate(request, env, ctx) {
       serverId = crypto.randomUUID();
       const initialRegionCode = request.cf?.country || request.headers?.get('cf-ipcountry') || '';
       try {
-        const reg = await autoRegisterServer(env.DB, serverId, data, secret, settings, initialRegionCode);
+        const reg = await UpdateController.autoRegisterServer(env.DB, serverId, data, secret, settings, initialRegionCode);
         serverDetail = reg.serverDetail;
         autoRegistered = true;
 
@@ -786,7 +814,7 @@ export async function handleUpdate(request, env, ctx) {
           ctx.waitUntil((async () => {
             try {
               const regMsg = `新服务器自动注册成功:\n- 名称: ${reg.serverName}\n- ID: ${serverId}\n- 分组: ${reg.group}${reg.region ? `\n- 属地: ${reg.region}` : ''}`;
-              await sendNotification(settings, regMsg, {
+              await NotificationService.sendNotification(settings, regMsg, {
                 event: 'auto_register',
                 emoji: '🎉',
                 clients: [reg.serverName],
@@ -809,7 +837,7 @@ export async function handleUpdate(request, env, ctx) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store',
             ...dateHeader,
-            ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:db_error`),
+            ...UpdateController.buildAutoDiscoveryHeaders(`${UpdateController.AGENT_AUTO_DISCOVERY_FAILED}:db_error`),
             ...wssStateHeaders
           }
         });
@@ -821,11 +849,11 @@ export async function handleUpdate(request, env, ctx) {
       serverId = rawId;
 
       serverDetail = await getServerDetail(env.DB, serverId, true);
-      const auth = checkSecretAuthorization(secret, serverDetail, settings, env);
+      const auth = UpdateController.checkSecretAuthorization(secret, serverDetail, settings, env);
 
       if (!serverDetail) {
         if (normalizeBooleanSetting(settings?.auto_register_enabled) !== 'true') {
-          return createServerNotFoundResponse();
+          return UpdateController.createServerNotFoundResponse();
         }
 
         if (auth.isTokenMatch && auth.isTokenExpired) {
@@ -839,7 +867,7 @@ export async function handleUpdate(request, env, ctx) {
               'Content-Type': 'application/json',
               'Cache-Control': 'no-store',
               ...dateHeader,
-              ...buildAutoDiscoveryHeaders(`${AGENT_AUTO_DISCOVERY_FAILED}:key_expired`),
+              ...UpdateController.buildAutoDiscoveryHeaders(`${UpdateController.AGENT_AUTO_DISCOVERY_FAILED}:key_expired`),
               ...wssStateHeaders
             }
           });
@@ -851,7 +879,7 @@ export async function handleUpdate(request, env, ctx) {
 
         const initialRegionCode = request.cf?.country || request.headers?.get('cf-ipcountry') || '';
         try {
-          const reg = await autoRegisterServer(env.DB, serverId, data, secret, settings, initialRegionCode);
+          const reg = await UpdateController.autoRegisterServer(env.DB, serverId, data, secret, settings, initialRegionCode);
           serverDetail = reg.serverDetail;
           autoRegistered = true;
 
@@ -859,7 +887,7 @@ export async function handleUpdate(request, env, ctx) {
             ctx.waitUntil((async () => {
               try {
                 const regMsg = `新服务器自动注册成功:\n- 名称: ${reg.serverName}\n- ID: ${serverId}\n- 分组: ${reg.group}${reg.region ? `\n- 属地: ${reg.region}` : ''}`;
-                await sendNotification(settings, regMsg, {
+                await NotificationService.sendNotification(settings, regMsg, {
                   event: 'auto_register',
                   emoji: '🎉',
                   clients: [reg.serverName],
@@ -882,14 +910,14 @@ export async function handleUpdate(request, env, ctx) {
     }
 
     let regionCode = request.cf?.country || request.headers?.get('cf-ipcountry') || '';
-    const agentVersion = normalizeAgentVersion(request.headers.get('X-Agent-Version'));
+    const agentVersion = UpdateController.normalizeAgentVersion(request.headers.get('X-Agent-Version'));
 
     if (
       Object.prototype.hasOwnProperty.call(data, 'rx_correction') ||
       Object.prototype.hasOwnProperty.call(data, 'tx_correction')
     ) {
-      const ackRx = normalizeCorrectionValue(data.rx_correction);
-      const ackTx = normalizeCorrectionValue(data.tx_correction);
+      const ackRx = UpdateController.normalizeCorrectionValue(data.rx_correction);
+      const ackTx = UpdateController.normalizeCorrectionValue(data.tx_correction);
       if (ackRx === null || ackTx === null) {
         return createBadRequestResponse('Invalid correction');
       }
@@ -920,16 +948,16 @@ export async function handleUpdate(request, env, ctx) {
     const historyPartitionId = serverDetail.history_partition_id;
     if(!historyPartitionId) {
       await ensureServerOptimization(env.DB, serverId);
-      logUpdateBadRequest('Missing history_partition_id', {
+      UpdateController.logUpdateBadRequest('Missing history_partition_id', {
         id: serverId,
         history_partition_id: serverDetail.history_partition_id
       });
       return createBadRequestResponse('Missing history_partition_id');
     }
 
-    const samples = normalizeMetricSamples(data);
+    const samples = UpdateController.normalizeMetricSamples(data);
     if (samples.length === 0) {
-      logUpdateBadRequest('Missing metrics', {
+      UpdateController.logUpdateBadRequest('Missing metrics', {
         id: serverId,
         has_metrics: !!data.metrics,
         has_samples: Array.isArray(data.samples),
@@ -940,11 +968,11 @@ export async function handleUpdate(request, env, ctx) {
 
     // 获取最后一条插入（如果是批量数据，取最后一个样本）
     const latestSample = samples[samples.length - 1];
-    const latestMetrics = getReportMetrics(data, latestSample);
+    const latestMetrics = UpdateController.getReportMetrics(data, latestSample);
     const isBatchBackfill = data.batch === true && samples.length > 1;
 
     if (isBatchBackfill) {
-      await saveMetricsHistoryBatch(
+      await DatabaseService.saveMetricsHistoryBatch(
         env.DB,
         serverId,
         historyPartitionId,
@@ -954,8 +982,8 @@ export async function handleUpdate(request, env, ctx) {
         latestMetrics
       );
     } else {
-      const historyMetrics = getHistoryMetrics(data, samples, latestSample);
-      await saveMetricsHistory(
+      const historyMetrics = UpdateController.getHistoryMetrics(data, samples, latestSample);
+      await DatabaseService.saveMetricsHistory(
         env.DB,
         serverId,
         historyPartitionId,
@@ -966,21 +994,21 @@ export async function handleUpdate(request, env, ctx) {
       );
     }
 
-    const broadcastSamples = toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);
+    const broadcastSamples = UpdateController.toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);
 
     cacheLatestReportUpdate(serverId, broadcastSamples, Date.now());
     // 加入批量队列，由后台定时任务统一推送到 DO
-    queueBroadcastSamples(serverId, broadcastSamples);
+    UpdateController.queueBroadcastSamples(serverId, broadcastSamples);
     if (ctx && ctx.waitUntil) {
-      ctx.waitUntil(_ensureBatchFlush(env));
+      ctx.waitUntil(UpdateController._ensureBatchFlush(env));
       // 月流量阈值告警：复用已加载的 serverDetail 与刚入库的 historyMetrics，非阻塞后台执行
-      ctx.waitUntil(evaluateTrafficAlert(env, serverDetail, latestMetrics, {
+      ctx.waitUntil(NotificationService.evaluateTrafficAlert(env, serverDetail, latestMetrics, {
         patchCache: (sid, value) => patchServerDetailCache(sid, { traffic_alert_state: value })
       }));
     }
 
     const autoDiscoveryHeaders = autoRegistered
-      ? buildAutoDiscoveryHeaders(AGENT_AUTO_DISCOVERY_CREATED, serverId)
+      ? UpdateController.buildAutoDiscoveryHeaders(UpdateController.AGENT_AUTO_DISCOVERY_CREATED, serverId)
       : {};
 
     const clientConfigSchema = normalizeAgentConfigSchemaVersion(request.headers.get(AGENT_CONFIG_SCHEMA_HEADER));
@@ -1046,12 +1074,12 @@ export async function handleUpdate(request, env, ctx) {
 }
 
 // 暴露给 index.js 路由使用的 WebSocket 接入函数
-function isWebSocketUpgradeRequest(request) {
+  static isWebSocketUpgradeRequest(request) {
   const upgradeHeader = request.headers.get('Upgrade');
   return !!upgradeHeader && upgradeHeader.toLowerCase() === 'websocket';
 }
 
-async function forwardWebSocketUpgrade(request, env, internalPath, logPrefix) {
+  static async forwardWebSocketUpgrade(request, env, internalPath, logPrefix) {
   if (!env || !env.METRICS_BROADCASTER) {
     return new Response(JSON.stringify({ error: 'WebSocket not enabled', code: 503 }), {
       status: 503,
@@ -1059,7 +1087,7 @@ async function forwardWebSocketUpgrade(request, env, internalPath, logPrefix) {
     });
   }
 
-  if (!isWebSocketUpgradeRequest(request)) {
+  if (!UpdateController.isWebSocketUpgradeRequest(request)) {
     return new Response('Expected WebSocket upgrade request', { status: 426 });
   }
 
@@ -1089,7 +1117,7 @@ async function forwardWebSocketUpgrade(request, env, internalPath, logPrefix) {
   }
 }
 
-export async function handleWebSocketUpgrade(request, env) {
+  static async handleWebSocketUpgrade(request, env) {
   const settings = await loadSiteSettings(env.DB, { forceRefresh: true });
   if (settings?.is_public !== 'true' && !await checkWebSocketAuth(request, env, settings)) {
     return new Response(JSON.stringify({ error: 'Unauthorized', code: 401 }), {
@@ -1098,48 +1126,22 @@ export async function handleWebSocketUpgrade(request, env) {
     });
   }
 
-  const response = await forwardWebSocketUpgrade(request, env, '/ws', '[ws]');
+  const response = await UpdateController.forwardWebSocketUpgrade(request, env, '/ws', '[ws]');
   if (response?.status === 101) {
     markFrontendRealtimeActive();
   }
   return response;
 }
 
-export async function handleUpdateWebSocketUpgrade(request, env) {
+  static async handleUpdateWebSocketUpgrade(request, env) {
   const settings = await loadSiteSettings(env.DB);
   if (!isWssReportConfigured(settings)) {
-    return createAgentWssDisabledResponse();
+    return UpdateController.createAgentWssDisabledResponse();
   }
   const scheduleState = getWssReportScheduleState(settings);
   if (!scheduleState.active) {
-    return createAgentWssScheduleInactiveResponse(settings);
+    return UpdateController.createAgentWssScheduleInactiveResponse(settings);
   }
-  return forwardWebSocketUpgrade(request, env, '/update', '[update-ws]');
+  return UpdateController.forwardWebSocketUpgrade(request, env, '/update', '[update-ws]');
 }
-
-/**
- * UpdateController
- * 负责 Agent 指标上报、自动注册以及 Agent/Frontend WebSocket 协议升级
- */
-export class UpdateController {
-  constructor(env, ctx = null) {
-    this.env = env;
-    this.ctx = ctx;
-  }
-
-  async handle(request) {
-    return handleUpdate(request, this.env, this.ctx);
-  }
-
-  async handleFrontendWebSocket(request) {
-    return handleWebSocketUpgrade(request, this.env);
-  }
-
-  async handleAgentWebSocket(request) {
-    return handleUpdateWebSocketUpgrade(request, this.env);
-  }
-
-  async autoRegister(serverId, data, secret, settings, regionCode = '') {
-    return autoRegisterServer(this.env.DB, serverId, data, secret, settings, regionCode);
-  }
 }

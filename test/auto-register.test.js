@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkSecretAuthorization, handleUpdate } from '../src/handlers/update.js';
-import { handleAdminAPI } from '../src/handlers/admin.js';
-import { withoutPrivateServerFields } from '../src/handlers/dashboard.js';
+import { UpdateController } from '../src/handlers/UpdateController.js';
+import { AdminController } from '../src/handlers/AdminController.js';
+import { DashboardController } from '../src/handlers/DashboardController.js';
+
+const { checkSecretAuthorization, handleUpdate } = UpdateController;
+const { handleAdminAPI } = AdminController;
+const { withoutPrivateServerFields } = DashboardController;
 import { clearSiteSettingsCache } from '../src/utils/settings.js';
 import { clearServersListCache } from '../src/utils/cache.js';
 import { generateToken } from '../src/middleware/auth.js';

@@ -11,8 +11,8 @@
 // - 前端订阅连接与 Agent 上报连接均使用 DO WebSocket Hibernation API，闲置时休眠以节省资源。
 //   通过 setWebSocketAutoResponse 自动响应 ping，无需唤醒 DO。
 
-import { saveMetricsHistory, saveMetricsHistoryBatch } from '../database/schema.js';
-import { evaluateTrafficAlert } from '../services/notification.js';
+import { DatabaseService } from '../database/DatabaseService.js';
+import { NotificationService } from '../services/NotificationService.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
 import { getWssReportScheduleState, isWssReportConfigured, loadSiteSettings } from '../utils/settings.js';
@@ -27,18 +27,7 @@ import {
   normalizeAgentConfigSchemaVersion,
   serializeCorrection
 } from '../utils/agentConfig.js';
-import {
-  applyHistoryMetricAggregates,
-  autoRegisterServer,
-  checkSecretAuthorization,
-  collectHistoryMetricAggregates,
-  getReportMetrics,
-  mergeHistoryMetricAggregates,
-  normalizeAgentVersion,
-  normalizeCorrectionValue,
-  normalizeMetricSamples,
-  toBroadcastSamples
-} from '../handlers/update.js';
+import { UpdateController } from '../handlers/UpdateController.js';
 import {
   logAgentAuth,
   logAgentConnect,
@@ -718,7 +707,7 @@ export class MetricsBroadcaster {
       settings = {};
     }
 
-    const auth = checkSecretAuthorization(data.secret, serverDetail, settings, this.env);
+    const auth = UpdateController.checkSecretAuthorization(data.secret, serverDetail, settings, this.env);
 
     if (!serverDetail) {
       if (settings?.auto_register_enabled !== 'true') {
@@ -741,7 +730,7 @@ export class MetricsBroadcaster {
       }
 
       try {
-        const reg = await autoRegisterServer(this.env.DB, serverId, data, data.secret, settings);
+        const reg = await UpdateController.autoRegisterServer(this.env.DB, serverId, data, data.secret, settings);
         serverDetail = reg.serverDetail;
         this.agentServerDetails.set(serverId, { data: serverDetail, time: Date.now() });
       } catch (err) {
@@ -768,7 +757,7 @@ export class MetricsBroadcaster {
       }
     }
 
-    const agentVersion = normalizeAgentVersion(
+    const agentVersion = UpdateController.normalizeAgentVersion(
       data.agent_version ??
       data.metrics?.agent_version ??
       attachment.agentVersion
@@ -1036,8 +1025,8 @@ export class MetricsBroadcaster {
   }
 
   async _ackTrafficCorrection(serverId, data) {
-    const ackRx = normalizeCorrectionValue(data.rx_correction);
-    const ackTx = normalizeCorrectionValue(data.tx_correction);
+    const ackRx = UpdateController.normalizeCorrectionValue(data.rx_correction);
+    const ackTx = UpdateController.normalizeCorrectionValue(data.tx_correction);
     if (ackRx === null || ackTx === null) {
       return { ok: false, error: 'Invalid correction' };
     }
@@ -1249,10 +1238,10 @@ export class MetricsBroadcaster {
     const now = Date.now();
     const state = this.agentHistoryWrites.get(serverId) || {};
     const currentAggregate = payload.historyAggregate ||
-      collectHistoryMetricAggregates([{ metrics: payload.metrics }]);
+      UpdateController.collectHistoryMetricAggregates([{ metrics: payload.metrics }]);
 
     if (state.flushing) {
-      state.pendingHistoryAggregate = mergeHistoryMetricAggregates(
+      state.pendingHistoryAggregate = UpdateController.mergeHistoryMetricAggregates(
         state.pendingHistoryAggregate,
         currentAggregate
       );
@@ -1260,7 +1249,7 @@ export class MetricsBroadcaster {
       return { persisted: false, nextD1WriteAfterMs: 0 };
     }
 
-    state.pendingHistoryAggregate = mergeHistoryMetricAggregates(
+    state.pendingHistoryAggregate = UpdateController.mergeHistoryMetricAggregates(
       state.pendingHistoryAggregate,
       currentAggregate
     );
@@ -1287,8 +1276,8 @@ export class MetricsBroadcaster {
     delete state.pendingHistoryAggregate;
     this.agentHistoryWrites.set(serverId, state);
     try {
-      const metrics = applyHistoryMetricAggregates(payload.metrics, aggregateForWrite);
-      await saveMetricsHistory(
+      const metrics = UpdateController.applyHistoryMetricAggregates(payload.metrics, aggregateForWrite);
+      await DatabaseService.saveMetricsHistory(
         this.env.DB,
         serverId,
         payload.historyPartitionId,
@@ -1303,7 +1292,7 @@ export class MetricsBroadcaster {
           try {
             const trafficServerDetail = await this._getAgentServerDetail(serverId);
             if (!trafficServerDetail) return;
-            await evaluateTrafficAlert(this.env, trafficServerDetail, metrics, {
+            await NotificationService.evaluateTrafficAlert(this.env, trafficServerDetail, metrics, {
               patchCache: (id, value) => {
                 const entry = this.agentServerDetails.get(id);
                 if (entry && entry.data) entry.data.traffic_alert_state = value;
@@ -1326,7 +1315,7 @@ export class MetricsBroadcaster {
         nextD1WriteAfterMs: intervalMs
       };
     } catch (e) {
-      state.pendingHistoryAggregate = mergeHistoryMetricAggregates(
+      state.pendingHistoryAggregate = UpdateController.mergeHistoryMetricAggregates(
         aggregateForWrite,
         state.pendingHistoryAggregate
       );
@@ -1381,14 +1370,14 @@ export class MetricsBroadcaster {
       return;
     }
 
-    const samples = normalizeMetricSamples(data);
+    const samples = UpdateController.normalizeMetricSamples(data);
     if (samples.length === 0) {
       this._closeWsWithError(ws, 'Missing metrics', 400);
       return;
     }
 
     const latestSample = samples[samples.length - 1];
-    const latestMetrics = getReportMetrics(data, latestSample);
+    const latestMetrics = UpdateController.getReportMetrics(data, latestSample);
 
     const rawReportId = data.reportId;
     const reportId = typeof rawReportId === 'string' && rawReportId.trim() ? rawReportId.trim() : null;
@@ -1418,8 +1407,8 @@ export class MetricsBroadcaster {
       }
     }
 
-    const historyAggregate = collectHistoryMetricAggregates(samples);
-    const broadcastSamples = toBroadcastSamples(
+    const historyAggregate = UpdateController.collectHistoryMetricAggregates(samples);
+    const broadcastSamples = UpdateController.toBroadcastSamples(
       context.serverId,
       samples,
       context.regionCode,
@@ -1445,7 +1434,7 @@ export class MetricsBroadcaster {
     if (data.batch === true && samples.length > 0) {
       const d1Start = Date.now();
       try {
-        await saveMetricsHistoryBatch(
+        await DatabaseService.saveMetricsHistoryBatch(
           this.env.DB,
           context.serverId,
           context.historyPartitionId,
@@ -1554,7 +1543,7 @@ export class MetricsBroadcaster {
       serverId: '',
       historyPartitionId: 0,
       region: request.headers.get('cf-ipcountry') || '',
-      agentVersion: normalizeAgentVersion(request.headers.get('X-Agent-Version')),
+      agentVersion: UpdateController.normalizeAgentVersion(request.headers.get('X-Agent-Version')),
       reportIntervalMs: AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,
       wssReportIntervalMs: DEFAULT_WSS_REPORT_INTERVAL * 1000,
       lastD1WriteTs: 0,

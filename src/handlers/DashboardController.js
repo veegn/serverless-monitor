@@ -1,5 +1,5 @@
 import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
-import { getDashboardLatencyHistory, getLatestMetrics, getLatestMetricsForAllServers, getMetricsHistory } from '../database/schema.js';
+import { DatabaseService } from '../database/DatabaseService.js';
 import { getAllServers, getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from '../utils/cache.js';
 import { mergeMetricsIntoServer, coerceNumericMetricFields } from '../utils/metrics.js';
 import { normalizeLongHistoryPoints, loadSiteSettings, debug } from '../utils/settings.js';
@@ -16,13 +16,37 @@ import {
   DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE
 } from '../utils/config.js';
 
-const PROBE_FIELDS = ['ct', 'cu', 'cm', 'bd', 'node_1', 'node_2', 'node_3', 'node_4'];
+/**
+ * DashboardController
+ * 负责仪表盘概览、单机详情以及历史指标检索 API
+ */
+export class DashboardController {
+  static PROBE_FIELDS = ['ct', 'cu', 'cm', 'bd', 'node_1', 'node_2', 'node_3', 'node_4'];
+
+  constructor(env, ctx = null) {
+    this.env = env;
+    this.ctx = ctx;
+  }
+
+  // --- 实例代理方法 ---
+
+  async handleServer(request, sys) {
+    return DashboardController.handleServerAPI(request, this.env, sys);
+  }
+
+  async handleServers(request, sys) {
+    return DashboardController.handleServersAPI(request, this.env, sys);
+  }
+
+  async handleHistory(request, id, hours, columns, sys) {
+    return DashboardController.fetchHistoryData(this.env, request, id, hours, columns, sys);
+  }
 
 // REST 接口中，丢包值为 null 表示该探针没有可用样本；此时隐藏对应的延迟和丢包字段。
-export function omitNullLossProbeFields(item) {
+  static omitNullLossProbeFields(item) {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
   const result = { ...item };
-  for (const field of PROBE_FIELDS) {
+  for (const field of DashboardController.PROBE_FIELDS) {
     if (result[`loss_${field}`] === null) {
       delete result[`loss_${field}`];
       delete result[`ping_${field}`];
@@ -31,50 +55,50 @@ export function omitNullLossProbeFields(item) {
   return result;
 }
 
-function createEmptyLatencyWindow() {
+  static createEmptyLatencyWindow() {
   return { ping: [], loss: [] };
 }
 
-function toPublicIpReachability(value) {
+  static toPublicIpReachability(value) {
   const normalized = String(value ?? '').trim().toLowerCase();
   return normalized && normalized !== '0' && normalized !== 'false' ? '1' : '0';
 }
 
-function normalizePublicIpFields(item, ensureFields = true) {
+  static normalizePublicIpFields(item, ensureFields = true) {
   if (ensureFields || Object.prototype.hasOwnProperty.call(item, 'ip_v4')) {
-    item.ip_v4 = toPublicIpReachability(item.ip_v4);
+    item.ip_v4 = DashboardController.toPublicIpReachability(item.ip_v4);
   }
   if (ensureFields || Object.prototype.hasOwnProperty.call(item, 'ip_v6')) {
-    item.ip_v6 = toPublicIpReachability(item.ip_v6);
+    item.ip_v6 = DashboardController.toPublicIpReachability(item.ip_v6);
   }
   for (const field of ['data', 'payload', 'metrics']) {
     if (item[field] && typeof item[field] === 'object' && !Array.isArray(item[field])) {
-      item[field] = normalizePublicIpFields({ ...item[field] }, false);
+      item[field] = DashboardController.normalizePublicIpFields({ ...item[field] }, false);
     }
   }
   return item;
 }
 
-export function withoutPrivateServerFields(server) {
+  static withoutPrivateServerFields(server) {
   const item = { ...server };
   delete item.bandwidth;
   delete item.note;
   delete item.auto_update;
   delete item.secret;
-  return normalizePublicIpFields(item);
+  return DashboardController.normalizePublicIpFields(item);
 }
 
-function normalizeLatestReportSample(sample) {
+  static normalizeLatestReportSample(sample) {
   if (!sample || typeof sample !== 'object') return null;
   const data = sample?.data || sample?.payload || sample?.metrics;
   if (!data || typeof data !== 'object') return null;
 
-  const publicData = coerceNumericMetricFields(normalizePublicIpFields({ ...data }, false));
+  const publicData = coerceNumericMetricFields(DashboardController.normalizePublicIpFields({ ...data }, false));
   const ts = sample.ts ?? sample.timestamp;
   return ts === undefined ? { data: publicData } : { ts, data: publicData };
 }
 
-function normalizeLatestReportUpdate(update) {
+  static normalizeLatestReportUpdate(update) {
   if (!update || !Array.isArray(update.samples)) return null;
 
   const samples = update.samples
@@ -88,15 +112,15 @@ function normalizeLatestReportUpdate(update) {
   };
 }
 
-function attachLatencyHistoryToServers(servers, latencyHistory) {
+  static attachLatencyHistoryToServers(servers, latencyHistory) {
   for (const server of servers || []) {
-    const window = latencyHistory?.get(String(server.id)) || createEmptyLatencyWindow();
+    const window = latencyHistory?.get(String(server.id)) || DashboardController.createEmptyLatencyWindow();
     server.ping = window.ping;
     server.loss = window.loss;
   }
 }
 
-async function getDurableRealtimeState(env, serverIds) {
+  static async getDurableRealtimeState(env, serverIds) {
   const empty = { latestReportUpdates: [] };
   if (!env.METRICS_BROADCASTER || !Array.isArray(serverIds) || serverIds.length === 0) return empty;
 
@@ -124,7 +148,7 @@ async function getDurableRealtimeState(env, serverIds) {
   }
 }
 
-function mergeLatestReportUpdates(serverIds, durableUpdates, workerUpdates) {
+  static mergeLatestReportUpdates(serverIds, durableUpdates, workerUpdates) {
   const merged = new Map();
 
   for (const update of durableUpdates) {
@@ -145,14 +169,14 @@ function mergeLatestReportUpdates(serverIds, durableUpdates, workerUpdates) {
   const now = Date.now();
   return serverIds.map(serverId => merged.get(String(serverId)))
     .filter(Boolean)
-    .map(update => normalizeLatestReportUpdate({
+    .map(update => DashboardController.normalizeLatestReportUpdate({
       ...update,
       reportAgeMs: Math.max(0, now - Number(update.reportTs || now))
     }))
     .filter(Boolean);
 }
 
-async function getRealtimeStateForServers(env, serverIds) {
+  static async getRealtimeStateForServers(env, serverIds) {
   const normalizedServerIds = Array.from(new Set(
     (Array.isArray(serverIds) ? serverIds : [])
       .map(serverId => String(serverId || '').trim())
@@ -162,7 +186,7 @@ async function getRealtimeStateForServers(env, serverIds) {
     return { latestReportUpdates: [] };
   }
 
-  const durableState = await getDurableRealtimeState(env, normalizedServerIds);
+  const durableState = await DashboardController.getDurableRealtimeState(env, normalizedServerIds);
   const durableLatestReportUpdates = durableState.latestReportUpdates;
 
   // DO 命中后反向预热当前 Worker isolate，降低随后 DO 休眠造成的空缓存概率。
@@ -171,7 +195,7 @@ async function getRealtimeStateForServers(env, serverIds) {
   }
 
   return {
-    latestReportUpdates: mergeLatestReportUpdates(
+    latestReportUpdates: DashboardController.mergeLatestReportUpdates(
       normalizedServerIds,
       durableLatestReportUpdates,
       getWorkerLatestReportUpdates(normalizedServerIds)
@@ -179,7 +203,7 @@ async function getRealtimeStateForServers(env, serverIds) {
   };
 }
 
-export async function handleServerAPI(request, env, sys) {
+  static async handleServerAPI(request, env, sys) {
   const isLoggedIn = await checkAuth(request, env, sys);
   
   if (sys.is_public !== 'true' && !isLoggedIn) {
@@ -196,8 +220,8 @@ export async function handleServerAPI(request, env, sys) {
   if (!server) return createNotFoundResponse('Server not found');
   
   const [latestMetrics, realtimeState] = await Promise.all([
-    getLatestMetrics(env.DB, id, server),
-    getRealtimeStateForServers(env, [id])
+    DatabaseService.getLatestMetrics(env.DB, id, server),
+    DashboardController.getRealtimeStateForServers(env, [id])
   ]);
   mergeMetricsIntoServer(server, latestMetrics);
   let latestReportUpdates = realtimeState.latestReportUpdates;
@@ -218,10 +242,10 @@ export async function handleServerAPI(request, env, sys) {
     long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
   };
   
-  return createSuccessResponse(omitNullLossProbeFields(withoutPrivateServerFields(server)));
+  return createSuccessResponse(DashboardController.omitNullLossProbeFields(DashboardController.withoutPrivateServerFields(server)));
 }
 
-export async function handleServersAPI(request, env, sys) {
+  static async handleServersAPI(request, env, sys) {
   const isLoggedIn = await checkAuth(request, env, sys);
   
   if (sys.is_public !== 'true' && !isLoggedIn) {
@@ -234,13 +258,13 @@ export async function handleServersAPI(request, env, sys) {
   
   const serverIds = results.map(server => server.id).filter(Boolean);
   const [latestMetricsMap, realtimeState, latencyHistory] = await Promise.all([
-    getLatestMetricsForAllServers(env.DB),
-    getRealtimeStateForServers(env, serverIds),
+    DatabaseService.getLatestMetricsForAllServers(env.DB),
+    DashboardController.getRealtimeStateForServers(env, serverIds),
     shouldIncludeLatencyHistory
-      ? getDashboardLatencyHistory(env.DB, results)
+      ? DatabaseService.getDashboardLatencyHistory(env.DB, results)
       : Promise.resolve(new Map())
   ]);
-  attachLatencyHistoryToServers(results, latencyHistory);
+  DashboardController.attachLatencyHistoryToServers(results, latencyHistory);
   
   const now = Date.now();
   let globalOnline = 0;
@@ -256,7 +280,7 @@ export async function handleServersAPI(request, env, sys) {
       isOnline = (now - latestMetrics.timestamp) < 300000;
       mergeMetricsIntoServer(server, latestMetrics);
     }
-    normalizePublicIpFields(server);
+    DashboardController.normalizePublicIpFields(server);
     
     if (isOnline) {
       globalOnline++;
@@ -308,7 +332,7 @@ export async function handleServersAPI(request, env, sys) {
   return createSuccessResponse(data);
 }
 
-export async function fetchHistoryData(env, request, id, hours, columns, sys = null) {
+  static async fetchHistoryData(env, request, id, hours, columns, sys = null) {
   if (!id) return createBadRequestResponse('Missing ID');
 
   const ALLOWED_HOURS = [0.167, 0.5, 1, 6, 12, 24, 48, 96, 168];
@@ -349,7 +373,7 @@ export async function fetchHistoryData(env, request, id, hours, columns, sys = n
 
   let data;
   try {
-    data = await getMetricsHistory(
+    data = await DatabaseService.getMetricsHistory(
       env.DB,
       id,
       clampedHours,
@@ -387,26 +411,4 @@ export async function fetchHistoryData(env, request, id, hours, columns, sys = n
 
   return createSuccessResponse(sanitizedData, { 'X-Cache': 'MISS' });
 }
-
-/**
- * DashboardController
- * 负责仪表盘概览、单机详情以及历史指标检索 API
- */
-export class DashboardController {
-  constructor(env, ctx = null) {
-    this.env = env;
-    this.ctx = ctx;
-  }
-
-  async handleServer(request, sys) {
-    return handleServerAPI(request, this.env, sys);
-  }
-
-  async handleServers(request, sys) {
-    return handleServersAPI(request, this.env, sys);
-  }
-
-  async handleHistory(request, id, hours, columns, sys) {
-    return fetchHistoryData(this.env, request, id, hours, columns, sys);
-  }
 }

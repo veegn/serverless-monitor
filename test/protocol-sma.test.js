@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
+import { UpdateController } from '../src/handlers/UpdateController.js';
+
+const {
   handleUpdate,
   AGENT_AUTO_DISCOVERY_HEADER,
   AGENT_AUTO_DISCOVERY_SERVER_ID_HEADER,
@@ -9,7 +11,7 @@ import {
   AGENT_AUTO_DISCOVERY_FAILED,
   AGENT_AUTO_DISCOVERY_DISABLED,
   AGENT_WSS_MODE_HEADER
-} from '../src/handlers/update.js';
+} = UpdateController;
 import { clearSiteSettingsCache } from '../src/utils/settings.js';
 import { clearServersListCache } from '../src/utils/cache.js';
 
