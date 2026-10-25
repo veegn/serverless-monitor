@@ -7,7 +7,7 @@
           <OsIcon :os="server.os" />
         </span>
         <span v-else class="country-os-icons">
-          <span class="flag-fallback">🏳️</span>
+          <span class="flag-fallback"><UiIcon name="flag" size="14" /></span>
           <OsIcon :os="server.os" />
         </span>
         <span class="server-name">{{ server.name }}</span>
@@ -16,9 +16,9 @@
     </div>
     <div class="server-meta">
       <div class="card-meta">
-        <div v-if="sysConfig.show_price && priceText" class="card-meta-item">💰 {{ priceText }}</div>
+        <div v-if="sysConfig.show_price && priceText" class="card-meta-item"><UiIcon name="price" size="13" /> {{ priceText }}</div>
         <div v-if="sysConfig.show_expire && server.expire_date" class="card-meta-item card-meta-expire">
-          📅 <span :class="{ 'expired': isExpired }">{{ expireText }}</span>
+          <UiIcon name="expire" size="13" /> <span :class="{ 'expired': isExpired }">{{ expireText }}</span>
           <span v-if="expireDateTitle" class="card-meta-tooltip">{{ expireDateTitle }}</span>
         </div>
       </div>
@@ -87,16 +87,16 @@
       <div class="stat-row">
         <span class="stat-key">NET</span>
         <div class="stat-content">
-          <span class="net-down">▼ {{ netInSpeed }}/s</span>
-          <span class="net-up">▲ {{ netOutSpeed }}/s</span>
+          <span class="net-down"><UiIcon name="arrow-down" size="10" /> {{ netInSpeed }}/s</span>
+          <span class="net-up"><UiIcon name="arrow-up" size="10" /> {{ netOutSpeed }}/s</span>
         </div>
       </div>
       <div class="stat-row">
         <span class="stat-key">TRF</span>
         <div class="stat-content">
-          <span class="net-down">▼ {{ totalRxMonthly }}</span>
-          <span class="net-up">▲ {{ totalTxMonthly }}</span>
-          <span v-if="sysConfig.show_tf && server.traffic_limit" class="stat-limit">/ 📦 {{ formatBytes(server.traffic_limit * 1024 * 1024 * 1024) }}</span>
+          <span class="net-down"><UiIcon name="arrow-down" size="10" /> {{ totalRxMonthly }}</span>
+          <span class="net-up"><UiIcon name="arrow-up" size="10" /> {{ totalTxMonthly }}</span>
+          <span v-if="sysConfig.show_tf && server.traffic_limit" class="stat-limit">/ <UiIcon name="package" size="12" /> {{ formatBytes(server.traffic_limit * 1024 * 1024 * 1024) }}</span>
         </div>
       </div>
     </div>
@@ -119,6 +119,7 @@
 
 <script setup>
 import OsIcon from './OsIcon.vue'
+import UiIcon from './UiIcon.vue'
 import ServerLatencyPanel from './ServerLatencyPanel.vue'
 import { DEFAULT_SERVER_CARD_CONFIG, useServerCardData } from '../composables/useServerCardData'
 

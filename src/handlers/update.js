@@ -344,9 +344,10 @@ function buildSamplePayloadForBroadcast(metrics = {}, timestamp = Date.now()) {
 
 export function toBroadcastSamples(id, samples, regionCode, agentVersion = '', reportMetrics = null) {
   const lastIndex = samples.length - 1;
+  const base = reportMetrics && typeof reportMetrics === 'object' ? reportMetrics : null;
   return samples.map((sample, index) => {
-    const metrics = reportMetrics && typeof reportMetrics === 'object' && index === lastIndex
-      ? { ...reportMetrics, ...(sample.metrics || {}) }
+    const metrics = base
+      ? { ...base, ...(sample.metrics || {}) }
       : (sample.metrics || {});
     if (index !== lastIndex) {
       return { ts: sample.ts, payload: buildSamplePayloadForBroadcast(metrics, sample.ts) };
@@ -949,7 +950,8 @@ export async function handleUpdate(request, env, ctx) {
         historyPartitionId,
         samples,
         regionCode,
-        agentVersion
+        agentVersion,
+        latestMetrics
       );
     } else {
       const historyMetrics = getHistoryMetrics(data, samples, latestSample);
@@ -964,9 +966,7 @@ export async function handleUpdate(request, env, ctx) {
       );
     }
 
-    const broadcastSamples = isBatchBackfill
-      ? toBroadcastSamples(serverId, [latestSample], regionCode, agentVersion, latestMetrics)
-      : toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);
+    const broadcastSamples = toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);
 
     cacheLatestReportUpdate(serverId, broadcastSamples, Date.now());
     // 加入批量队列，由后台定时任务统一推送到 DO

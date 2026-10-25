@@ -1,3 +1,8 @@
+import wt from 'node:worker_threads'
+if (typeof wt.markAsUncloneable !== 'function') {
+  wt.markAsUncloneable = () => {}
+}
+
 import assert from 'node:assert/strict'
 import test from 'node:test'
 

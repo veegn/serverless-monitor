@@ -406,3 +406,137 @@ test('PROTOCOL: Report ACK frame conforms to ADAPTIVE_REPORTING_SPEC', async () 
   assert.equal(ack.realtimeHint, undefined);
   assert.equal(ack.nextWssReportAfterMs, undefined);
 });
+
+test('PROTOCOL: batch backfill merges baseline metrics into samples when persisted', async () => {
+  clearSiteSettingsCache();
+  clearServersListCache();
+  const server = {
+    id: 'srv-batch-base-01',
+    name: 'batch-base-01',
+    history_partition_id: 1,
+    secret: 'node_secret_abc'
+  };
+  const { env, historyInserts } = makeMockEnv({
+    auto_register_enabled: 'false'
+  }, [server]);
+
+  const now = Math.floor(Date.now() / 1000);
+  const samples = [
+    { cpu: 15, ram_used: 1024, ts: now - 4 },
+    { cpu: 20, ram_used: 1024, ts: now - 2 }
+  ];
+
+  const req = new Request('https://example.com/update', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'cfsm',
+      'X-Agent-Version': '1.0.0'
+    },
+    body: JSON.stringify({
+      id: 'srv-batch-base-01',
+      secret: 'node_secret_abc',
+      batch: true,
+      metrics: {
+        disk_total: 50000000,
+        disk_used: 20000000,
+        tcp_conn: 42,
+        load_avg: '1.2 1.5 1.8'
+      },
+      samples
+    })
+  });
+
+  const res = await handleUpdate(req, env, { waitUntil() {} });
+  assert.equal(res.status, 200);
+  assert.equal(historyInserts.length, 2);
+
+  // Verify that the baseline metrics (disk_total, tcp_conn, load_avg) are preserved across all samples
+  for (const insert of historyInserts) {
+    const args = insert.args;
+    // load_avg is index 5
+    assert.equal(args[5], '1.2 1.5 1.8');
+    // tcp_conn is index 11
+    assert.equal(args[11], 42);
+    // disk_total is index 33
+    assert.equal(args[33], 50000000);
+  }
+});
+
+test('DO WebSocket pushes cached batchUpdate on initial connect', async () => {
+  if (!globalThis.WebSocketRequestResponsePair) {
+    globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {};
+  }
+  const { MetricsBroadcaster } = await import('../src/durable/MetricsBroadcaster.js');
+  const sent = [];
+  const fakeWs = {
+    send(str) { sent.push(JSON.parse(str)); },
+    close() {},
+    serializeAttachment() {},
+    deserializeAttachment() { return { scope: 'all' }; }
+  };
+  const broadcaster = new MetricsBroadcaster({
+    setWebSocketAutoResponse() {},
+    getWebSockets() { return []; },
+    storage: { async get() { return null; }, async put() {} }
+  }, { DB: {} });
+
+  const now = Date.now();
+  broadcaster._cacheLatestReportUpdates([{
+    serverId: 'srv-cache-01',
+    samples: [
+      { ts: now - 2000, payload: { cpu: 10 } },
+      { ts: now, payload: { cpu: 20 } }
+    ]
+  }], now);
+
+  await broadcaster._pushLatestUpdatesToSubscriber(fakeWs, 'all');
+
+  assert.equal(sent.length, 1);
+  const msg = sent[0];
+  assert.equal(msg.type, 'batchUpdate');
+  assert.equal(msg.updates.length, 1);
+  assert.equal(msg.updates[0].serverId, 'srv-cache-01');
+  assert.equal(msg.updates[0].samples.length, 2);
+});
+
+test('Observability: logWssEvent produces structured Cloudflare logs', async () => {
+  const { logWssEvent, logAgentReport, logModeTransition, LogLevel } = await import('../src/utils/observability.js');
+  const logs = [];
+  const originalInfo = console.info;
+  console.info = (summary, meta) => {
+    logs.push({ summary, meta });
+  };
+
+  try {
+    logAgentReport({
+      serverId: 'srv-obs-01',
+      mode: 'batch',
+      sampleCount: 30,
+      reportId: 'rep-1',
+      persisted: true,
+      durationMs: 15
+    });
+
+    assert.equal(logs.length, 1);
+    assert.ok(logs[0].summary.includes('[WSS:Agent] REPORT'));
+    assert.equal(logs[0].meta.source, 'cfsm.wss');
+    assert.equal(logs[0].meta.serverId, 'srv-obs-01');
+    assert.equal(logs[0].meta.mode, 'batch');
+    assert.equal(logs[0].meta.sampleCount, 30);
+
+    logModeTransition({
+      isFrontendActive: true,
+      subscribers: 2,
+      hintedAgents: 5,
+      modeRevision: 3
+    });
+
+    assert.equal(logs.length, 2);
+    assert.ok(logs[1].summary.includes('[WSS:Mode] HINT'));
+    assert.equal(logs[1].meta.targetMode, 'REALTIME');
+    assert.equal(logs[1].meta.subscribers, 2);
+  } finally {
+    console.info = originalInfo;
+  }
+});

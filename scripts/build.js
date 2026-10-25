@@ -15,7 +15,13 @@ if (fs.existsSync(distDir)) {
 }
 
 console.log('Building frontend...');
-execSync('npx vite build', { cwd: rootDir, stdio: 'inherit' });
+const preloadPath = path.join(__dirname, 'preload.cjs');
+const nodeOptions = `--require ${preloadPath} ${process.env.NODE_OPTIONS || ''}`.trim();
+execSync('npx vite build', {
+  cwd: rootDir,
+  stdio: 'inherit',
+  env: { ...process.env, NODE_OPTIONS: nodeOptions }
+});
 
 console.log('Copying static assets...');
 if (fs.existsSync(publicDir)) {

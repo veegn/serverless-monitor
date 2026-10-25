@@ -40,6 +40,17 @@ import {
   toBroadcastSamples
 } from '../handlers/update.js';
 import {
+  logAgentAuth,
+  logAgentConnect,
+  logAgentReport,
+  logD1BatchPersist,
+  logFrontendConnect,
+  logFrontendDisconnect,
+  logFrontendSubscribe,
+  logModeTransition,
+  logWssEvent
+} from '../utils/observability.js';
+import {
   AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,
   AGENT_MIN_IDLE_WSS_REPORT_INTERVAL_MS,
   AGENT_SERVER_DETAIL_TTL_MS,
@@ -76,6 +87,7 @@ const RESOURCE_ALERT_MODE_AVERAGE = 'average';
 const RESOURCE_ALERT_MODE_CONTINUOUS = 'continuous';
 const MODE_REVISION_STORAGE_KEY = 'agent_mode_revision';
 const MODE_STATE_STORAGE_KEY = 'agent_mode_state';
+const LATEST_REPORT_STORAGE_KEY = 'cfsm:latest_report_updates';
 const PROCESSED_REPORTS_MAX_ENTRIES = 1000;
 const PROCESSED_REPORTS_TTL_MS = 10 * 60 * 1000;
 function getAlertCutoffMinute(now, buckets) {
@@ -285,6 +297,7 @@ export class MetricsBroadcaster {
     this.env = env;
     // 仅用于新页面快速接上最近一包数据；DO 重启或休眠回收后允许自然丢失。
     this.latestReportUpdates = new Map();
+    this.latestReportUpdatesLoaded = false;
     this.resourceAlertWindows = new Map();
     this.resourceAlertSnapshotLoaded = false;
     this.resourceAlertSnapshotDirty = false;
@@ -722,6 +735,7 @@ export class MetricsBroadcaster {
       }
 
       if (!auth.isAuthorizedForNew) {
+        logAgentAuth({ serverId, ip: attachment?.clientIp || '' }, false, 'Invalid secret for new server');
         this._closeWsWithError(ws, 'Invalid secret', 401);
         return null;
       }
@@ -738,6 +752,7 @@ export class MetricsBroadcaster {
       const hasSecret = Object.prototype.hasOwnProperty.call(data, 'secret');
       if (!attachment.authenticated || hasSecret) {
         if (!auth.isAuthorizedForExisting) {
+          logAgentAuth({ serverId, ip: attachment?.clientIp || '' }, false, 'Invalid secret for existing server');
           this._closeWsWithError(ws, 'Invalid secret', 401);
           return null;
         }
@@ -793,6 +808,15 @@ export class MetricsBroadcaster {
       configMd5: agentConfig.md5
     };
     ws.serializeAttachment(nextAttachment);
+
+    if (!attachment.authenticated) {
+      logAgentAuth({
+        serverId,
+        agentVersion,
+        region: attachment.region || '',
+        ip: attachment?.clientIp || ''
+      }, true);
+    }
 
     return {
       attachment: nextAttachment,
@@ -1210,6 +1234,13 @@ export class MetricsBroadcaster {
       hinted += 1;
     }
 
+    logModeTransition({
+      isFrontendActive,
+      subscribers: this._getFrontendSubscriberCount(),
+      hintedAgents: hinted,
+      modeRevision
+    });
+
     return hinted;
   }
 
@@ -1412,6 +1443,7 @@ export class MetricsBroadcaster {
     let accepted = true;
 
     if (data.batch === true && samples.length > 0) {
+      const d1Start = Date.now();
       try {
         await saveMetricsHistoryBatch(
           this.env.DB,
@@ -1419,15 +1451,26 @@ export class MetricsBroadcaster {
           context.historyPartitionId,
           samples,
           context.regionCode,
-          context.agentVersion
+          context.agentVersion,
+          latestMetrics
         );
         persisted = { persisted: true, nextD1WriteAfterMs: 0 };
         acceptedSamples = samples.length;
+        logD1BatchPersist({
+          serverId: context.serverId,
+          sampleCount: samples.length,
+          durationMs: Date.now() - d1Start
+        }, true);
       } catch (err) {
         console.error('[update-ws] Failed to persist batch metrics:', err?.message || err);
         persisted = { persisted: false, nextD1WriteAfterMs: 0 };
         acceptedSamples = 0;
         accepted = false;
+        logD1BatchPersist({
+          serverId: context.serverId,
+          sampleCount: samples.length,
+          durationMs: Date.now() - d1Start
+        }, false, err);
       }
     } else {
       persisted = await this._persistAgentHistoryIfDue(ws, context.attachment, {
@@ -1441,6 +1484,15 @@ export class MetricsBroadcaster {
         reportIntervalMs: context.reportIntervalMs
       });
     }
+
+    logAgentReport({
+      serverId: context.serverId,
+      mode: data.batch === true ? 'batch' : 'realtime',
+      sampleCount: samples.length,
+      reportId,
+      persisted: persisted?.persisted === true,
+      durationMs: Date.now() - reportTs
+    });
 
     const configAck = await this._buildAgentConfigAck(context);
 
@@ -1521,6 +1573,12 @@ export class MetricsBroadcaster {
 
     // Agent WebSocket 使用 DO WebSocket Hibernation API 接管连接
     this.state.acceptWebSocket(server);
+
+    logAgentConnect({
+      ip: request.headers.get('cf-connecting-ip') || '',
+      agentVersion: initialAttachment.agentVersion,
+      isHibernating: true
+    });
 
     const realtimeState = this._getAgentRealtimeState();
     const nextWssReportAfterMs = this._getAgentNextWssReportAfterMs(
@@ -1606,6 +1664,17 @@ export class MetricsBroadcaster {
         }));
       } catch (_) {
       }
+
+      // 连上后立即推送已缓存的最新批量数据，避免客户端在 60s 节能批处理模式下陷入盲等
+      this._pushLatestUpdatesToSubscriber(server, scope, []).catch(err => {
+        console.warn('[ws] Failed to push latest updates to subscriber on connect:', err?.message || err);
+      });
+
+      logFrontendConnect({
+        scope,
+        ip: request.headers.get('cf-connecting-ip') || '',
+        subscribers: this._getFrontendSubscriberCount()
+      });
 
       this._hintAgentRealtimeIntervals({
         frontendActive: true,
@@ -1750,7 +1819,7 @@ export class MetricsBroadcaster {
         });
       }
 
-      const updates = this._getLatestReportUpdates(normalizedServerIds.ids);
+      const updates = await this._getLatestReportUpdates(normalizedServerIds.ids);
       const payload = { updates };
 
       return new Response(JSON.stringify(payload), {
@@ -1844,9 +1913,41 @@ export class MetricsBroadcaster {
       if (oldestServerId === undefined) break;
       this.latestReportUpdates.delete(oldestServerId);
     }
+
+    this._persistLatestReportUpdates();
   }
 
-  _getLatestReportUpdates(serverIds) {
+  async _ensureLatestReportUpdatesLoaded() {
+    if (this.latestReportUpdatesLoaded) return;
+    this.latestReportUpdatesLoaded = true;
+    try {
+      const stored = await this.state?.storage?.get?.(LATEST_REPORT_STORAGE_KEY);
+      if (Array.isArray(stored)) {
+        const now = Date.now();
+        for (const [serverId, update] of stored) {
+          if (update && now - (update.reportTs || 0) <= LATEST_REPORT_CACHE_TTL_MS) {
+            if (!this.latestReportUpdates.has(String(serverId))) {
+              this.latestReportUpdates.set(String(serverId), update);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[update-ws] Failed to restore latestReportUpdates from storage:', e?.message || e);
+    }
+  }
+
+  _persistLatestReportUpdates() {
+    try {
+      const entries = Array.from(this.latestReportUpdates.entries());
+      this.state?.storage?.put?.(LATEST_REPORT_STORAGE_KEY, entries).catch(err => {
+        console.warn('[update-ws] Failed to persist latestReportUpdates to storage:', err?.message || err);
+      });
+    } catch (_) {}
+  }
+
+  async _getLatestReportUpdates(serverIds) {
+    await this._ensureLatestReportUpdatesLoaded();
     const now = Date.now();
     this._pruneLatestReportUpdates(now);
     const updates = [];
@@ -1860,6 +1961,32 @@ export class MetricsBroadcaster {
       }
     }
     return updates;
+  }
+
+  async _pushLatestUpdatesToSubscriber(ws, scope, serverIds = []) {
+    try {
+      await this._ensureLatestReportUpdatesLoaded();
+      let targetIds = [];
+      if (scope === 'all') {
+        targetIds = Array.isArray(serverIds) && serverIds.length > 0
+          ? serverIds
+          : Array.from(this.latestReportUpdates.keys());
+      } else {
+        targetIds = [scope];
+      }
+      if (targetIds.length === 0) return;
+
+      const updates = await this._getLatestReportUpdates(targetIds);
+      if (updates.length > 0) {
+        this._sendWsJson(ws, {
+          type: 'batchUpdate',
+          ts: Date.now(),
+          updates
+        });
+      }
+    } catch (e) {
+      console.warn('[ws] Failed to push latest updates to subscriber:', e?.message || e);
+    }
   }
 
   _activateResourceAlertCache(now = Date.now()) {
@@ -2196,6 +2323,14 @@ export class MetricsBroadcaster {
             count: serverIds.length
           }));
         } catch (_) {}
+        this._pushLatestUpdatesToSubscriber(ws, scope, serverIds).catch(err => {
+          console.warn('[ws] Failed to push latest updates to subscriber on subscribe:', err?.message || err);
+        });
+        logFrontendSubscribe({
+          scope,
+          serverCount: serverIds.length,
+          subscribers: this._getFrontendSubscriberCount()
+        });
         try {
           await this._hintAgentRealtimeIntervals({
             frontendActive: true,
@@ -2220,6 +2355,12 @@ export class MetricsBroadcaster {
       }
       return;
     }
+
+    logFrontendDisconnect({
+      scope: attachment.scope,
+      remainingSubscribers: this._getFrontendSubscriberCount(ws),
+      reason: reason || ''
+    });
 
     if (this._getFrontendSubscriberCount(ws) === 0) {
       return this._hintAgentRealtimeIntervals({ frontendActive: false, realtimeActive: false }).catch(err => {

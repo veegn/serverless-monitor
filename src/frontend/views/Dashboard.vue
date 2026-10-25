@@ -62,7 +62,7 @@
             :data-filter="item.code"
             @click="setFilter(item.code)"
           >
-            <span v-if="item.code === 'unknown'" class="filter-tag-icon">🏳️</span>
+            <span v-if="item.code === 'unknown'" class="filter-tag-icon"><UiIcon name="flag" size="13" /></span>
             <img v-else-if="item.flagCode" :src="getPublicAssetUrl('flags/' + item.flagCode + '.svg')" :alt="item.code">
             <span class="filter-tag-label">{{ item.label }}</span>
             <span class="filter-tag-count">{{ item.count }}</span>
@@ -87,7 +87,7 @@
                 :data-filter="item.code"
                 @click="setFilter(item.code)"
               >
-                <span v-if="item.code === 'unknown'" class="filter-tag-icon">🏳️</span>
+                <span v-if="item.code === 'unknown'" class="filter-tag-icon"><UiIcon name="flag" size="13" /></span>
                 <img v-else-if="item.flagCode" :src="getPublicAssetUrl('flags/' + item.flagCode + '.svg')" :alt="item.code">
                 <span class="filter-tag-label">{{ item.label }}</span>
                 <span class="filter-tag-count">{{ item.count }}</span>
@@ -102,7 +102,7 @@
             type="button"
             class="filter-tag filter-measure-tag"
           >
-            <span v-if="item.code === 'unknown'" class="filter-tag-icon">🏳️</span>
+            <span v-if="item.code === 'unknown'" class="filter-tag-icon"><UiIcon name="flag" size="13" /></span>
             <img v-else-if="item.flagCode" :src="getPublicAssetUrl('flags/' + item.flagCode + '.svg')" :alt="item.code">
             <span class="filter-tag-label">{{ item.label }}</span>
             <span class="filter-tag-count">{{ item.count }}</span>
@@ -218,7 +218,7 @@
                   <img :src="getPublicAssetUrl('flags/' + getFlagRegionCode(server.region) + '.svg')" :alt="server.region" class="flag-img">
                 </span>
                 <span v-else class="country-os-icons">
-                  <span class="flag-fallback">🏳️</span>
+                  <span class="flag-fallback"><UiIcon name="flag" size="14" /></span>
                 </span>
                 {{ (server.region || 'XX').toUpperCase() }}
               </td>
@@ -371,6 +371,7 @@ import ServerBarCard from '../components/ServerBarCard.vue'
 import ServerRingCard from '../components/ServerRingCard.vue'
 import Footer from '../components/Footer.vue'
 import OsIcon from '../components/OsIcon.vue'
+import UiIcon from '../components/UiIcon.vue'
 import LiveConnectionTimeoutModal from '../components/LiveConnectionTimeoutModal.vue'
 import { fetchConfig, fetchServersAll, fetchServersAllWithProgress, formatBytes, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
 import { calcTrafficUsagePercent, getUsageColor } from '../composables/useServerCardData'

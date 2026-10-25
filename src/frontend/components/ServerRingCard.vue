@@ -8,7 +8,7 @@
             <OsIcon :os="server.os" />
           </span>
           <span v-else class="country-os-icons">
-            <span class="flag-fallback">🏳️</span>
+            <span class="flag-fallback"><UiIcon name="flag" size="14" /></span>
             <OsIcon :os="server.os" />
           </span>
           <span class="server-name">{{ server.name }}</span>
@@ -17,9 +17,9 @@
       </div>
       <div class="server-meta">
         <div class="card-meta">
-          <div v-if="sysConfig.show_price && priceText" class="card-meta-item">💰 {{ priceText }}</div>
+          <div v-if="sysConfig.show_price && priceText" class="card-meta-item"><UiIcon name="price" size="13" /> {{ priceText }}</div>
           <div v-if="sysConfig.show_expire && server.expire_date" class="card-meta-item card-meta-expire">
-            📅 <span :class="{ 'expired': isExpired }">{{ expireText }}</span>
+            <UiIcon name="expire" size="13" /> <span :class="{ 'expired': isExpired }">{{ expireText }}</span>
             <span v-if="expireDateTitle" class="card-meta-tooltip">{{ expireDateTitle }}</span>
           </div>
         </div>
@@ -83,8 +83,8 @@
       <div class="server-card-network-row">
         <span class="server-card-network-label">{{ trans.networkTraffic }}</span>
         <span class="server-card-network-values">
-          <span class="server-card-speed-up">↑ {{ netOutSpeed }}/s</span>
-          <span class="server-card-speed-down">↓ {{ netInSpeed }}/s</span>
+          <span class="server-card-speed-up"><UiIcon name="arrow-up" size="10" /> {{ netOutSpeed }}/s</span>
+          <span class="server-card-speed-down"><UiIcon name="arrow-down" size="10" /> {{ netInSpeed }}/s</span>
         </span>
       </div>
       <div class="server-card-network-row">
@@ -98,8 +98,8 @@
       <div class="server-card-network-row">
         <span class="server-card-network-label">{{ trans.totalTraffic }}</span>
         <span class="server-card-network-values server-card-total-values">
-          <span>↑ {{ totalTx }}</span>
-          <span>↓ {{ totalRx }}</span>
+          <span><UiIcon name="arrow-up" size="10" /> {{ totalTx }}</span>
+          <span><UiIcon name="arrow-down" size="10" /> {{ totalRx }}</span>
         </span>
       </div>
       <div v-if="sysConfig.show_tf" class="server-card-limit-section">
@@ -132,6 +132,7 @@
 
 <script setup>
 import OsIcon from './OsIcon.vue'
+import UiIcon from './UiIcon.vue'
 import ServerLatencyPanel from './ServerLatencyPanel.vue'
 import { DEFAULT_SERVER_CARD_CONFIG, useServerCardData } from '../composables/useServerCardData'
 

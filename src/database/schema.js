@@ -644,18 +644,24 @@ export async function saveMetricsHistory(db, serverId, historyPartitionId, metri
   }
 }
 
-export async function saveMetricsHistoryBatch(db, serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '') {
+export async function saveMetricsHistoryBatch(db, serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '', baselineMetrics = null) {
   if (!Array.isArray(samples) || samples.length === 0) return;
 
-  const buildStatements = () => samples.map(s => buildHistoryInsertStatement(
-    db,
-    serverId,
-    historyPartitionId,
-    s.metrics || {},
-    regionCode,
-    s.ts,
-    agentVersion
-  ));
+  const base = baselineMetrics && typeof baselineMetrics === 'object' ? baselineMetrics : null;
+
+  const buildStatements = () => samples.map(s => {
+    const sampleMetrics = s.metrics || {};
+    const metrics = base ? { ...base, ...sampleMetrics } : sampleMetrics;
+    return buildHistoryInsertStatement(
+      db,
+      serverId,
+      historyPartitionId,
+      metrics,
+      regionCode,
+      s.ts,
+      agentVersion
+    );
+  });
 
   try {
     if (typeof db.batch === 'function') {

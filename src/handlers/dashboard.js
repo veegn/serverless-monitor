@@ -200,7 +200,20 @@ export async function handleServerAPI(request, env, sys) {
     getRealtimeStateForServers(env, [id])
   ]);
   mergeMetricsIntoServer(server, latestMetrics);
-  server.latestReportUpdates = realtimeState.latestReportUpdates;
+  let latestReportUpdates = realtimeState.latestReportUpdates;
+  if ((!latestReportUpdates || latestReportUpdates.length === 0) && latestMetrics) {
+    const reportTs = latestMetrics.timestamp || Date.now();
+    latestReportUpdates = [{
+      serverId: id,
+      reportTs,
+      reportAgeMs: Math.max(0, Date.now() - reportTs),
+      samples: [{
+        ts: reportTs,
+        data: { ...latestMetrics, id }
+      }]
+    }];
+  }
+  server.latestReportUpdates = latestReportUpdates;
   server.sysConfig = {
     long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
   };

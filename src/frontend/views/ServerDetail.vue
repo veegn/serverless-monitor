@@ -36,7 +36,7 @@
             <OsIcon :os="server.os" />
           </span>
           <span v-else class="country-os-icons">
-            <span class="flag-fallback">🏳️</span>
+            <span class="flag-fallback"><UiIcon name="flag" size="14" /></span>
             <OsIcon :os="server.os" />
           </span>
           <span>{{ server.name || 'Loading...' }}</span>
@@ -49,51 +49,51 @@
       </div>
       <div class="sysinfo-grid" id="info-panel">
         <div class="sysinfo-item">
-          <span class="sysinfo-label">⏱ {{ trans.uptime }}</span>
+          <span class="sysinfo-label"><UiIcon name="uptime" size="13" /> {{ trans.uptime }}</span>
           <span class="sysinfo-value">{{ formatUptime(server.boot_time) }}</span>
         </div>
         <div class="sysinfo-item" v-if="server.expire_date">
-          <span class="sysinfo-label">📅 {{ trans.expire }}</span>
+          <span class="sysinfo-label"><UiIcon name="expire" size="13" /> {{ trans.expire }}</span>
           <span class="sysinfo-value" :class="{ 'expired': isExpired }">{{ expireDaysText }}</span>
         </div>
         <div class="sysinfo-item">
-          <span class="sysinfo-label">💻 {{ trans.os }} / {{ trans.architecture }}</span>
+          <span class="sysinfo-label"><UiIcon name="os" size="13" /> {{ trans.os }} / {{ trans.architecture }}</span>
           <span class="sysinfo-value sysinfo-small">{{ server.os || 'N/A' }} / {{ server.arch || 'N/A' }}</span>
         </div>
         <div class="sysinfo-item" v-if="server.kernel_version">
-          <span class="sysinfo-label">🧩 {{ trans.kernelVersion || 'Kernel' }}</span>
+          <span class="sysinfo-label"><UiIcon name="kernel" size="13" /> {{ trans.kernelVersion || 'Kernel' }}</span>
           <span class="sysinfo-value sysinfo-small">{{ server.kernel_version }}</span>
         </div>
         <div class="sysinfo-item">
-          <span class="sysinfo-label">🔧 {{ trans.cpuInfo }}</span>
+          <span class="sysinfo-label"><UiIcon name="cpu" size="13" /> {{ trans.cpuInfo }}</span>
           <span class="sysinfo-value sysinfo-small">{{ server.cpu_info || 'N/A' }} x {{ server.cpu_cores || 'N/A' }}</span>
         </div>
         <div class="sysinfo-item" v-if="hasGpuData">
-          <span class="sysinfo-label">🎮 {{ trans.gpuInfo || 'GPU Info' }}</span>
+          <span class="sysinfo-label"><UiIcon name="gpu" size="13" /> {{ trans.gpuInfo || 'GPU Info' }}</span>
           <span class="sysinfo-value sysinfo-small">{{ gpuInfoText }}</span>
         </div>
         <div class="sysinfo-item">
-          <span class="sysinfo-label">💾 {{ trans.totalDiskRam }}</span>
+          <span class="sysinfo-label"><UiIcon name="disk" size="13" /> {{ trans.totalDiskRam }}</span>
           <span class="sysinfo-value">{{ formatBytes(server.disk_total*1024*1024) }} / {{ formatBytes(server.ram_total*1024*1024) }}</span>
         </div>
         <div class="sysinfo-item">
-          <span class="sysinfo-label">📊 {{ trans.loadAvg }}</span>
+          <span class="sysinfo-label"><UiIcon name="load" size="13" /> {{ trans.loadAvg }}</span>
           <span class="sysinfo-value highlight">{{ server.load_avg || '0.00 0.00 0.00' }}</span>
         </div>
         <div class="sysinfo-item">
-          <span class="sysinfo-label">🌐 {{ trans.totalTraffic }}</span>
-          <span class="sysinfo-value sysinfo-small">↓ {{ formatBytes(server.net_rx) }} / ↑ {{ formatBytes(server.net_tx) }}</span>
+          <span class="sysinfo-label"><UiIcon name="globe" size="13" /> {{ trans.totalTraffic }}</span>
+          <span class="sysinfo-value sysinfo-small"><UiIcon name="arrow-down" size="10" /> {{ formatBytes(server.net_rx) }} / <UiIcon name="arrow-up" size="10" /> {{ formatBytes(server.net_tx) }}</span>
         </div>
         <div class="sysinfo-item">
-          <span class="sysinfo-label">⚡ {{ trans.realtimeSpeed }}</span>
-          <span class="sysinfo-value sysinfo-small">↓ {{ formatBytes(server.net_in_speed) }}/s / ↑ {{ formatBytes(server.net_out_speed) }}/s</span>
+          <span class="sysinfo-label"><UiIcon name="speed" size="13" /> {{ trans.realtimeSpeed }}</span>
+          <span class="sysinfo-value sysinfo-small"><UiIcon name="arrow-down" size="10" /> {{ formatBytes(server.net_in_speed) }}/s / <UiIcon name="arrow-up" size="10" /> {{ formatBytes(server.net_out_speed) }}/s</span>
         </div>
         <div class="sysinfo-item" v-if="server.net_rx_monthly">
-          <span class="sysinfo-label">📊 {{ trans.monthlyTraffic }}</span>
-          <span class="sysinfo-value sysinfo-small">↓ {{ formatBytes(server.net_rx_monthly) }} / ↑ {{ formatBytes(server.net_tx_monthly) }}</span>
+          <span class="sysinfo-label"><UiIcon name="chart" size="13" /> {{ trans.monthlyTraffic }}</span>
+          <span class="sysinfo-value sysinfo-small"><UiIcon name="arrow-down" size="10" /> {{ formatBytes(server.net_rx_monthly) }} / <UiIcon name="arrow-up" size="10" /> {{ formatBytes(server.net_tx_monthly) }}</span>
         </div>
         <div class="sysinfo-item" v-if="server.net_rx_monthly">
-          <span class="sysinfo-label">📦 {{ trans.monthlyTrafficLimit }}</span>
+          <span class="sysinfo-label"><UiIcon name="package" size="13" /> {{ trans.monthlyTrafficLimit }}</span>
           <span class="sysinfo-value sysinfo-small">
             {{ formatBytes(trafficUsageBytes) }}
             /
@@ -101,11 +101,11 @@
           </span>
         </div>
         <div class="sysinfo-item">
-          <span class="sysinfo-label">🕐 {{ trans.bootTime }}</span>
+          <span class="sysinfo-label"><UiIcon name="time" size="13" /> {{ trans.bootTime }}</span>
           <span class="sysinfo-value sysinfo-small">{{ formatTimestamp(server.boot_time) }}</span>
         </div>
         <div class="sysinfo-item">
-          <span class="sysinfo-label">⏰ {{ trans.lastUpdate }}</span>
+          <span class="sysinfo-label"><UiIcon name="clock" size="13" /> {{ trans.lastUpdate }}</span>
           <span class="sysinfo-value sysinfo-small">{{ lastUpdateText }}</span>
         </div>
       </div>
@@ -401,6 +401,7 @@ import { useRoute, useRouter } from 'vue-router'
 import TerminalHeader from '../components/TerminalHeader.vue'
 import Footer from '../components/Footer.vue'
 import OsIcon from '../components/OsIcon.vue'
+import UiIcon from '../components/UiIcon.vue'
 import LiveConnectionTimeoutModal from '../components/LiveConnectionTimeoutModal.vue'
 import { fetchServerDetail, fetchAllHistory, fetchConfig, formatBytes, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
 import { isAdminLoggedIn } from '../utils/http'
