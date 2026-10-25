@@ -616,7 +616,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
   const serverIds = servers.map(server => server.id).filter(Boolean);
   const [latestMetricsMap, realtimeState] = await Promise.all([
     DatabaseService.getLatestMetricsForAllServers(env.DB).catch(() => new Map()),
-    DashboardController.getRealtimeStateForServers(env, serverIds).catch(() => ({ latestReportUpdates: [] }))
+    DashboardController.getRealtimeStateForServers(env, serverIds, { maskPublicIp: false }).catch(() => ({ latestReportUpdates: [] }))
   ]);
 
   const now = Date.now();

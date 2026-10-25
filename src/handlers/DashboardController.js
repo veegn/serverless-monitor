@@ -88,21 +88,24 @@ export class DashboardController {
   return DashboardController.normalizePublicIpFields(item);
 }
 
-  static normalizeLatestReportSample(sample) {
+  static normalizeLatestReportSample(sample, maskPublicIp = true) {
   if (!sample || typeof sample !== 'object') return null;
   const data = sample?.data || sample?.payload || sample?.metrics;
   if (!data || typeof data !== 'object') return null;
 
-  const publicData = coerceNumericMetricFields(DashboardController.normalizePublicIpFields({ ...data }, false));
+  const formattedData = maskPublicIp
+    ? DashboardController.normalizePublicIpFields({ ...data }, false)
+    : { ...data };
+  const publicData = coerceNumericMetricFields(formattedData);
   const ts = sample.ts ?? sample.timestamp;
   return ts === undefined ? { data: publicData } : { ts, data: publicData };
 }
 
-  static normalizeLatestReportUpdate(update) {
+  static normalizeLatestReportUpdate(update, maskPublicIp = true) {
   if (!update || !Array.isArray(update.samples)) return null;
 
   const samples = update.samples
-    .map(DashboardController.normalizeLatestReportSample)
+    .map(sample => DashboardController.normalizeLatestReportSample(sample, maskPublicIp))
     .filter(Boolean);
   if (samples.length === 0) return null;
 
@@ -164,7 +167,7 @@ export class DashboardController {
     }
   }
 
-  static mergeLatestReportUpdates(serverIds, durableUpdates, workerUpdates) {
+  static mergeLatestReportUpdates(serverIds, durableUpdates, workerUpdates, maskPublicIp = true) {
   const merged = new Map();
 
   for (const update of durableUpdates) {
@@ -188,11 +191,12 @@ export class DashboardController {
     .map(update => DashboardController.normalizeLatestReportUpdate({
       ...update,
       reportAgeMs: Math.max(0, now - Number(update.reportTs || now))
-    }))
+    }, maskPublicIp))
     .filter(Boolean);
 }
 
-  static async getRealtimeStateForServers(env, serverIds) {
+  static async getRealtimeStateForServers(env, serverIds, options = {}) {
+  const maskPublicIp = options.maskPublicIp !== false;
   const normalizedServerIds = Array.from(new Set(
     (Array.isArray(serverIds) ? serverIds : [])
       .map(serverId => String(serverId || '').trim())
@@ -214,7 +218,8 @@ export class DashboardController {
     latestReportUpdates: DashboardController.mergeLatestReportUpdates(
       normalizedServerIds,
       durableLatestReportUpdates,
-      getWorkerLatestReportUpdates(normalizedServerIds)
+      getWorkerLatestReportUpdates(normalizedServerIds),
+      maskPublicIp
     )
   };
 }

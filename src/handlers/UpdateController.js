@@ -445,8 +445,8 @@ export class UpdateController {
     console.warn('[broadcast] failed to load realtime gate settings:', e?.message || e);
   }
 
-  const frontendActive = hasRecentFrontendRealtimeActivity();
-  if (frontendActive) {
+  const subscribers = await UpdateController.getCachedFrontendSubscriberCount(env);
+  if (subscribers > 0) {
     return {
       maintainState: resourceAlertEnabled
     };
@@ -455,13 +455,6 @@ export class UpdateController {
   if (resourceAlertEnabled) {
     return {
       maintainState: true
-    };
-  }
-
-  const subscribers = await UpdateController.getCachedFrontendSubscriberCount(env);
-  if (subscribers > 0) {
-    return {
-      maintainState: false
     };
   }
 

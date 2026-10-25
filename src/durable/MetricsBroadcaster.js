@@ -1705,8 +1705,12 @@ export class MetricsBroadcaster {
 
       const reportTs = Date.now();
       const subscribers = this._getFrontendSubscriberCount();
+      this._cacheLatestReportUpdates([{
+        serverId,
+        samples: [{ ts: reportTs, data: payload }]
+      }], reportTs);
       if (subscribers === 0) {
-        return new Response(JSON.stringify({ ok: true, skipped: true, subscribers: 0 }), {
+        return new Response(JSON.stringify({ ok: true, count: 1, subscribers: 0, latestReportOnly: true }), {
           headers: { 'Content-Type': 'application/json' }
         });
       }
@@ -1755,19 +1759,14 @@ export class MetricsBroadcaster {
       const maintainState = body?.maintainState === true;
       const latestReportOnly = body?.latestReportOnly === true;
       const subscribers = this._getFrontendSubscriberCount();
-      if (!maintainState && !latestReportOnly && subscribers === 0) {
-        return new Response(JSON.stringify({ ok: true, skipped: true, count: normalizedUpdates.length, subscribers: 0 }), {
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
       const reportTs = Date.now();
-      if (latestReportOnly && subscribers === 0) {
+
+      if (!maintainState && subscribers === 0) {
         this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
         return new Response(JSON.stringify({
           ok: true,
           count: normalizedUpdates.length,
-          subscribers,
+          subscribers: 0,
           latestReportOnly: true
         }), {
           headers: { 'Content-Type': 'application/json' }
@@ -1883,11 +1882,11 @@ export class MetricsBroadcaster {
       const serverId = String(update.serverId);
       // delete + set 让 Map 的插入顺序同时代表最近更新时间，便于限制内存上限。
       this.latestReportUpdates.delete(serverId);
-      this.latestReportUpdates.set(serverId, maskPublicIpUpdate({
+      this.latestReportUpdates.set(serverId, {
         serverId,
         reportTs,
         samples: update.samples
-      }));
+      });
     }
 
     while (this.latestReportUpdates.size > LATEST_REPORT_CACHE_MAX_SERVERS) {
@@ -2122,10 +2121,10 @@ export class MetricsBroadcaster {
     for (const serverId of serverIds) {
       const update = this.latestReportUpdates.get(serverId);
       if (update) {
-        updates.push(maskPublicIpUpdate({
+        updates.push({
           ...update,
           reportAgeMs: Math.max(0, now - update.reportTs)
-        }));
+        });
       }
     }
     return updates;
@@ -2149,7 +2148,7 @@ export class MetricsBroadcaster {
         this._sendWsJson(ws, {
           type: 'batchUpdate',
           ts: Date.now(),
-          updates
+          updates: updates.map(maskPublicIpUpdate)
         });
       }
     } catch (e) {

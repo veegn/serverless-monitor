@@ -50,7 +50,7 @@ test('DO History: Ingests, persists to DO storage, and responds to GET /history'
   const storage = makeMockStorage();
   const broadcaster = makeBroadcasterWithStorage(storage);
 
-  const baseTs = Date.now() - 120000;
+  const baseTs = Math.floor((Date.now() - 120000) / 60000) * 60000;
   const updates = [{
     serverId: 'server-do-01',
     samples: [
@@ -245,7 +245,7 @@ test('AdminController: handleListAction reads latest metrics from DO and sets is
           updates: [{
             serverId: 'srv-admin-online-1',
             reportTs: now,
-            samples: [{ ts: now, data: { cpu: 42, ram_used: 1024, agent_version: '2.8.6' } }]
+            samples: [{ ts: now, data: { cpu: 42, ram_used: 1024, agent_version: '2.8.6', ip_v4: '198.51.100.2' } }]
           }]
         }), { status: 200 });
       }
@@ -288,6 +288,35 @@ test('AdminController: handleListAction reads latest metrics from DO and sets is
   assert.equal(item.is_online, true);
   assert.equal(item.cpu, 42);
   assert.equal(item.agent_version, '2.8.6');
+  assert.equal(item.ip_v4, '198.51.100.2');
   assert.equal(json.stats.online, 1);
   assert.equal(json.stats.offline, 0);
+});
+
+test('DO /batch-push: Caches updates and ingests history even when subscribers=0 and maintainState=false', async () => {
+  const storage = makeMockStorage();
+  const broadcaster = makeBroadcasterWithStorage(storage);
+  const now = Date.now();
+
+  const res = await broadcaster.fetch(new Request('http://internal/batch-push', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      updates: [{
+        serverId: 'srv-no-subscribers',
+        samples: [{ ts: now, data: { cpu: 25, ram_used: 512, ip_v4: '203.0.113.10' } }]
+      }]
+    })
+  }));
+
+  assert.equal(res.status, 200);
+  const json = await res.json();
+  assert.equal(json.ok, true);
+  assert.equal(json.subscribers, 0);
+  assert.equal(json.latestReportOnly, true);
+
+  // Check DO cached latest reports
+  const latest = broadcaster.latestReportUpdates.get('srv-no-subscribers');
+  assert.ok(latest);
+  assert.equal(latest.samples[0].data.ip_v4, '203.0.113.10');
 });
