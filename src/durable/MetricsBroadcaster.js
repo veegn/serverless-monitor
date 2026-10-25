@@ -77,6 +77,10 @@ const RESOURCE_ALERT_MODE_CONTINUOUS = 'continuous';
 const MODE_REVISION_STORAGE_KEY = 'agent_mode_revision';
 const MODE_STATE_STORAGE_KEY = 'agent_mode_state';
 const LATEST_REPORT_STORAGE_KEY = 'cfsm:latest_report_updates';
+const DO_HISTORY_WINDOW_MS = 24 * 3600 * 1000;
+const DO_HISTORY_MAX_POINTS_PER_SERVER = 1440;
+const DO_HISTORY_STORAGE_PREFIX = 'durable_history_v1:';
+const DO_HISTORY_SNAPSHOT_INTERVAL_MS = 60 * 1000;
 const PROCESSED_REPORTS_MAX_ENTRIES = 1000;
 const PROCESSED_REPORTS_TTL_MS = 10 * 60 * 1000;
 function getAlertCutoffMinute(now, buckets) {
@@ -299,6 +303,10 @@ export class MetricsBroadcaster {
     this.modeRevisionLoaded = false;
     this.lastModeState = null;
     this.processedReports = new Map();
+    this.historyWindows = new Map();
+    this.historyLoadedServers = new Set();
+    this.historyDirtyServers = new Set();
+    this.historyLastSnapshotSave = 0;
     this.pendingFrontendBroadcasts = new Map();
     this.frontendBroadcastTimer = null;
     this.pendingFrontendBroadcastTs = 0;
@@ -1462,16 +1470,21 @@ export class MetricsBroadcaster {
         }, false, err);
       }
     } else {
-      persisted = await this._persistAgentHistoryIfDue(ws, context.attachment, {
-        serverId: context.serverId,
-        historyPartitionId: context.historyPartitionId,
-        metrics: latestMetrics,
-        historyAggregate,
-        regionCode: context.regionCode,
-        timestamp: latestSample.ts,
-        agentVersion: context.agentVersion,
-        reportIntervalMs: context.reportIntervalMs
-      });
+      try {
+        persisted = await this._persistAgentHistoryIfDue(ws, context.attachment, {
+          serverId: context.serverId,
+          historyPartitionId: context.historyPartitionId,
+          metrics: latestMetrics,
+          historyAggregate,
+          regionCode: context.regionCode,
+          timestamp: latestSample.ts,
+          agentVersion: context.agentVersion,
+          reportIntervalMs: context.reportIntervalMs
+        });
+      } catch (err) {
+        console.warn('[update-ws] D1 realtime history persist degraded to DO storage:', err?.message || err);
+        persisted = { persisted: false, nextD1WriteAfterMs: 0 };
+      }
     }
 
     logAgentReport({
@@ -1610,6 +1623,10 @@ export class MetricsBroadcaster {
 
     if (method === 'POST' && path === '/agent-config-changed') {
       return this._handleAgentConfigChanged(request);
+    }
+
+    if (method === 'GET' && (path === '/history' || path.endsWith('/history'))) {
+      return this._handleHistoryQuery(request, url);
     }
 
     // ── 1) WebSocket 接入 ──────────────────────────────
@@ -1904,6 +1921,170 @@ export class MetricsBroadcaster {
     }
 
     this._persistLatestReportUpdates();
+    this._ingestHistoryUpdates(updates, reportTs);
+  }
+
+  _ingestHistoryUpdates(updates, reportTs = Date.now()) {
+    const promise = this._ingestHistoryUpdatesAsync(updates, reportTs).catch(e => {
+      console.warn('[do-history] Ingest history failed:', e?.message || e);
+    });
+    if (typeof this.state?.waitUntil === 'function') {
+      this.state.waitUntil(promise);
+    }
+  }
+
+  async _ensureServerHistoryLoaded(serverId) {
+    if (this.historyLoadedServers.has(serverId)) return;
+    this.historyLoadedServers.add(serverId);
+    try {
+      const stored = await this.state?.storage?.get?.(`${DO_HISTORY_STORAGE_PREFIX}${serverId}`);
+      if (Array.isArray(stored)) {
+        const now = Date.now();
+        const cutoff = now - DO_HISTORY_WINDOW_MS;
+        const valid = stored.filter(p => p && Number(p.timestamp) >= cutoff);
+        if (!this.historyWindows.has(serverId)) {
+          this.historyWindows.set(serverId, valid);
+        } else {
+          const existing = this.historyWindows.get(serverId) || [];
+          const minuteMap = new Map();
+          for (const p of valid) {
+            minuteMap.set(Math.floor(p.timestamp / 60000) * 60000, p);
+          }
+          for (const p of existing) {
+            minuteMap.set(Math.floor(p.timestamp / 60000) * 60000, p);
+          }
+          const merged = Array.from(minuteMap.values())
+            .filter(p => Number(p.timestamp) >= cutoff)
+            .sort((a, b) => a.timestamp - b.timestamp);
+          this.historyWindows.set(serverId, merged);
+        }
+      }
+    } catch (e) {
+      console.warn(`[do-history] Failed to restore history for ${serverId}:`, e?.message || e);
+    }
+  }
+
+  async _ingestHistoryUpdatesAsync(updates, reportTs = Date.now()) {
+    if (!Array.isArray(updates) || updates.length === 0) return;
+
+    for (const update of updates) {
+      if (!update || !update.serverId || !Array.isArray(update.samples) || update.samples.length === 0) continue;
+      const serverId = String(update.serverId);
+
+      await this._ensureServerHistoryLoaded(serverId);
+
+      const downsampled = DatabaseService.downsampleHistorySamples(update.samples);
+      if (downsampled.length === 0) continue;
+
+      let window = this.historyWindows.get(serverId);
+      if (!Array.isArray(window)) {
+        window = [];
+        this.historyWindows.set(serverId, window);
+      }
+
+      const minuteMap = new Map();
+      for (const point of window) {
+        if (!point || !point.timestamp) continue;
+        const key = Math.floor(point.timestamp / 60000) * 60000;
+        minuteMap.set(key, point);
+      }
+
+      for (const item of downsampled) {
+        const ts = item.ts;
+        const key = Math.floor(ts / 60000) * 60000;
+        const pointData = { timestamp: ts, ...(item.metrics || {}) };
+        minuteMap.set(key, pointData);
+      }
+
+      const cutoff = reportTs - DO_HISTORY_WINDOW_MS;
+      const mergedWindow = Array.from(minuteMap.values())
+        .filter(p => Number(p.timestamp) >= cutoff)
+        .sort((a, b) => a.timestamp - b.timestamp)
+        .slice(-DO_HISTORY_MAX_POINTS_PER_SERVER);
+
+      this.historyWindows.set(serverId, mergedWindow);
+      this.historyDirtyServers.add(serverId);
+    }
+
+    await this._persistHistorySnapshotIfNeeded(reportTs);
+  }
+
+  async _persistHistorySnapshotIfNeeded(now = Date.now(), force = false) {
+    if (this.historyDirtyServers.size === 0) return;
+    if (!force && now - this.historyLastSnapshotSave < DO_HISTORY_SNAPSHOT_INTERVAL_MS) return;
+
+    this.historyLastSnapshotSave = now;
+    const serversToSave = Array.from(this.historyDirtyServers);
+    this.historyDirtyServers.clear();
+
+    for (const serverId of serversToSave) {
+      const history = this.historyWindows.get(serverId) || [];
+      try {
+        await this.state?.storage?.put?.(`${DO_HISTORY_STORAGE_PREFIX}${serverId}`, history);
+      } catch (e) {
+        console.warn(`[do-history] Failed to persist history for ${serverId}:`, e?.message || e);
+      }
+    }
+  }
+
+  static _sampleHistoryPoints(points, maxPoints = 160) {
+    if (!Array.isArray(points) || points.length <= maxPoints) {
+      return points || [];
+    }
+    if (maxPoints <= 1) {
+      return [points[points.length - 1]];
+    }
+    const result = [];
+    const step = (points.length - 1) / (maxPoints - 1);
+    for (let i = 0; i < maxPoints; i++) {
+      const index = Math.round(i * step);
+      result.push(points[index]);
+    }
+    return result;
+  }
+
+  async _handleHistoryQuery(request, url) {
+    const serverId = url.searchParams.get('serverId');
+    if (!serverId) {
+      return new Response(JSON.stringify({ error: 'Missing serverId' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    await this._ensureServerHistoryLoaded(serverId);
+    const hours = Math.max(0.1, Math.min(168, Number(url.searchParams.get('hours')) || 1));
+    const columnsParam = url.searchParams.get('columns') || '';
+    const pointsLimit = Math.max(1, Math.min(1000, Number(url.searchParams.get('points')) || 160));
+
+    const now = Date.now();
+    const cutoff = now - hours * 3600 * 1000;
+    const history = this.historyWindows.get(serverId) || [];
+    const filtered = history.filter(p => p && Number(p.timestamp) >= cutoff);
+
+    const sampled = MetricsBroadcaster._sampleHistoryPoints(filtered, pointsLimit);
+
+    let result = sampled;
+    if (columnsParam) {
+      const columnList = columnsParam.split(',').map(c => c.trim()).filter(Boolean);
+      result = sampled.map(p => {
+        const item = { timestamp: p.timestamp };
+        for (const col of columnList) {
+          if (col !== 'timestamp') {
+            item[col] = p[col] !== undefined ? p[col] : null;
+          }
+        }
+        return item;
+      });
+    }
+
+    return new Response(JSON.stringify({ ok: true, data: result }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store'
+      }
+    });
   }
 
   async _ensureLatestReportUpdatesLoaded() {

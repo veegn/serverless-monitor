@@ -148,6 +148,22 @@ export class DashboardController {
   }
 }
 
+  static async getDurableHistory(env, serverId, hours = 1, columns = '', points = 160) {
+    if (!env?.METRICS_BROADCASTER || !serverId) return null;
+    try {
+      const id = env.METRICS_BROADCASTER.idFromName('global');
+      const stub = env.METRICS_BROADCASTER.get(id);
+      const url = `http://internal/history?serverId=${encodeURIComponent(serverId)}&hours=${encodeURIComponent(hours)}&columns=${encodeURIComponent(columns)}&points=${encodeURIComponent(points)}`;
+      const response = await stub.fetch(url);
+      if (!response.ok) return null;
+      const json = await response.json();
+      return Array.isArray(json?.data) ? json.data : null;
+    } catch (e) {
+      console.warn('[Dashboard] Failed to read history from DO:', e?.message || e);
+      return null;
+    }
+  }
+
   static mergeLatestReportUpdates(serverIds, durableUpdates, workerUpdates) {
   const merged = new Map();
 
@@ -220,20 +236,31 @@ export class DashboardController {
   if (!server) return createNotFoundResponse('Server not found');
   
   const [latestMetrics, realtimeState] = await Promise.all([
-    DatabaseService.getLatestMetrics(env.DB, id, server),
+    DatabaseService.getLatestMetrics(env.DB, id, server).catch(() => null),
     DashboardController.getRealtimeStateForServers(env, [id])
   ]);
-  mergeMetricsIntoServer(server, latestMetrics);
+  let effectiveMetrics = latestMetrics;
+  if (!effectiveMetrics && realtimeState?.latestReportUpdates?.length > 0) {
+    const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === id) || realtimeState.latestReportUpdates[0];
+    if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
+      const lastSample = doReport.samples[doReport.samples.length - 1];
+      effectiveMetrics = {
+        timestamp: lastSample.ts || doReport.reportTs || Date.now(),
+        ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
+      };
+    }
+  }
+  mergeMetricsIntoServer(server, effectiveMetrics);
   let latestReportUpdates = realtimeState.latestReportUpdates;
-  if ((!latestReportUpdates || latestReportUpdates.length === 0) && latestMetrics) {
-    const reportTs = latestMetrics.timestamp || Date.now();
+  if ((!latestReportUpdates || latestReportUpdates.length === 0) && effectiveMetrics) {
+    const reportTs = effectiveMetrics.timestamp || Date.now();
     latestReportUpdates = [{
       serverId: id,
       reportTs,
       reportAgeMs: Math.max(0, Date.now() - reportTs),
       samples: [{
         ts: reportTs,
-        data: { ...latestMetrics, id }
+        data: { ...effectiveMetrics, id }
       }]
     }];
   }
@@ -272,7 +299,17 @@ export class DashboardController {
   const regionStats = {};
   
   for (const server of results) {
-    const latestMetrics = latestMetricsMap.get(server.id);
+    let latestMetrics = latestMetricsMap.get(server.id);
+    if (!latestMetrics && realtimeState?.latestReportUpdates) {
+      const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === server.id);
+      if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
+        const lastSample = doReport.samples[doReport.samples.length - 1];
+        latestMetrics = {
+          timestamp: lastSample.ts || doReport.reportTs || now,
+          ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
+        };
+      }
+    }
     
     let isOnline = false;
     
@@ -366,46 +403,49 @@ export class DashboardController {
   const cached = getMetricsHistoryCache(id, clampedHours, columns, longHistoryPoints);
   if (cached && Date.now() - cached.timestamp < cacheDuration) {
     const cachedData = Array.isArray(cached.data)
-      ? cached.data.map(omitNullLossProbeFields)
+      ? cached.data.map(DashboardController.omitNullLossProbeFields)
       : cached.data;
     return createSuccessResponse(cachedData, { 'X-Cache': 'HIT' });
   }
 
-  let data;
-  try {
-    data = await DatabaseService.getMetricsHistory(
-      env.DB,
-      id,
-      clampedHours,
-      columns,
-      server,
-      longHistoryPoints
-    );
-  } catch (e) {
-    const message = e && e.message ? e.message : String(e);
-    if (/invalid history partition id/i.test(message)) {
-      debug('[History] 服务器未分配历史分区，无法按主键范围查询:', message);
-      return new Response(JSON.stringify({
-        message: 'historyPartitionNotAssigned'
-      }), {
-        status: 409,
-        headers: { 'Content-Type': 'application/json' }
-      });
+  let data = await DashboardController.getDurableHistory(env, id, clampedHours, columns, longHistoryPoints);
+  if (!Array.isArray(data) || data.length === 0) {
+    try {
+      data = await DatabaseService.getMetricsHistory(
+        env.DB,
+        id,
+        clampedHours,
+        columns,
+        server,
+        longHistoryPoints
+      );
+    } catch (e) {
+      const message = e && e.message ? e.message : String(e);
+      if (/invalid history partition id/i.test(message)) {
+        debug('[History] 服务器未分配历史分区，无法按主键范围查询:', message);
+        return new Response(JSON.stringify({
+          message: 'historyPartitionNotAssigned'
+        }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      if (/no such column/i.test(message)) {
+        debug('[History] 数据库字段缺失，可能尚未升级数据库:', message);
+        return new Response(JSON.stringify({
+          message: 'databaseUpgradeRequired'
+        }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+      console.warn('[History] D1 history query failed, returning empty:', message);
+      data = [];
     }
-    if (/no such column/i.test(message)) {
-      debug('[History] 数据库字段缺失，可能尚未升级数据库:', message);
-      return new Response(JSON.stringify({
-        message: 'databaseUpgradeRequired'
-      }), {
-        status: 409,
-        headers: { 'Content-Type': 'application/json' }
-      });
-    }
-    throw e;
   }
 
   const sanitizedData = Array.isArray(data)
-    ? data.map(omitNullLossProbeFields)
+    ? data.map(DashboardController.omitNullLossProbeFields)
     : data;
   setMetricsHistoryCache(id, clampedHours, columns, sanitizedData, longHistoryPoints);
 

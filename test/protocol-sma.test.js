@@ -424,8 +424,8 @@ test('PROTOCOL: batch backfill merges baseline metrics into samples when persist
 
   const now = Math.floor(Date.now() / 1000);
   const samples = [
-    { cpu: 15, ram_used: 1024, ts: now - 4 },
-    { cpu: 20, ram_used: 1024, ts: now - 2 }
+    { cpu: 15, ram_used: 1024, ts: now - 120 },
+    { cpu: 20, ram_used: 1024, ts: now - 60 }
   ];
 
   const req = new Request('https://example.com/update', {
@@ -463,6 +463,68 @@ test('PROTOCOL: batch backfill merges baseline metrics into samples when persist
     // disk_total is index 33
     assert.equal(args[33], 50000000);
   }
+});
+
+test('PROTOCOL: batch backfill downsamples multiple high-frequency samples in the same minute into a single aggregated insert', async () => {
+  clearSiteSettingsCache();
+  clearServersListCache();
+  const server = {
+    id: 'srv-batch-downsample-01',
+    name: 'batch-downsample-01',
+    history_partition_id: 1,
+    secret: 'node_secret_abc'
+  };
+  const { env, historyInserts } = makeMockEnv({
+    auto_register_enabled: 'false'
+  }, [server]);
+
+  // Use a fixed timestamp aligned to a minute boundary plus 30 seconds
+  const baseMinuteSec = Math.floor(Date.now() / 60000) * 60;
+  // Send 30 samples within this exact minute window (idle batch scenario)
+  const samples = [];
+  for (let i = 0; i < 30; i++) {
+    samples.push({
+      cpu: i % 2 === 0 ? 10 : 20,
+      net_in_speed: 1000 + i * 100,
+      ram_used: 2048,
+      ts: baseMinuteSec + i
+    });
+  }
+
+  const req = new Request('https://example.com/update', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'cfsm',
+      'X-Agent-Version': '1.0.0'
+    },
+    body: JSON.stringify({
+      id: 'srv-batch-downsample-01',
+      secret: 'node_secret_abc',
+      batch: true,
+      metrics: {
+        disk_total: 50000000,
+        tcp_conn: 42
+      },
+      samples
+    })
+  });
+
+  const res = await handleUpdate(req, env, { waitUntil() {} });
+  assert.equal(res.status, 200);
+  // 30 samples within the same minute bucket must be downsampled to exactly 1 insert
+  assert.equal(historyInserts.length, 1);
+
+  const insert = historyInserts[0];
+  const args = insert.args;
+  // cpu is average of 10 and 20 -> 15 (args[4])
+  assert.equal(args[4], 15);
+  // net_in_speed is max of 1000 + i * 100 -> 3900 (args[6])
+  assert.equal(args[6], 3900);
+  // tcp_conn baseline preserved -> 42 (args[11])
+  assert.equal(args[11], 42);
+  // disk_total baseline preserved -> 50000000 (args[33])
+  assert.equal(args[33], 50000000);
 });
 
 test('DO WebSocket pushes cached batchUpdate on initial connect', async () => {
@@ -541,4 +603,68 @@ test('Observability: logWssEvent produces structured Cloudflare logs', async () 
   } finally {
     console.info = originalInfo;
   }
+});
+
+test('DatabaseService.downsampleHistorySamples downsamples, aggregates, and preserves historical data', async () => {
+  const { DatabaseService } = await import('../src/database/DatabaseService.js');
+
+  // 1. Empty or invalid input
+  assert.deepEqual(DatabaseService.downsampleHistorySamples([]), []);
+  assert.deepEqual(DatabaseService.downsampleHistorySamples(null), []);
+  assert.deepEqual(DatabaseService.downsampleHistorySamples('invalid'), []);
+
+  // 2. Multi-minute downsampling with accurate aggregation
+  const baseTs = 1730000000000; // Aligned base timestamp
+  const samples = [
+    // Minute 1: 3 samples
+    { ts: baseTs + 2000, metrics: { cpu: 10, net_in_speed: 1000, ram_used: 1000, disk_total: 500, tcp_conn: 10, ping_ct: 20 } },
+    { ts: baseTs + 4000, metrics: { cpu: 20, net_in_speed: 5000, ram_used: 2000, disk_total: 500, tcp_conn: 25, ping_ct: 30 } },
+    { ts: baseTs + 6000, metrics: { cpu: 30, net_in_speed: 2000, ram_used: 3000, disk_total: 500, tcp_conn: 15, ping_ct: 40 } },
+    // Minute 2: 2 samples
+    { ts: baseTs + 62000, metrics: { cpu: 50, net_in_speed: 8000, ram_used: 4000, disk_total: 500, tcp_conn: 30, ping_ct: 50 } },
+    { ts: baseTs + 64000, metrics: { cpu: 70, net_in_speed: 4000, ram_used: 6000, disk_total: 500, tcp_conn: 20, ping_ct: 70 } }
+  ];
+
+  const downsampled = DatabaseService.downsampleHistorySamples(samples, { os: 'Linux', arch: 'x86_64' });
+  assert.equal(downsampled.length, 2);
+
+  // Minute 1 verification:
+  // ts: latest sample ts in minute 1
+  assert.equal(downsampled[0].ts, baseTs + 6000);
+  // cpu: avg(10, 20, 30) = 20
+  assert.equal(downsampled[0].metrics.cpu, 20);
+  // net_in_speed: max(1000, 5000, 2000) = 5000
+  assert.equal(downsampled[0].metrics.net_in_speed, 5000);
+  // ram_used: avg(1000, 2000, 3000) = 2000
+  assert.equal(downsampled[0].metrics.ram_used, 2000);
+  // tcp_conn: max(10, 25, 15) = 25
+  assert.equal(downsampled[0].metrics.tcp_conn, 25);
+  // ping_ct: avg(20, 30, 40) = 30
+  assert.equal(downsampled[0].metrics.ping_ct, 30);
+  // baseline metrics preserved
+  assert.equal(downsampled[0].metrics.os, 'Linux');
+  assert.equal(downsampled[0].metrics.arch, 'x86_64');
+
+  // Minute 2 verification:
+  assert.equal(downsampled[1].ts, baseTs + 64000);
+  // cpu: avg(50, 70) = 60
+  assert.equal(downsampled[1].metrics.cpu, 60);
+  // net_in_speed: max(8000, 4000) = 8000
+  assert.equal(downsampled[1].metrics.net_in_speed, 8000);
+  // ping_ct: avg(50, 70) = 60
+  assert.equal(downsampled[1].metrics.ping_ct, 60);
+
+  // 3. Max buckets bound: verify capping at HISTORY_MAX_BATCH_BUCKETS (120)
+  const manySamples = [];
+  for (let m = 0; m < 150; m++) {
+    manySamples.push({
+      ts: baseTs + m * 60000,
+      metrics: { cpu: 10 }
+    });
+  }
+  const bounded = DatabaseService.downsampleHistorySamples(manySamples);
+  assert.equal(bounded.length, 120);
+  // Should keep the newest 120 buckets (m = 30 to 149)
+  assert.equal(bounded[0].ts, baseTs + 30 * 60000);
+  assert.equal(bounded[bounded.length - 1].ts, baseTs + 149 * 60000);
 });

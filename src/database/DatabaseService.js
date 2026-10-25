@@ -1,6 +1,13 @@
 import { getAllServers, getLatestMetricsCache, setLatestMetricsCache, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration, clearAllCaches } from '../utils/cache.js';
 import { saveSiteOptions, debug, normalizeLongHistoryPoints, DEFAULT_LONG_HISTORY_POINTS } from '../utils/settings.js';
-import { attachDiskMetricsObject, flattenDiskMetrics, isDisabledProbeMetric, normalizeProbeMetricRow } from '../utils/metrics.js';
+import {
+  attachDiskMetricsObject,
+  flattenDiskMetrics,
+  isDisabledProbeMetric,
+  normalizeProbeMetricRow,
+  DISK_IO_FIELD_TO_COLUMN,
+  DISK_IO_METRIC_FIELDS
+} from '../utils/metrics.js';
 import { ensureServerOptimization, buildHistoryId, getServerHistoryInfo, getHistoryIdRange } from './indexOptimization.js';
 import { addHistoryColumns } from './updateDatabase.js';
 import {
@@ -9,7 +16,11 @@ import {
 } from './historySampling.js';
 import {
   createHistoryTableSql,
-  HISTORY_INSERT_COLUMNS
+  HISTORY_INSERT_COLUMNS,
+  HISTORY_MAX_BATCH_BUCKETS,
+  HISTORY_BATCH_BUCKET_INTERVAL_MS,
+  HISTORY_AGGREGATION_MAX_FIELDS,
+  HISTORY_AGGREGATION_AVG_FIELDS
 } from '../utils/historyFields.js';
 import {
   DASHBOARD_LATENCY_WINDOW_CACHE_MAX_SERVERS,
@@ -32,6 +43,9 @@ export class DatabaseService {
     .flatMap(field => [`ping_${field}`, `loss_${field}`]);
   static dashboardLatencyHistoryCache = new Map();
   static LATEST_QUERY_CHUNK_SIZE = 30;
+  static DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
+    DISK_IO_METRIC_FIELDS.map(field => [DISK_IO_FIELD_TO_COLUMN[field], field])
+  ));
 
   constructor(db) {
     this.db = db;
@@ -173,8 +187,150 @@ export class DatabaseService {
     return new DatabaseService(db).saveMetricsHistory(serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion);
   }
 
-  static async saveMetricsHistoryBatch(db, serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '', baselineMetrics = null) {
-    return new DatabaseService(db).saveMetricsHistoryBatch(serverId, historyPartitionId, samples, regionCode, agentVersion, baselineMetrics);
+  static async saveMetricsHistoryBatch(db, serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '', baselineMetrics = null, bucketIntervalMs = HISTORY_BATCH_BUCKET_INTERVAL_MS) {
+    return new DatabaseService(db).saveMetricsHistoryBatch(serverId, historyPartitionId, samples, regionCode, agentVersion, baselineMetrics, bucketIntervalMs);
+  }
+
+  static _extractMetricNumber(source, field) {
+    if (!source || typeof source !== 'object') return null;
+
+    let value = Object.prototype.hasOwnProperty.call(source, field) ? source[field] : undefined;
+    if (value === undefined && source.disk && typeof source.disk === 'object') {
+      const diskField = DatabaseService.DISK_IO_COLUMN_TO_FIELD[field];
+      if (diskField && Object.prototype.hasOwnProperty.call(source.disk, diskField)) {
+        value = source.disk[diskField];
+      }
+    }
+
+    if (value === false || value === 'false' || value === null || value === undefined || value === '') {
+      return null;
+    }
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  }
+
+  static _setMetricValue(target, field, value) {
+    target[field] = value;
+    const diskField = DatabaseService.DISK_IO_COLUMN_TO_FIELD[field];
+    if (diskField) {
+      if (target.disk && typeof target.disk === 'object') {
+        target.disk[diskField] = value;
+      } else {
+        target.disk = { [diskField]: value };
+      }
+    }
+  }
+
+  static downsampleHistorySamples(samples = [], baselineMetrics = null, bucketIntervalMs = HISTORY_BATCH_BUCKET_INTERVAL_MS) {
+    if (!Array.isArray(samples) || samples.length === 0) return [];
+
+    const base = baselineMetrics && typeof baselineMetrics === 'object' ? baselineMetrics : null;
+    const interval = Math.max(1000, Number(bucketIntervalMs) || HISTORY_BATCH_BUCKET_INTERVAL_MS);
+
+    // 1. 按时间窗口分桶收集（保留全部时间戳，不主动丢弃旧数据）
+    const buckets = new Map();
+    for (const sample of samples) {
+      if (!sample || typeof sample !== 'object') continue;
+      const rawTs = Number(sample.ts ?? sample.timestamp);
+      if (!Number.isFinite(rawTs) || rawTs <= 0) continue;
+      const tsMs = rawTs < 1e11 ? Math.floor(rawTs * 1000) : Math.floor(rawTs);
+
+      const bucketKey = Math.floor(tsMs / interval) * interval;
+      let bucket = buckets.get(bucketKey);
+      if (!bucket) {
+        bucket = [];
+        buckets.set(bucketKey, bucket);
+      }
+      bucket.push({
+        raw: sample,
+        ts: tsMs,
+        metrics: sample.metrics || sample.data || sample.payload || sample
+      });
+    }
+
+    if (buckets.size === 0) return [];
+
+    // 2. 按自然时间排序并限制单批次最大落库桶数
+    const sortedBucketKeys = Array.from(buckets.keys()).sort((a, b) => a - b);
+    const activeKeys = sortedBucketKeys.length > HISTORY_MAX_BATCH_BUCKETS
+      ? sortedBucketKeys.slice(-HISTORY_MAX_BATCH_BUCKETS)
+      : sortedBucketKeys;
+
+    const result = [];
+
+    // 3. 逐桶聚合
+    for (const key of activeKeys) {
+      const bucketSamples = buckets.get(key);
+      if (!bucketSamples || bucketSamples.length === 0) continue;
+
+      bucketSamples.sort((a, b) => a.ts - b.ts);
+      const latestSample = bucketSamples[bucketSamples.length - 1];
+
+      if (bucketSamples.length === 1) {
+        const sampleMetrics = latestSample.metrics && typeof latestSample.metrics === 'object'
+          ? latestSample.metrics
+          : {};
+        result.push({
+          ts: latestSample.ts,
+          metrics: base ? { ...base, ...sampleMetrics } : sampleMetrics
+        });
+        continue;
+      }
+
+      // 多样本分类型聚合：基础数据继承 base 与 latestSample
+      const mergedMetrics = {
+        ...(base || {}),
+        ...(latestSample.metrics && typeof latestSample.metrics === 'object' ? latestSample.metrics : {})
+      };
+
+      const maxValues = {};
+      const avgSums = {};
+      const avgCounts = {};
+
+      for (const item of bucketSamples) {
+        const sMetrics = item.metrics;
+        if (!sMetrics || typeof sMetrics !== 'object') continue;
+
+        for (const field of HISTORY_AGGREGATION_MAX_FIELDS) {
+          const val = DatabaseService._extractMetricNumber(sMetrics, field);
+          if (val !== null) {
+            if (maxValues[field] === undefined || val > maxValues[field]) {
+              maxValues[field] = val;
+            }
+          }
+        }
+
+        for (const field of HISTORY_AGGREGATION_AVG_FIELDS) {
+          const val = DatabaseService._extractMetricNumber(sMetrics, field);
+          if (val !== null) {
+            avgSums[field] = (avgSums[field] || 0) + val;
+            avgCounts[field] = (avgCounts[field] || 0) + 1;
+          }
+        }
+      }
+
+      for (const [field, val] of Object.entries(maxValues)) {
+        DatabaseService._setMetricValue(mergedMetrics, field, val);
+      }
+
+      for (const [field, sum] of Object.entries(avgSums)) {
+        const count = avgCounts[field];
+        if (count > 0) {
+          const avg = sum / count;
+          const finalVal = (field.startsWith('ping_') || field.startsWith('loss_'))
+            ? Math.round(avg)
+            : Number(avg.toFixed(2));
+          DatabaseService._setMetricValue(mergedMetrics, field, finalVal);
+        }
+      }
+
+      result.push({
+        ts: latestSample.ts,
+        metrics: mergedMetrics
+      });
+    }
+
+    return result;
   }
 
   static async getLatestMetrics(db, serverId, server = null) {
@@ -451,18 +607,17 @@ export class DatabaseService {
     }
   }
 
-  async saveMetricsHistoryBatch(serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '', baselineMetrics = null) {
+  async saveMetricsHistoryBatch(serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '', baselineMetrics = null, bucketIntervalMs = HISTORY_BATCH_BUCKET_INTERVAL_MS) {
     if (!Array.isArray(samples) || samples.length === 0) return;
 
-    const base = baselineMetrics && typeof baselineMetrics === 'object' ? baselineMetrics : null;
+    const downsampled = DatabaseService.downsampleHistorySamples(samples, baselineMetrics, bucketIntervalMs);
+    if (!downsampled || downsampled.length === 0) return;
 
-    const buildStatements = () => samples.map(s => {
-      const sampleMetrics = s.metrics || {};
-      const metrics = base ? { ...base, ...sampleMetrics } : sampleMetrics;
+    const buildStatements = () => downsampled.map(s => {
       return this.buildHistoryInsertStatement(
         serverId,
         historyPartitionId,
-        metrics,
+        s.metrics,
         regionCode,
         s.ts,
         agentVersion

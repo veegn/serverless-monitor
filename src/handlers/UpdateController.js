@@ -971,27 +971,32 @@ export class UpdateController {
     const latestMetrics = UpdateController.getReportMetrics(data, latestSample);
     const isBatchBackfill = data.batch === true && samples.length > 1;
 
-    if (isBatchBackfill) {
-      await DatabaseService.saveMetricsHistoryBatch(
-        env.DB,
-        serverId,
-        historyPartitionId,
-        samples,
-        regionCode,
-        agentVersion,
-        latestMetrics
-      );
-    } else {
-      const historyMetrics = UpdateController.getHistoryMetrics(data, samples, latestSample);
-      await DatabaseService.saveMetricsHistory(
-        env.DB,
-        serverId,
-        historyPartitionId,
-        historyMetrics,
-        regionCode,
-        latestSample.ts,
-        agentVersion
-      );
+    // D1 写入容错降级：优先尝试写入 D1，若超限或数据库异常绝不中断上报和实时流
+    try {
+      if (isBatchBackfill) {
+        await DatabaseService.saveMetricsHistoryBatch(
+          env.DB,
+          serverId,
+          historyPartitionId,
+          samples,
+          regionCode,
+          agentVersion,
+          latestMetrics
+        );
+      } else {
+        const historyMetrics = UpdateController.getHistoryMetrics(data, samples, latestSample);
+        await DatabaseService.saveMetricsHistory(
+          env.DB,
+          serverId,
+          historyPartitionId,
+          historyMetrics,
+          regionCode,
+          latestSample.ts,
+          agentVersion
+        );
+      }
+    } catch (d1Err) {
+      console.warn(`[Update] D1 metrics persist degraded to DO storage:`, d1Err?.message || d1Err);
     }
 
     const broadcastSamples = UpdateController.toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);

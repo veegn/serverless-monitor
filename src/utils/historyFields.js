@@ -47,17 +47,22 @@ export const HISTORY_ALL_QUERY_COLUMNS = Object.freeze([
   'kernel_version'
 ]);
 
-const HISTORY_AGGREGATION_MAX_FIELDS = Object.freeze([
+export const HISTORY_MAX_BATCH_BUCKETS = 120;
+export const HISTORY_BATCH_BUCKET_INTERVAL_MS = 60000;
+
+export const HISTORY_AGGREGATION_MAX_FIELDS = Object.freeze([
   'net_in_speed', 'net_out_speed',
   'disk_read_bps', 'disk_write_bps', 'disk_read_iops',
   'disk_write_iops', 'disk_await_ms', 'disk_util',
   'processes', 'tcp_conn', 'udp_conn'
 ]);
 
-const HISTORY_AGGREGATION_AVG_FIELDS = Object.freeze([
+export const HISTORY_AGGREGATION_AVG_FIELDS = Object.freeze([
   'cpu', 'ram_used', 'swap_used',
   'ping_ct', 'ping_cu', 'ping_cm', 'ping_bd',
-  'loss_ct', 'loss_cu', 'loss_cm', 'loss_bd'
+  'ping_node_1', 'ping_node_2', 'ping_node_3', 'ping_node_4',
+  'loss_ct', 'loss_cu', 'loss_cm', 'loss_bd',
+  'loss_node_1', 'loss_node_2', 'loss_node_3', 'loss_node_4'
 ]);
 
 export const HISTORY_METRIC_AGGREGATION_POLICY = Object.freeze({
