@@ -821,6 +821,7 @@ export class MetricsBroadcaster {
       serverId,
       historyPartitionId: serverDetail.history_partition_id,
       regionCode: attachment.region || '',
+      clientIp: attachment?.clientIp || '',
       agentVersion,
       reportIntervalMs,
       wssReportIntervalMs,
@@ -1379,6 +1380,19 @@ export class MetricsBroadcaster {
     const latestSample = samples[samples.length - 1];
     const latestMetrics = UpdateController.getReportMetrics(data, latestSample);
 
+    const clientIp = context?.clientIp || attachment?.clientIp || ws.deserializeAttachment?.()?.clientIp || '';
+    if (clientIp) {
+      if (!clientIp.includes(':')) {
+        if (!latestMetrics.ip_v4 || latestMetrics.ip_v4 === '0' || latestMetrics.ip_v4 === '1') {
+          latestMetrics.ip_v4 = clientIp;
+        }
+      } else {
+        if (!latestMetrics.ip_v6 || latestMetrics.ip_v6 === '0' || latestMetrics.ip_v6 === '1') {
+          latestMetrics.ip_v6 = clientIp;
+        }
+      }
+    }
+
     const rawReportId = data.reportId;
     const reportId = typeof rawReportId === 'string' && rawReportId.trim() ? rawReportId.trim() : null;
     const reportKey = reportId ? `${context.serverId}:${reportId}` : null;
@@ -1527,6 +1541,7 @@ export class MetricsBroadcaster {
       authenticated: false,
       serverId: '',
       historyPartitionId: 0,
+      clientIp: request.headers.get('cf-connecting-ip') || '',
       region: request.headers.get('cf-ipcountry') || '',
       agentVersion: UpdateController.normalizeAgentVersion(request.headers.get('X-Agent-Version')),
       reportIntervalMs: AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,

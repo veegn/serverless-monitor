@@ -632,6 +632,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
   };
 
   const serversWithStatus = servers.map(server => {
+    const rawMetrics = latestMetricsMap.get(server.id) || null;
     let latestMetrics = null;
     if (realtimeState?.latestReportUpdates) {
       const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === server.id);
@@ -644,7 +645,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       }
     }
     if (!latestMetrics) {
-      latestMetrics = latestMetricsMap.get(server.id);
+      latestMetrics = rawMetrics;
     }
     const item = { ...server, region_override: server.region || '' };
     let isOnline = false;
@@ -663,6 +664,20 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       item.ip_v4 = '0';
       item.ip_v6 = '0';
       item.boot_time = '';
+    }
+
+    if (rawMetrics) {
+      if ((!item.ip_v4 || item.ip_v4 === '0' || item.ip_v4 === '1') && rawMetrics.ip_v4 && rawMetrics.ip_v4 !== '0' && rawMetrics.ip_v4 !== '1') {
+        item.ip_v4 = rawMetrics.ip_v4;
+      }
+      if ((!item.ip_v6 || item.ip_v6 === '0' || item.ip_v6 === '1') && rawMetrics.ip_v6 && rawMetrics.ip_v6 !== '0' && rawMetrics.ip_v6 !== '1') {
+        item.ip_v6 = rawMetrics.ip_v6;
+      }
+      if (!item.os && rawMetrics.os) item.os = rawMetrics.os;
+      if (!item.arch && rawMetrics.arch) item.arch = rawMetrics.arch;
+      if (!item.cpu_info && rawMetrics.cpu_info) item.cpu_info = rawMetrics.cpu_info;
+      if (!item.cpu_cores && rawMetrics.cpu_cores) item.cpu_cores = rawMetrics.cpu_cores;
+      if (!item.boot_time && rawMetrics.boot_time) item.boot_time = rawMetrics.boot_time;
     }
 
     item.is_online = isOnline;

@@ -964,6 +964,20 @@ export class UpdateController {
     const latestMetrics = UpdateController.getReportMetrics(data, latestSample);
     const isBatchBackfill = data.batch === true && samples.length > 1;
 
+    // 当探针未提供或仅上报可达性标记（0 或 1）时，通过 Cloudflare 连接 IP 自动补全公网 IP
+    const clientIp = request.headers.get('cf-connecting-ip') || '';
+    if (clientIp) {
+      if (!clientIp.includes(':')) {
+        if (!latestMetrics.ip_v4 || latestMetrics.ip_v4 === '0' || latestMetrics.ip_v4 === '1') {
+          latestMetrics.ip_v4 = clientIp;
+        }
+      } else {
+        if (!latestMetrics.ip_v6 || latestMetrics.ip_v6 === '0' || latestMetrics.ip_v6 === '1') {
+          latestMetrics.ip_v6 = clientIp;
+        }
+      }
+    }
+
     // D1 入库已完全移除，指标数据纯由 DO 内存与 DO Storage 接管（方案 A）
     const broadcastSamples = UpdateController.toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);
 

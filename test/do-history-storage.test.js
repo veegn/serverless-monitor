@@ -363,3 +363,27 @@ test('DashboardController: handleServersAPI returns public servers without refer
   assert.equal(data.servers[0].id, 'srv-public-1');
   assert.equal(data.servers[0].secret, undefined, 'private field secret must be stripped');
 });
+
+test('UpdateController: toBroadcastSamples preserves ip_v4, ip_v6, os, and arch in latest sample', () => {
+  const samples = [{
+    ts: Date.now(),
+    metrics: {
+      cpu: 15,
+      ip_v4: '198.51.100.88',
+      ip_v6: '2001:db8::88',
+      os: 'Debian 12',
+      arch: 'aarch64',
+      cpu_info: 'Ampere Altra',
+      cpu_cores: 4
+    }
+  }];
+  const result = UpdateController.toBroadcastSamples('srv-spec-1', samples, 'JP', '2.8.6', samples[0].metrics);
+  assert.equal(result.length, 1);
+  const payload = result[0].payload;
+  assert.equal(payload.ip_v4, '198.51.100.88');
+  assert.equal(payload.ip_v6, '2001:db8::88');
+  assert.equal(payload.os, 'Debian 12');
+  assert.equal(payload.arch, 'aarch64');
+  assert.equal(payload.cpu_info, 'Ampere Altra');
+  assert.equal(payload.cpu_cores, 4);
+});
