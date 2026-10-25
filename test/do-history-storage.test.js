@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MetricsBroadcaster } from '../src/durable/MetricsBroadcaster.js';
 import { DashboardController } from '../src/handlers/DashboardController.js';
+import { AdminController } from '../src/handlers/AdminController.js';
 import { UpdateController } from '../src/handlers/UpdateController.js';
 import { clearServersListCache } from '../src/utils/cache.js';
 import { clearSiteSettingsCache } from '../src/utils/settings.js';
@@ -228,4 +229,65 @@ test('DO History: Clears history on POST /clear-history', async () => {
   assert.equal(res.status, 200);
   assert.equal(broadcaster.historyWindows.size, 0);
   assert.equal(storage.store.size, 0);
+});
+
+test('AdminController: handleListAction reads latest metrics from DO and sets is_online=true', async () => {
+  clearServersListCache();
+  const now = Date.now();
+  const server = { id: 'srv-admin-online-1', name: 'Admin Online Server', is_hidden: 0 };
+
+  const fakeBroadcaster = {
+    async fetch(request, init) {
+      const urlStr = typeof request === 'string' ? request : request.url;
+      const url = new URL(urlStr);
+      if (url.pathname === '/latest-report-updates') {
+        return new Response(JSON.stringify({
+          updates: [{
+            serverId: 'srv-admin-online-1',
+            reportTs: now,
+            samples: [{ ts: now, data: { cpu: 42, ram_used: 1024, agent_version: '2.8.6' } }]
+          }]
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({}), { status: 404 });
+    }
+  };
+
+  const fakeEnv = {
+    DB: {
+      prepare(sql) {
+        return {
+          bind() {
+            return {
+              async first() { return null; },
+              async all() { return { results: [server] }; }
+            };
+          },
+          async first() { return null; },
+          async all() { return { results: [server] }; }
+        };
+      },
+      async batch() {
+        return [{ results: [] }];
+      }
+    },
+    METRICS_BROADCASTER: {
+      idFromName() { return 'global'; },
+      get() { return fakeBroadcaster; }
+    }
+  };
+
+  const res = await AdminController.handleListAction({ env: fakeEnv });
+  assert.equal(res.status, 200);
+
+  const json = await res.json();
+  assert.equal(json.success, true);
+  assert.equal(json.servers.length, 1);
+  const item = json.servers[0];
+  assert.equal(item.id, 'srv-admin-online-1');
+  assert.equal(item.is_online, true);
+  assert.equal(item.cpu, 42);
+  assert.equal(item.agent_version, '2.8.6');
+  assert.equal(json.stats.online, 1);
+  assert.equal(json.stats.offline, 0);
 });

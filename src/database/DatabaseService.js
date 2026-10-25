@@ -944,101 +944,106 @@ export class DatabaseService {
     const serverIds = serverList.map(server => String(server?.id || '').trim()).filter(Boolean);
     if (serverIds.length === 0) return new Map();
 
-    const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
-    const useCache = options.cache !== false;
     const result = new Map();
-    const serversToFetch = [];
+    try {
+      const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
+      const useCache = options.cache !== false;
+      const serversToFetch = [];
 
-    if (useCache) {
-      DatabaseService.pruneDashboardLatencyHistoryCache(now);
-    }
-
-    for (const server of serverList) {
-      const serverId = String(server?.id || '').trim();
-      if (!serverId) continue;
-
-      const cached = DatabaseService.dashboardLatencyHistoryCache.get(serverId);
-      if (useCache && cached && now - cached.cachedAt < DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS) {
-        result.set(serverId, cached.window);
-        continue;
+      if (useCache) {
+        DatabaseService.pruneDashboardLatencyHistoryCache(now);
       }
-      serversToFetch.push(server);
-    }
 
-    if (serversToFetch.length === 0) return result;
+      for (const server of serverList) {
+        const serverId = String(server?.id || '').trim();
+        if (!serverId) continue;
 
-    const points = Number.isInteger(options.points) && options.points > 0
-      ? options.points
-      : DASHBOARD_LATENCY_WINDOW_POINTS;
-    const queryEnd = Math.floor(now / 1000) * 1000 + 1000;
-    const cutoff = now - DASHBOARD_LATENCY_WINDOW_HOURS * 60 * 60 * 1000;
-    const columns = DatabaseService.DASHBOARD_LATENCY_COLUMNS.join(', ');
-
-    const nowDate = new Date(now);
-    const day = nowDate.getUTCDay();
-    const thisSunday = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - day));
-    const oldTableExists = cutoff < thisSunday.getTime() && !!await this.db.prepare(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
-    ).first();
-
-    const fetchServerLatency = async server => {
-      const serverId = String(server?.id || '').trim();
-      if (!serverId) return;
-
-      try {
-        const historyInfo = await getServerHistoryInfo(this.db, serverId, server);
-        if (!historyInfo.partitionId) {
-          result.set(serverId, { ping: [], loss: [] });
-          return;
+        const cached = DatabaseService.dashboardLatencyHistoryCache.get(serverId);
+        if (useCache && cached && now - cached.cachedAt < DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS) {
+          result.set(serverId, cached.window);
+          continue;
         }
-
-        const queryStart = cutoff;
-        if (queryStart >= queryEnd) {
-          result.set(serverId, { ping: [], loss: [] });
-          return;
-        }
-
-        const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
-        const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
-        const querySparseHistory = async queryColumns => {
-          const sparseQuery = buildSparseHistoryQuery({
-            columns: queryColumns,
-            queryStart,
-            queryEnd,
-            firstRangeEnd: Math.min(queryEnd, queryStart + intervalMs),
-            intervalMs,
-            idPrefix,
-            oldTableExists,
-            tableBoundary: thisSunday.getTime(),
-            sampleOrder: 'DESC'
-          });
-          return this.db.prepare(sparseQuery.sql).bind(...sparseQuery.bindValues).all();
-        };
-
-        const rawResult = await querySparseHistory(columns);
-        const window = DatabaseService.normalizeDashboardLatencyWindow(rawResult.results, { queryStart, intervalMs, points });
-        result.set(serverId, window);
-        if (useCache) {
-          DatabaseService.dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window });
-        }
-      } catch (e) {
-        debug('[DashboardLatency] query failed:', serverId, e?.message || e);
-        const empty = { ping: [], loss: [] };
-        result.set(serverId, empty);
-        if (useCache) {
-          DatabaseService.dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window: empty });
-        }
+        serversToFetch.push(server);
       }
-    };
 
-    for (let offset = 0; offset < serversToFetch.length; offset += DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY) {
-      await Promise.all(
-        serversToFetch
-          .slice(offset, offset + DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY)
-          .map(fetchServerLatency)
-      );
+      if (serversToFetch.length === 0) return result;
+
+      const points = Number.isInteger(options.points) && options.points > 0
+        ? options.points
+        : DASHBOARD_LATENCY_WINDOW_POINTS;
+      const queryEnd = Math.floor(now / 1000) * 1000 + 1000;
+      const cutoff = now - DASHBOARD_LATENCY_WINDOW_HOURS * 60 * 60 * 1000;
+      const columns = DatabaseService.DASHBOARD_LATENCY_COLUMNS.join(', ');
+
+      const nowDate = new Date(now);
+      const day = nowDate.getUTCDay();
+      const thisSunday = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - day));
+      const oldTableExists = cutoff < thisSunday.getTime() && !!await this.db.prepare(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
+      ).first();
+
+      const fetchServerLatency = async server => {
+        const serverId = String(server?.id || '').trim();
+        if (!serverId) return;
+
+        try {
+          const historyInfo = await getServerHistoryInfo(this.db, serverId, server);
+          if (!historyInfo.partitionId) {
+            result.set(serverId, { ping: [], loss: [] });
+            return;
+          }
+
+          const queryStart = cutoff;
+          if (queryStart >= queryEnd) {
+            result.set(serverId, { ping: [], loss: [] });
+            return;
+          }
+
+          const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
+          const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
+          const querySparseHistory = async queryColumns => {
+            const sparseQuery = buildSparseHistoryQuery({
+              columns: queryColumns,
+              queryStart,
+              queryEnd,
+              firstRangeEnd: Math.min(queryEnd, queryStart + intervalMs),
+              intervalMs,
+              idPrefix,
+              oldTableExists,
+              tableBoundary: thisSunday.getTime(),
+              sampleOrder: 'DESC'
+            });
+            return this.db.prepare(sparseQuery.sql).bind(...sparseQuery.bindValues).all();
+          };
+
+          const rawResult = await querySparseHistory(columns);
+          const window = DatabaseService.normalizeDashboardLatencyWindow(rawResult.results, { queryStart, intervalMs, points });
+          result.set(serverId, window);
+          if (useCache) {
+            DatabaseService.dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window });
+          }
+        } catch (e) {
+          debug('[DashboardLatency] query failed:', serverId, e?.message || e);
+          const empty = { ping: [], loss: [] };
+          result.set(serverId, empty);
+          if (useCache) {
+            DatabaseService.dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window: empty });
+          }
+        }
+      };
+
+      for (let offset = 0; offset < serversToFetch.length; offset += DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY) {
+        await Promise.all(
+          serversToFetch
+            .slice(offset, offset + DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY)
+            .map(fetchServerLatency)
+        );
+      }
+
+      return result;
+    } catch (err) {
+      debug('[DashboardLatency] global query failed:', err?.message || err);
+      return result;
     }
-
-    return result;
   }
 }

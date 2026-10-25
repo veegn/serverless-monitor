@@ -102,7 +102,7 @@ export class DashboardController {
   if (!update || !Array.isArray(update.samples)) return null;
 
   const samples = update.samples
-    .map(normalizeLatestReportSample)
+    .map(DashboardController.normalizeLatestReportSample)
     .filter(Boolean);
   if (samples.length === 0) return null;
 
@@ -288,10 +288,10 @@ export class DashboardController {
   
   const serverIds = results.map(server => server.id).filter(Boolean);
   const [latestMetricsMap, realtimeState, latencyHistory] = await Promise.all([
-    DatabaseService.getLatestMetricsForAllServers(env.DB),
-    DashboardController.getRealtimeStateForServers(env, serverIds),
+    DatabaseService.getLatestMetricsForAllServers(env.DB).catch(() => new Map()),
+    DashboardController.getRealtimeStateForServers(env, serverIds).catch(() => ({ latestReportUpdates: [] })),
     shouldIncludeLatencyHistory
-      ? DatabaseService.getDashboardLatencyHistory(env.DB, results)
+      ? DatabaseService.getDashboardLatencyHistory(env.DB, results).catch(() => new Map())
       : Promise.resolve(new Map())
   ]);
   DashboardController.attachLatencyHistoryToServers(results, latencyHistory);

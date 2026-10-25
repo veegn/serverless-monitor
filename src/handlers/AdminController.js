@@ -14,6 +14,7 @@ import { isValidTrafficCorrection, normalizeConnectionMode, normalizePingMode, n
 import { scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../utils/agentConfigNotify.js';
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import { THEME_PREVIEW_AUTH_TTL_SECONDS } from '../utils/config.js';
+import { DashboardController } from './DashboardController.js';
 
 /**
  * AdminController
@@ -612,7 +613,11 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
 
   static async handleListAction({ env }) {
   const servers = await getAllServers(env.DB);
-  const latestMetricsMap = await DatabaseService.getLatestMetricsForAllServers(env.DB);
+  const serverIds = servers.map(server => server.id).filter(Boolean);
+  const [latestMetricsMap, realtimeState] = await Promise.all([
+    DatabaseService.getLatestMetricsForAllServers(env.DB).catch(() => new Map()),
+    DashboardController.getRealtimeStateForServers(env, serverIds).catch(() => ({ latestReportUpdates: [] }))
+  ]);
 
   const now = Date.now();
   const ONLINE_THRESHOLD = 300000;
@@ -627,7 +632,20 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
   };
 
   const serversWithStatus = servers.map(server => {
-    const latestMetrics = latestMetricsMap.get(server.id);
+    let latestMetrics = null;
+    if (realtimeState?.latestReportUpdates) {
+      const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === server.id);
+      if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
+        const lastSample = doReport.samples[doReport.samples.length - 1];
+        latestMetrics = {
+          timestamp: lastSample.ts || doReport.reportTs || now,
+          ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
+        };
+      }
+    }
+    if (!latestMetrics) {
+      latestMetrics = latestMetricsMap.get(server.id);
+    }
     const item = { ...server, region_override: server.region || '' };
     let isOnline = false;
 
