@@ -320,3 +320,46 @@ test('DO /batch-push: Caches updates and ingests history even when subscribers=0
   assert.ok(latest);
   assert.equal(latest.samples[0].data.ip_v4, '203.0.113.10');
 });
+
+test('DashboardController: handleServersAPI returns public servers without reference error', async () => {
+  clearServersListCache();
+  const server = {
+    id: 'srv-public-1',
+    name: 'Public Node 1',
+    server_group: 'Default',
+    region: 'hk',
+    secret: 'super-secret-key-123',
+    is_hidden: '0'
+  };
+  const hiddenServer = {
+    id: 'srv-hidden-1',
+    name: 'Hidden Node 1',
+    secret: 'hidden-secret',
+    is_hidden: '1'
+  };
+
+  const fakeEnv = {
+    DB: {
+      prepare(query) {
+        return {
+          bind() { return this; },
+          async first() { return null; },
+          async all() { return { results: [server, hiddenServer] }; }
+        };
+      }
+    },
+    METRICS_BROADCASTER: null
+  };
+
+  const res = await DashboardController.handleServersAPI(
+    new Request('http://localhost/api/servers'),
+    fakeEnv,
+    { is_public: 'true', show_three_net_details: 'false' }
+  );
+
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.servers.length, 1);
+  assert.equal(data.servers[0].id, 'srv-public-1');
+  assert.equal(data.servers[0].secret, undefined, 'private field secret must be stripped');
+});
