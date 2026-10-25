@@ -346,6 +346,13 @@ export class ServerlessMonitorApp {
           return simpleAuthResponse();
         }
         const result = await this.dbService.clearHistory();
+        try {
+          if (this.env?.METRICS_BROADCASTER) {
+            const id = this.env.METRICS_BROADCASTER.idFromName('global');
+            const stub = this.env.METRICS_BROADCASTER.get(id);
+            await stub.fetch('http://internal/clear-history', { method: 'POST' });
+          }
+        } catch (_) {}
         return createSuccessResponse(result);
       }}
     ];

@@ -1601,6 +1601,10 @@ export class MetricsBroadcaster {
       return this._handleHistoryQuery(request, url);
     }
 
+    if (method === 'POST' && (path === '/clear-history' || path.endsWith('/clear-history'))) {
+      return this._handleClearHistory(request);
+    }
+
     // ── 1) WebSocket 接入 ──────────────────────────────
     if (path === '/ws' || path.endsWith('/ws')) {
       const upgradeHeader = request.headers.get('Upgrade');
@@ -2056,6 +2060,28 @@ export class MetricsBroadcaster {
         'Content-Type': 'application/json',
         'Cache-Control': 'no-store'
       }
+    });
+  }
+
+  async _handleClearHistory() {
+    this.historyWindows.clear();
+    this.historyLoadedServers.clear();
+    this.historyDirtyServers.clear();
+    this.latestReportUpdates.clear();
+    try {
+      if (typeof this.state?.storage?.list === 'function') {
+        const list = await this.state.storage.list({ prefix: DO_HISTORY_STORAGE_PREFIX });
+        for (const key of list.keys()) {
+          await this.state.storage.delete(key);
+        }
+      }
+      await this.state?.storage?.delete?.(LATEST_REPORT_STORAGE_KEY);
+    } catch (e) {
+      console.warn('[do-history] Failed to clear DO history storage:', e?.message || e);
+    }
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
     });
   }
 

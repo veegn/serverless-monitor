@@ -19,6 +19,19 @@ function makeMockStorage() {
     async put(key, val) {
       store.set(key, structuredClone(val));
     },
+    async delete(key) {
+      store.delete(key);
+    },
+    async list(options = {}) {
+      const result = new Map();
+      const prefix = options.prefix || '';
+      for (const [k, v] of store.entries()) {
+        if (k.startsWith(prefix)) {
+          result.set(k, v);
+        }
+      }
+      return result;
+    },
     store
   };
 }
@@ -202,4 +215,17 @@ test('DashboardController: handleHistory returns DO history directly when availa
   assert.equal(json.length, 2);
   assert.equal(json[0].cpu, 15);
   assert.equal(json[1].cpu, 25);
+});
+
+test('DO History: Clears history on POST /clear-history', async () => {
+  const storage = makeMockStorage();
+  const broadcaster = makeBroadcasterWithStorage(storage);
+  storage.store.set('durable_history_v1:server-clear-01', [{ timestamp: Date.now(), cpu: 10 }]);
+  broadcaster.historyWindows.set('server-clear-01', [{ timestamp: Date.now(), cpu: 10 }]);
+
+  const req = new Request('http://internal/clear-history', { method: 'POST' });
+  const res = await broadcaster.fetch(req);
+  assert.equal(res.status, 200);
+  assert.equal(broadcaster.historyWindows.size, 0);
+  assert.equal(storage.store.size, 0);
 });
