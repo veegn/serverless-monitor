@@ -937,17 +937,6 @@ export class UpdateController {
       });
     }
 
-    // 从缓存中获取历史记录分区 ID
-    const historyPartitionId = serverDetail.history_partition_id;
-    if(!historyPartitionId) {
-      await ensureServerOptimization(env.DB, serverId);
-      UpdateController.logUpdateBadRequest('Missing history_partition_id', {
-        id: serverId,
-        history_partition_id: serverDetail.history_partition_id
-      });
-      return createBadRequestResponse('Missing history_partition_id');
-    }
-
     const samples = UpdateController.normalizeMetricSamples(data);
     if (samples.length === 0) {
       UpdateController.logUpdateBadRequest('Missing metrics', {

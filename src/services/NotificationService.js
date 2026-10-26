@@ -1,4 +1,6 @@
 import { DatabaseService } from '../database/DatabaseService.js';
+import { DashboardController } from '../handlers/DashboardController.js';
+import { getLatestReportSampleTimestamp } from '../utils/latestReportCache.js';
 import { clearServersListCache, getAllServers } from '../utils/cache.js';
 import {
   DEFAULT_NOTIFICATION_TEMPLATE,
@@ -1045,7 +1047,18 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   try {
     const allServers = await getAllServers(db);
     
-    const latestTimestampsMap = await DatabaseService.getLatestTimestampsForAllServers(db);
+    let latestTimestampsMap = new Map();
+    if (env?.METRICS_BROADCASTER) {
+      const serverIds = allServers.map(s => s.id);
+      const realtimeState = await DashboardController.getRealtimeStateForServers(env, serverIds, { maskPublicIp: false });
+      for (const update of realtimeState?.latestReportUpdates || []) {
+        const sampleTs = getLatestReportSampleTimestamp(update);
+        const reportTs = Number(update.reportTs || sampleTs);
+        latestTimestampsMap.set(String(update.serverId), Math.max(sampleTs || 0, reportTs || 0));
+      }
+    } else {
+      latestTimestampsMap = await DatabaseService.getLatestTimestampsForAllServers(db);
+    }
     if (!latestTimestampsMap) {
       // 获取失败时跳过本次检测，避免把所有服务器误判为离线
       debug('[Cron] 获取最新上报时间戳失败，跳过本次离线检测');

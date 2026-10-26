@@ -278,10 +278,7 @@ export class DashboardController {
   const server = await getServerDetail(env.DB, id, isLoggedIn);
   if (!server) return createNotFoundResponse('Server not found');
   
-  const [latestMetrics, realtimeState] = await Promise.all([
-    DatabaseService.getLatestMetrics(env.DB, id, server).catch(() => null),
-    DashboardController.getRealtimeStateForServers(env, [id])
-  ]);
+  const realtimeState = await DashboardController.getRealtimeStateForServers(env, [id]).catch(() => ({ latestReportUpdates: [] }));
   let effectiveMetrics = null;
   if (realtimeState?.latestReportUpdates?.length > 0) {
     const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === id) || realtimeState.latestReportUpdates[0];
@@ -292,9 +289,6 @@ export class DashboardController {
         ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
       };
     }
-  }
-  if (!effectiveMetrics) {
-    effectiveMetrics = latestMetrics;
   }
   mergeMetricsIntoServer(server, effectiveMetrics);
   let latestReportUpdates = realtimeState.latestReportUpdates;
@@ -399,39 +393,8 @@ export class DashboardController {
   }
 
   let data = await DashboardController.getDurableHistory(env, id, clampedHours, columns, longHistoryPoints);
-  if (!Array.isArray(data) || data.length === 0) {
-    try {
-      data = await DatabaseService.getMetricsHistory(
-        env.DB,
-        id,
-        clampedHours,
-        columns,
-        server,
-        longHistoryPoints
-      );
-    } catch (e) {
-      const message = e && e.message ? e.message : String(e);
-      if (/invalid history partition id/i.test(message)) {
-        debug('[History] 服务器未分配历史分区，无法按主键范围查询:', message);
-        return new Response(JSON.stringify({
-          message: 'historyPartitionNotAssigned'
-        }), {
-          status: 409,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-      if (/no such column/i.test(message)) {
-        debug('[History] 数据库字段缺失，可能尚未升级数据库:', message);
-        return new Response(JSON.stringify({
-          message: 'databaseUpgradeRequired'
-        }), {
-          status: 409,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-      console.warn('[History] D1 history query failed, returning empty:', message);
-      data = [];
-    }
+  if (!Array.isArray(data)) {
+    data = [];
   }
 
   const sanitizedData = Array.isArray(data)

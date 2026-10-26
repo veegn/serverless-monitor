@@ -428,9 +428,7 @@ export class DatabaseService {
         await ensureServerOptimization(this.db);
       }
 
-      // 确保 metrics_history 表存在（主键 id 已编码分区与时间，无需二级索引）
-      await this.db.prepare(createHistoryTableSql('metrics_history')).run();
-
+      // metrics 数据已完全移至 Durable Objects（DO），D1 中不再创建或维护 metrics_history 表
       debug('✅ 数据库初始化完成');
       DatabaseService.dbInitialized = true;
     } catch (e) {
@@ -473,188 +471,39 @@ export class DatabaseService {
 
   async weeklyCleanup() {
     try {
-      debug('[Cleanup] 开始执行表轮换操作...');
+      debug('[Cleanup] 开始执行每周数据库维护...');
 
-      // 1. 删除旧的 metrics_history_old 表（如果存在）
+      // metrics 数据已完全移至 DO，清理遗留的 D1 历史表
       await this.db.prepare(`DROP TABLE IF EXISTS metrics_history_old`).run();
-      debug('[Cleanup] 已删除旧的 metrics_history_old 表');
-
-      // 2. 将 metrics_history 重命名为 metrics_history_old
-      const currentTable = await this.db.prepare(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history'`
-      ).first();
-
-      if (currentTable) {
-        await this.db.prepare(`ALTER TABLE metrics_history RENAME TO metrics_history_old`).run();
-        debug('[Cleanup] 已将 metrics_history 重命名为 metrics_history_old');
-      }
-
-      // 3. 重新初始化数据库以创建新的 metrics_history 表
-      DatabaseService.dbInitialized = false;
-      await this.init();
-
-      debug('[Cleanup] 已创建新的 metrics_history 表');
+      await this.db.prepare(`DROP TABLE IF EXISTS metrics_history`).run();
+      debug('[Cleanup] 已清理 D1 metrics_history 表');
 
       return {
         success: true,
-        message: '表轮换成功'
+        message: '维护成功'
       };
     } catch (e) {
-      console.error('[Cleanup] Table rotation failed:', e);
+      console.error('[Cleanup] Table cleanup failed:', e);
       return { success: false, error: e.message };
     }
   }
 
-  buildHistoryInsertStatement(serverId, historyPartitionId, metrics = {}, regionCode = '', timestamp = null, agentVersion = '') {
-    const historyId = buildHistoryId(historyPartitionId, timestamp);
-    const rawTimestamp = Number(timestamp);
-    const now = Number.isFinite(rawTimestamp) && rawTimestamp > 0
-      ? (rawTimestamp < 10000000000 ? rawTimestamp * 1000 : rawTimestamp)
-      : Date.now();
-
-    const parsePing = (val) => {
-      if (isDisabledProbeMetric(val)) return 'false';
-      const num = parseInt(val);
-      return (num > 0) ? num : null;
-    };
-
-    const parseLoss = (val) => {
-      if (isDisabledProbeMetric(val)) return 'false';
-      const num = parseInt(val);
-      if (Number.isNaN(num)) return null;
-      return Math.max(0, Math.min(100, num));
-    };
-
-    const diskMetrics = flattenDiskMetrics(metrics);
-
-    return this.db.prepare(`
-      INSERT OR REPLACE INTO metrics_history (
-        ${HISTORY_INSERT_COLUMNS.join(', ')}
-      ) VALUES (
-        ${HISTORY_INSERT_COLUMNS.map(() => '?').join(', ')}
-      )
-    `).bind(
-      historyId,
-      serverId,
-      now,
-      agentVersion || '',
-      parseFloat(metrics.cpu) || 0,
-      metrics.load || metrics.load_avg || '0 0 0',
-      parseFloat(metrics.net_in_speed) || 0,
-      parseFloat(metrics.net_out_speed) || 0,
-      parseFloat(metrics.net_rx) || 0,
-      parseFloat(metrics.net_tx) || 0,
-      parseInt(metrics.processes) || 0,
-      parseInt(metrics.tcp_conn) || 0,
-      parseInt(metrics.udp_conn) || 0,
-      parsePing(metrics.ping_ct),
-      parsePing(metrics.ping_cu),
-      parsePing(metrics.ping_cm),
-      parsePing(metrics.ping_bd),
-      parsePing(metrics.ping_node_1),
-      parsePing(metrics.ping_node_2),
-      parsePing(metrics.ping_node_3),
-      parsePing(metrics.ping_node_4),
-      parseLoss(metrics.loss_ct),
-      parseLoss(metrics.loss_cu),
-      parseLoss(metrics.loss_cm),
-      parseLoss(metrics.loss_bd),
-      parseLoss(metrics.loss_node_1),
-      parseLoss(metrics.loss_node_2),
-      parseLoss(metrics.loss_node_3),
-      parseLoss(metrics.loss_node_4),
-      parseFloat(metrics.ram_total) || 0,
-      parseFloat(metrics.ram_used) || 0,
-      parseFloat(metrics.swap_total) || 0,
-      parseFloat(metrics.swap_used) || 0,
-      parseFloat(metrics.disk_total) || 0,
-      parseFloat(metrics.disk_used) || 0,
-      diskMetrics.disk_read_bps,
-      diskMetrics.disk_write_bps,
-      diskMetrics.disk_read_iops,
-      diskMetrics.disk_write_iops,
-      diskMetrics.disk_await_ms,
-      diskMetrics.disk_util,
-      parseInt(metrics.cpu_cores) || 0,
-      metrics.cpu_info || '',
-      Array.isArray(metrics.gpu_info) ? JSON.stringify(metrics.gpu_info) : (metrics.gpu_info || ''),
-      metrics.arch || '',
-      metrics.os || '',
-      metrics.kernel_version || '',
-      regionCode,
-      metrics.ip_v4 || '0',
-      metrics.ip_v6 || '0',
-      metrics.boot_time || '',
-      parseFloat(metrics.net_rx_monthly) || 0,
-      parseFloat(metrics.net_tx_monthly) || 0
-    );
+  buildHistoryInsertStatement() {
+    return null;
   }
 
   async _executeStatementsBatch(statements) {
     if (!Array.isArray(statements) || statements.length === 0) return;
-    if (typeof this.db.batch === 'function') {
-      for (let i = 0; i < statements.length; i += DatabaseService.D1_BATCH_CHUNK_SIZE) {
-        await this.db.batch(statements.slice(i, i + DatabaseService.D1_BATCH_CHUNK_SIZE));
-      }
-    } else {
-      for (const stmt of statements) {
-        await stmt.run();
-      }
-    }
   }
 
-  async saveMetricsHistory(serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
-    try {
-      await this.buildHistoryInsertStatement(serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion).run();
-    } catch (e) {
-      if (e?.message && /has no column/i.test(e.message)) {
-        console.warn('Detected missing database columns, attempting to add them...');
-        await addHistoryColumns(this.db);
-        try {
-          await this.buildHistoryInsertStatement(serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion).run();
-        } catch (retryError) {
-          console.error('Failed to save metrics history:', retryError?.message || retryError);
-        }
-        return;
-      }
-      console.error('Failed to save metrics history:', e?.message || e);
-    }
+  async saveMetricsHistory() {
+    // D1 metrics 存储已完全移除，由 DO 内存与持久化接管
+    return;
   }
 
-  async saveMetricsHistoryBatch(serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '', baselineMetrics = null, bucketIntervalMs = HISTORY_BATCH_BUCKET_INTERVAL_MS) {
-    if (!Array.isArray(samples) || samples.length === 0) return;
-
-    const downsampled = DatabaseService.downsampleHistorySamples(samples, baselineMetrics, bucketIntervalMs);
-    if (!downsampled || downsampled.length === 0) return;
-
-    const buildStatements = () => downsampled.map(s => {
-      return this.buildHistoryInsertStatement(
-        serverId,
-        historyPartitionId,
-        s.metrics,
-        regionCode,
-        s.ts,
-        agentVersion
-      );
-    });
-
-    try {
-      await this._executeStatementsBatch(buildStatements());
-    } catch (e) {
-      if (e?.message && /has no column/i.test(e.message)) {
-        console.warn('Detected missing database columns, attempting to add them...');
-        await addHistoryColumns(this.db);
-        try {
-          await this._executeStatementsBatch(buildStatements());
-        } catch (retryError) {
-          console.error('Failed to save batch metrics history:', retryError?.message || retryError);
-          throw retryError;
-        }
-        return;
-      }
-      console.error('Failed to save batch metrics history:', e?.message || e);
-      throw e;
-    }
+  async saveMetricsHistoryBatch() {
+    // D1 metrics 存储已完全移除，由 DO 内存与持久化接管
+    return;
   }
 
   async getLatestMetrics(serverId, server = null) {

@@ -20,10 +20,10 @@ export async function updateDatabase(db) {
     const cleanupServers = await cleanupServerExtraColumns(db);
     results.push({ name: 'servers 表多余字段清理', ...cleanupServers });
     
-    const historyCols = await addHistoryColumns(db);
-    results.push({ name: 'metrics_history 表列更新', ...historyCols });
-
-    // 无需清理metrics_history多余字段，消耗过大，不影响使用，每周执行weeklyCleanup的时候会自动清理
+    // D1 存储 metrics 相关实现已完全移除，清理弃用的 metrics_history 与 metrics_history_old 表
+    await db.prepare(`DROP TABLE IF EXISTS metrics_history`).run().catch(() => {});
+    await db.prepare(`DROP TABLE IF EXISTS metrics_history_old`).run().catch(() => {});
+    results.push({ name: '弃用 D1 metrics_history 表清理', success: true });
     
     const staleCleanup = await cleanupStaleSettings(db);
     results.push({ name: '废弃 settings key 清理', ...staleCleanup });
@@ -153,33 +153,8 @@ async function cleanupServerExtraColumns(db) {
 }
 
 export async function addHistoryColumns(db) {
-  try {
-    const newHistoryCols = HISTORY_UPGRADE_COLUMNS;
-
-    const tables = ['metrics_history'];
-    const oldTable = await db.prepare(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
-    ).first();
-    if (oldTable) tables.push('metrics_history_old');
-
-    let added = 0;
-    for (const tableName of tables) {
-      const { results: historyColumns } = await db.prepare(`PRAGMA table_info(${tableName})`).all();
-      const existingHistoryCols = historyColumns.map(c => c.name);
-
-      for (const [colName, colDef] of Object.entries(newHistoryCols)) {
-        if (!existingHistoryCols.includes(colName)) {
-          await db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${colName} ${colDef}`).run();
-          added++;
-        }
-      }
-    }
-
-    return { success: true, added };
-  } catch (e) {
-    debug('Failed to add metrics_history columns:', e);
-    return { success: false, error: e.message };
-  }
+  // D1 存储 metrics 相关实现已完全移除，不再向 D1 增加历史指标列
+  return { success: true, added: 0 };
 }
 
 async function dropMetricsAggregatedTable(db) {

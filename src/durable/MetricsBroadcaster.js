@@ -759,15 +759,6 @@ export class MetricsBroadcaster {
       }
     }
 
-    if (!serverDetail.history_partition_id) {
-      await ensureServerOptimization(this.env.DB, serverId);
-      serverDetail = await this._getAgentServerDetail(serverId, true);
-      if (!serverDetail?.history_partition_id) {
-        this._closeWsWithError(ws, 'Missing history_partition_id', 400);
-        return null;
-      }
-    }
-
     const agentVersion = UpdateController.normalizeAgentVersion(
       data.agent_version ??
       data.metrics?.agent_version ??

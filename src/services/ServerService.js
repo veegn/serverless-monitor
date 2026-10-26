@@ -51,24 +51,8 @@ export class ServerService {
         : Promise.resolve(new Map())
     ]);
 
-    // 仅在 DO 缺失部分服务器时，按需从 D1 兜底拉取延时历史
-    const latencyHistory = new Map(durableLatencyMap);
-    if (includeLatencyHistory) {
-      const missingServers = rawServers.filter(s => !latencyHistory.has(String(s.id)));
-      if (missingServers.length > 0 && (!env.METRICS_BROADCASTER || durableLatencyMap.size === 0)) {
-        const d1Latency = await DatabaseService.getDashboardLatencyHistory(env.DB, missingServers).catch(() => new Map());
-        for (const [k, v] of d1Latency.entries()) {
-          latencyHistory.set(k, v);
-        }
-      }
-    }
-
-    // 仅在 DO 无实时缓存或缺少部分服务器时，按需从 D1 兜底拉取最新规格与离线指标
-    let latestMetricsMap = new Map();
-    const hasMissingDoServers = rawServers.some(s => !realtimeState?.latestReportUpdates?.some(u => u.serverId === s.id));
-    if (hasMissingDoServers || !env.METRICS_BROADCASTER) {
-      latestMetricsMap = await DatabaseService.getLatestMetricsForAllServers(env.DB).catch(() => new Map());
-    }
+    const latencyHistory = durableLatencyMap || new Map();
+    const latestMetricsMap = new Map();
 
     const now = Date.now();
     let globalOnline = 0;
