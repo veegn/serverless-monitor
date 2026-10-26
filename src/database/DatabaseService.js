@@ -1,49 +1,19 @@
-import { getAllServers, getLatestMetricsCache, setLatestMetricsCache, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration, clearAllCaches } from '../utils/cache.js';
-import { saveSiteOptions, debug, normalizeLongHistoryPoints, DEFAULT_LONG_HISTORY_POINTS } from '../utils/settings.js';
+import { clearAllCaches } from '../utils/cache.js';
+import { saveSiteOptions, debug } from '../utils/settings.js';
+import { isDisabledProbeMetric, DISK_IO_FIELD_TO_COLUMN, DISK_IO_METRIC_FIELDS } from '../utils/metrics.js';
+import { ensureServerOptimization } from './indexOptimization.js';
 import {
-  attachDiskMetricsObject,
-  flattenDiskMetrics,
-  isDisabledProbeMetric,
-  normalizeProbeMetricRow,
-  DISK_IO_FIELD_TO_COLUMN,
-  DISK_IO_METRIC_FIELDS
-} from '../utils/metrics.js';
-import { ensureServerOptimization, buildHistoryId, getServerHistoryInfo, getHistoryIdRange } from './indexOptimization.js';
-import { addHistoryColumns } from './updateDatabase.js';
-import {
-  buildSparseHistoryQuery,
-  shouldUseSparseHistorySampling
-} from './historySampling.js';
-import {
-  createHistoryTableSql,
-  HISTORY_INSERT_COLUMNS,
-  HISTORY_MAX_BATCH_BUCKETS,
-  HISTORY_BATCH_BUCKET_INTERVAL_MS,
-  HISTORY_AGGREGATION_MAX_FIELDS,
-  HISTORY_AGGREGATION_AVG_FIELDS
+  HISTORY_MAX_BATCH_BUCKETS, HISTORY_BATCH_BUCKET_INTERVAL_MS,
+  HISTORY_AGGREGATION_MAX_FIELDS, HISTORY_AGGREGATION_AVG_FIELDS
 } from '../utils/historyFields.js';
-import {
-  DASHBOARD_LATENCY_WINDOW_CACHE_MAX_SERVERS,
-  DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS,
-  DASHBOARD_LATENCY_WINDOW_HOURS,
-  DASHBOARD_LATENCY_WINDOW_POINTS,
-  DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY
-} from '../utils/config.js';
 
 /**
  * DatabaseService
- * 负责 Cloudflare D1 数据库相关的持久化、检索与表轮换管理
+ * 负责 D1 配置表初始化、维护及共用指标格式化；指标存储与查询由 DO SQLite 负责
  */
 export class DatabaseService {
   static dbInitialized = false;
-  static LOSS_AGG_COLUMNS = new Set(['loss_ct', 'loss_cu', 'loss_cm', 'loss_bd', 'loss_node_1', 'loss_node_2', 'loss_node_3', 'loss_node_4']);
-  static DEFAULT_HISTORY_MAX_POINTS = 160;
   static LATENCY_NODE_FIELDS = ['ct', 'cu', 'cm', 'bd', 'node_1', 'node_2', 'node_3', 'node_4'];
-  static DASHBOARD_LATENCY_COLUMNS = DatabaseService.LATENCY_NODE_FIELDS
-    .flatMap(field => [`ping_${field}`, `loss_${field}`]);
-  static dashboardLatencyHistoryCache = new Map();
-  static LATEST_QUERY_CHUNK_SIZE = 30;
-  static D1_BATCH_CHUNK_SIZE = 25;
   static DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
     DISK_IO_METRIC_FIELDS.map(field => [DISK_IO_FIELD_TO_COLUMN[field], field])
   ));
@@ -53,36 +23,6 @@ export class DatabaseService {
   }
 
   // --- 静态缓存与辅助方法 ---
-
-  static pruneDashboardLatencyHistoryCache(now = Date.now()) {
-    for (const [serverId, entry] of DatabaseService.dashboardLatencyHistoryCache) {
-      if (!entry || now - entry.cachedAt > DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS) {
-        DatabaseService.dashboardLatencyHistoryCache.delete(serverId);
-      }
-    }
-
-    while (DatabaseService.dashboardLatencyHistoryCache.size > DASHBOARD_LATENCY_WINDOW_CACHE_MAX_SERVERS) {
-      const oldestServerId = DatabaseService.dashboardLatencyHistoryCache.keys().next().value;
-      if (oldestServerId === undefined) break;
-      DatabaseService.dashboardLatencyHistoryCache.delete(oldestServerId);
-    }
-  }
-
-  static clearDashboardLatencyHistoryCache() {
-    DatabaseService.dashboardLatencyHistoryCache.clear();
-  }
-
-  clearDashboardLatencyHistoryCache() {
-    DatabaseService.clearDashboardLatencyHistoryCache();
-  }
-
-  static buildHistorySourceQuery(tableName, columns) {
-    return `
-      SELECT timestamp, ${columns} FROM ${tableName}
-      WHERE id >= ?
-        AND id <= ?
-    `;
-  }
 
   static normalizeLatencyHistoryValue(value, metricType) {
     if (isDisabledProbeMetric(value)) return false;
@@ -104,7 +44,10 @@ export class DatabaseService {
     const point = { ts: timestamp };
     for (const field of DatabaseService.LATENCY_NODE_FIELDS) {
       const column = `${metricType}_${field}`;
-      if (!Object.prototype.hasOwnProperty.call(row, column)) continue;
+      if (!Object.prototype.hasOwnProperty.call(row, column)) {
+        if (includeEmpty) point[field] = null;
+        continue;
+      }
       const value = DatabaseService.normalizeLatencyHistoryValue(row[column], metricType);
       if (value !== null) point[field] = value;
       else if (includeEmpty) point[field] = null;
@@ -130,42 +73,6 @@ export class DatabaseService {
     return { ping, loss };
   }
 
-  static parseDashboardLatencySample(row) {
-    if (!row?.sample_json) return null;
-    try {
-      return JSON.parse(row.sample_json);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  static normalizeDashboardLatencyWindow(sampleRows, { queryStart, intervalMs, points }) {
-    const rows = Array.from({ length: points }, (_, index) => {
-      const bucketTimestamp = queryStart + index * intervalMs;
-      const sample = DatabaseService.parseDashboardLatencySample(sampleRows?.[index]);
-      if (!sample || typeof sample !== 'object') {
-        return { timestamp: bucketTimestamp };
-      }
-
-      return {
-        ...sample,
-        sample_timestamp: Number(sample.timestamp),
-        timestamp: bucketTimestamp
-      };
-    });
-
-    return DatabaseService.normalizeDashboardLatencyRows(rows, { includeEmpty: true });
-  }
-
-  static extractTimestampsFromMetricsCache(cache) {
-    const map = new Map();
-    if (!cache) return map;
-    for (const [id, metrics] of cache) {
-      if (metrics) map.set(id, metrics.timestamp);
-    }
-    return map;
-  }
-
   // --- 静态快捷方法 ---
 
   static async init(db) {
@@ -178,18 +85,6 @@ export class DatabaseService {
 
   static async weeklyCleanup(db) {
     return new DatabaseService(db).weeklyCleanup();
-  }
-
-  static buildHistoryInsertStatement(db, serverId, historyPartitionId, metrics = {}, regionCode = '', timestamp = null, agentVersion = '') {
-    return new DatabaseService(db).buildHistoryInsertStatement(serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion);
-  }
-
-  static async saveMetricsHistory(db, serverId, historyPartitionId, metrics, regionCode = '', timestamp = null, agentVersion = '') {
-    return new DatabaseService(db).saveMetricsHistory(serverId, historyPartitionId, metrics, regionCode, timestamp, agentVersion);
-  }
-
-  static async saveMetricsHistoryBatch(db, serverId, historyPartitionId, samples = [], regionCode = '', agentVersion = '', baselineMetrics = null, bucketIntervalMs = HISTORY_BATCH_BUCKET_INTERVAL_MS) {
-    return new DatabaseService(db).saveMetricsHistoryBatch(serverId, historyPartitionId, samples, regionCode, agentVersion, baselineMetrics, bucketIntervalMs);
   }
 
   static _extractMetricNumber(source, field) {
@@ -334,26 +229,6 @@ export class DatabaseService {
     return result;
   }
 
-  static async getLatestMetrics(db, serverId, server = null) {
-    return new DatabaseService(db).getLatestMetrics(serverId, server);
-  }
-
-  static async getLatestMetricsForAllServers(db) {
-    return new DatabaseService(db).getLatestMetricsForAllServers();
-  }
-
-  static async getLatestTimestampsForAllServers(db) {
-    return new DatabaseService(db).getLatestTimestampsForAllServers();
-  }
-
-  static async getMetricsHistory(db, serverId, hours, columns, server = null, longHistoryPoints = DEFAULT_LONG_HISTORY_POINTS) {
-    return new DatabaseService(db).getMetricsHistory(serverId, hours, columns, server, longHistoryPoints);
-  }
-
-  static async getDashboardLatencyHistory(db, servers, options = {}) {
-    return new DatabaseService(db).getDashboardLatencyHistory(servers, options);
-  }
-
   // --- 实例方法 ---
 
   async init() {
@@ -451,7 +326,6 @@ export class DatabaseService {
       await this.init();
 
       await clearAllCaches(this.db);
-      DatabaseService.clearDashboardLatencyHistoryCache();
 
       debug('✅ 数据库重建完成');
 
@@ -488,411 +362,4 @@ export class DatabaseService {
     }
   }
 
-  buildHistoryInsertStatement() {
-    return null;
-  }
-
-  async _executeStatementsBatch(statements) {
-    if (!Array.isArray(statements) || statements.length === 0) return;
-  }
-
-  async saveMetricsHistory() {
-    // D1 metrics 存储已完全移除，由 DO 内存与持久化接管
-    return;
-  }
-
-  async saveMetricsHistoryBatch() {
-    // D1 metrics 存储已完全移除，由 DO 内存与持久化接管
-    return;
-  }
-
-  async getLatestMetrics(serverId, server = null) {
-    try {
-      const historyInfo = await getServerHistoryInfo(this.db, serverId, server);
-      if (!historyInfo.partitionId) {
-        throw new Error('Invalid history partition id');
-      }
-
-      const rangeStart = historyInfo.startTimestamp > 0 ? historyInfo.startTimestamp : null;
-      const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, rangeStart);
-      debug(`Server ${serverId} history_id_range: ${startId} - ${endId}`);
-
-      const result = await this.db.prepare(`
-        SELECT * FROM metrics_history
-        WHERE id >= ?
-          AND id <= ?
-        ORDER BY id DESC
-        LIMIT 1
-      `).bind(startId, endId).first();
-      return result ? normalizeProbeMetricRow(result) : null;
-    } catch (e) {
-      console.error('Failed to get latest metrics:', e);
-      return null;
-    }
-  }
-
-  async getLatestMetricsForAllServers() {
-    const now = Date.now();
-    const cacheInfo = getLatestMetricsCache();
-    if (cacheInfo.cache && now - cacheInfo.time < cacheInfo.ttl) {
-      return cacheInfo.cache;
-    }
-
-    const result = new Map();
-    try {
-      const servers = await getAllServers(this.db);
-      if (servers.length === 0) {
-        setLatestMetricsCache(result);
-        return result;
-      }
-
-      const items = [];
-      for (const server of servers) {
-        try {
-          const historyInfo = await getServerHistoryInfo(this.db, server.id, server);
-          if (!historyInfo.partitionId) continue;
-          const rangeStart = historyInfo.startTimestamp > 0 ? historyInfo.startTimestamp : null;
-          const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, rangeStart);
-          items.push({ server, startId, endId });
-        } catch (err) {
-          debug(`Server ${server.id} history 范围计算失败，跳过: ${err.message}`);
-        }
-      }
-
-      for (let offset = 0; offset < items.length; offset += DatabaseService.LATEST_QUERY_CHUNK_SIZE) {
-        const chunk = items.slice(offset, offset + DatabaseService.LATEST_QUERY_CHUNK_SIZE);
-        let batchResults;
-        try {
-          batchResults = await this.db.batch(chunk.map(item =>
-            this.db.prepare(
-              'SELECT * FROM metrics_history WHERE id >= ? AND id <= ? ORDER BY id DESC LIMIT 1'
-            ).bind(item.startId, item.endId)
-          ));
-        } catch (batchError) {
-          debug(`批量获取最新指标失败，回退逐台查询: ${batchError.message}`);
-          for (const item of chunk) {
-            const metrics = await this.getLatestMetrics(item.server.id, item.server);
-            if (metrics) result.set(item.server.id, metrics);
-          }
-          continue;
-        }
-        for (let index = 0; index < chunk.length; index++) {
-          const rows = batchResults[index] && batchResults[index].results;
-          if (rows && rows.length > 0) {
-            result.set(chunk[index].server.id, normalizeProbeMetricRow(rows[0]));
-          }
-        }
-      }
-
-      setLatestMetricsCache(result);
-      return result;
-    } catch (e) {
-      console.error('Failed to get latest metrics for all servers:', e);
-      const fallback = getLatestMetricsCache();
-      return fallback.cache || new Map();
-    }
-  }
-
-  async getLatestTimestampsForAllServers() {
-    const now = Date.now();
-    const cacheInfo = getLatestMetricsCache();
-    if (cacheInfo.cache && now - cacheInfo.time < cacheInfo.ttl) {
-      return DatabaseService.extractTimestampsFromMetricsCache(cacheInfo.cache);
-    }
-
-    const collected = new Map();
-    try {
-      const servers = await getAllServers(this.db);
-      if (servers.length === 0) return collected;
-
-      const items = [];
-      for (const server of servers) {
-        try {
-          const historyInfo = await getServerHistoryInfo(this.db, server.id, server);
-          if (!historyInfo.partitionId) continue;
-          const rangeStart = historyInfo.startTimestamp > 0 ? historyInfo.startTimestamp : null;
-          const { startId, endId } = getHistoryIdRange(historyInfo.partitionId, rangeStart);
-          items.push({ serverId: server.id, startId, endId });
-        } catch (err) {
-          debug(`Server ${server.id} history 范围计算失败，跳过: ${err.message}`);
-        }
-      }
-
-      for (let offset = 0; offset < items.length; offset += DatabaseService.LATEST_QUERY_CHUNK_SIZE) {
-        const chunk = items.slice(offset, offset + DatabaseService.LATEST_QUERY_CHUNK_SIZE);
-        const batchResults = await this.db.batch(chunk.map(item =>
-          this.db.prepare(
-            'SELECT timestamp FROM metrics_history WHERE id >= ? AND id <= ? ORDER BY id DESC LIMIT 1'
-          ).bind(item.startId, item.endId)
-        ));
-        for (let index = 0; index < chunk.length; index++) {
-          const rows = batchResults[index] && batchResults[index].results;
-          if (rows && rows.length > 0) {
-            collected.set(chunk[index].serverId, rows[0].timestamp);
-          }
-        }
-      }
-      return collected;
-    } catch (e) {
-      console.error('Failed to get latest timestamps for all servers:', e);
-      return cacheInfo.cache ? DatabaseService.extractTimestampsFromMetricsCache(cacheInfo.cache) : null;
-    }
-  }
-
-  async getMetricsHistory(serverId, hours, columns, server = null, longHistoryPoints = DEFAULT_LONG_HISTORY_POINTS) {
-    const now = Date.now();
-    const cacheDuration = getCacheDuration(hours);
-    const queryHours = Math.min(hours, 168);
-    const configuredLongHistoryPoints = queryHours > 1
-      ? Number(normalizeLongHistoryPoints(longHistoryPoints))
-      : null;
-
-    const cached = getMetricsHistoryCache(serverId, hours, columns, configuredLongHistoryPoints);
-    if (cached && now - cached.timestamp < cacheDuration) {
-      debug(`[History] CACHE HIT: ${serverId}, hours: ${hours}`);
-      return cached.data;
-    }
-
-    const totalMs = queryHours * 60 * 60 * 1000;
-    const cutoff = now - queryHours * 60 * 60 * 1000;
-    const historyInfo = await getServerHistoryInfo(this.db, serverId, server);
-    const queryStart = Math.max(cutoff, historyInfo.startTimestamp);
-
-    const nowDate = new Date(now);
-    const day = nowDate.getUTCDay();
-    const thisSunday = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - day));
-    const needOldTable = queryStart < thisSunday.getTime();
-
-    const oldTableExists = needOldTable && !!await this.db.prepare(
-      `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
-    ).first();
-
-    if (!historyInfo.partitionId) {
-      throw new Error('Invalid history partition id');
-    }
-    const idRange = getHistoryIdRange(historyInfo.partitionId, queryStart);
-
-    const columnList = columns.split(',').map(c => c.trim()).filter(c => c && c !== 'timestamp');
-    const sourceColumns = columnList.join(', ');
-    const lossColumns = columnList.filter(col => DatabaseService.LOSS_AGG_COLUMNS.has(col));
-    const lossWindowExpressions = lossColumns.map(col =>
-      `MAX(${col}) OVER (PARTITION BY bucket) AS ${col}_bucket_max`
-    );
-    const selectColumns = columnList.map(col =>
-      DatabaseService.LOSS_AGG_COLUMNS.has(col) ? `${col}_bucket_max AS ${col}` : col
-    );
-
-    const useSparseSampling = shouldUseSparseHistorySampling(queryHours);
-    const sparseQueryEnd = Math.floor(now / 1000) * 1000 + 1000;
-    const maxPoints = queryHours > 1
-      ? configuredLongHistoryPoints
-      : DatabaseService.DEFAULT_HISTORY_MAX_POINTS;
-    const samplingDurationMs = useSparseSampling
-      ? Math.max(0, sparseQueryEnd - queryStart)
-      : totalMs;
-    const intervalMs = Math.max(10_000, Math.ceil(samplingDurationMs / maxPoints));
-
-    debug(
-      '[History]',
-      'server:', serverId,
-      'hours:', hours,
-      'queryHours:', queryHours,
-      'maxPoints:', maxPoints,
-      'interval:', intervalMs,
-      'cutoff:', new Date(cutoff).toISOString(),
-      'start:', new Date(queryStart).toISOString()
-    );
-
-    let rawResult;
-
-    if (useSparseSampling) {
-      const queryEnd = sparseQueryEnd;
-      const firstRangeEnd = Math.min(
-        queryEnd,
-        queryStart + intervalMs
-      );
-      const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
-      const sparseQuery = buildSparseHistoryQuery({
-        columns: sourceColumns,
-        queryStart,
-        queryEnd,
-        firstRangeEnd,
-        intervalMs,
-        idPrefix,
-        oldTableExists,
-        tableBoundary: thisSunday.getTime()
-      });
-
-      debug('[History] SPARSE ID SAMPLING:', sparseQuery.bindValues.length, 'bind values');
-      const sparseResult = await this.db.prepare(sparseQuery.sql).bind(...sparseQuery.bindValues).all();
-      rawResult = {
-        ...sparseResult,
-        results: sparseResult.results
-          .filter(row => row.sample_json)
-          .map(row => JSON.parse(row.sample_json))
-      };
-    } else {
-      const sourceQueries = [];
-      const bindValues = [];
-
-      sourceQueries.push(DatabaseService.buildHistorySourceQuery('metrics_history', sourceColumns));
-      bindValues.push(idRange.startId, idRange.endId);
-
-      if (oldTableExists) {
-        debug('[History] 跨周查询，合并 metrics_history 和 metrics_history_old');
-        sourceQueries.push(DatabaseService.buildHistorySourceQuery('metrics_history_old', sourceColumns));
-        bindValues.push(idRange.startId, idRange.endId);
-      }
-
-      bindValues.push(intervalMs);
-
-      rawResult = await this.db.prepare(`
-        WITH history_rows AS (
-          ${sourceQueries.join('\n        UNION ALL\n')}
-        ),
-        bucketed AS (
-          SELECT
-            timestamp,
-            ${sourceColumns},
-            CAST(timestamp / ? AS INTEGER) AS bucket
-          FROM history_rows
-        ),
-        sampled AS (
-          SELECT
-            timestamp,
-            ${sourceColumns},
-            ROW_NUMBER() OVER (
-              PARTITION BY bucket
-              ORDER BY timestamp
-            ) AS rn
-            ${lossWindowExpressions.length ? `,\n          ${lossWindowExpressions.join(',\n          ')}` : ''}
-          FROM bucketed
-        )
-        SELECT timestamp, ${selectColumns.join(', ')}
-        FROM sampled
-        WHERE rn = 1
-      `).bind(...bindValues).all();
-    }
-
-    const result = rawResult.results.map(row => attachDiskMetricsObject(normalizeProbeMetricRow({
-      ...row,
-      timestamp: Number(row.timestamp)
-    })));
-
-    result.sort((a, b) => a.timestamp - b.timestamp);
-
-    setMetricsHistoryCache(serverId, hours, columns, result, configuredLongHistoryPoints);
-
-    debug(`[History] FINAL: ${result.length}, interval: ${intervalMs}ms`);
-
-    return result;
-  }
-
-  async getDashboardLatencyHistory(servers, options = {}) {
-    const serverList = Array.isArray(servers) ? servers : [];
-    const serverIds = serverList.map(server => String(server?.id || '').trim()).filter(Boolean);
-    if (serverIds.length === 0) return new Map();
-
-    const result = new Map();
-    try {
-      const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
-      const useCache = options.cache !== false;
-      const serversToFetch = [];
-
-      if (useCache) {
-        DatabaseService.pruneDashboardLatencyHistoryCache(now);
-      }
-
-      for (const server of serverList) {
-        const serverId = String(server?.id || '').trim();
-        if (!serverId) continue;
-
-        const cached = DatabaseService.dashboardLatencyHistoryCache.get(serverId);
-        if (useCache && cached && now - cached.cachedAt < DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS) {
-          result.set(serverId, cached.window);
-          continue;
-        }
-        serversToFetch.push(server);
-      }
-
-      if (serversToFetch.length === 0) return result;
-
-      const points = Number.isInteger(options.points) && options.points > 0
-        ? options.points
-        : DASHBOARD_LATENCY_WINDOW_POINTS;
-      const queryEnd = Math.floor(now / 1000) * 1000 + 1000;
-      const cutoff = now - DASHBOARD_LATENCY_WINDOW_HOURS * 60 * 60 * 1000;
-      const columns = DatabaseService.DASHBOARD_LATENCY_COLUMNS.join(', ');
-
-      const nowDate = new Date(now);
-      const day = nowDate.getUTCDay();
-      const thisSunday = new Date(Date.UTC(nowDate.getUTCFullYear(), nowDate.getUTCMonth(), nowDate.getUTCDate() - day));
-      const oldTableExists = cutoff < thisSunday.getTime() && !!await this.db.prepare(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name='metrics_history_old'`
-      ).first();
-
-      const fetchServerLatency = async server => {
-        const serverId = String(server?.id || '').trim();
-        if (!serverId) return;
-
-        try {
-          const historyInfo = await getServerHistoryInfo(this.db, serverId, server);
-          if (!historyInfo.partitionId) {
-            result.set(serverId, { ping: [], loss: [] });
-            return;
-          }
-
-          const queryStart = cutoff;
-          if (queryStart >= queryEnd) {
-            result.set(serverId, { ping: [], loss: [] });
-            return;
-          }
-
-          const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
-          const idPrefix = getHistoryIdRange(historyInfo.partitionId).startId;
-          const querySparseHistory = async queryColumns => {
-            const sparseQuery = buildSparseHistoryQuery({
-              columns: queryColumns,
-              queryStart,
-              queryEnd,
-              firstRangeEnd: Math.min(queryEnd, queryStart + intervalMs),
-              intervalMs,
-              idPrefix,
-              oldTableExists,
-              tableBoundary: thisSunday.getTime(),
-              sampleOrder: 'DESC'
-            });
-            return this.db.prepare(sparseQuery.sql).bind(...sparseQuery.bindValues).all();
-          };
-
-          const rawResult = await querySparseHistory(columns);
-          const window = DatabaseService.normalizeDashboardLatencyWindow(rawResult.results, { queryStart, intervalMs, points });
-          result.set(serverId, window);
-          if (useCache) {
-            DatabaseService.dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window });
-          }
-        } catch (e) {
-          debug('[DashboardLatency] query failed:', serverId, e?.message || e);
-          const empty = { ping: [], loss: [] };
-          result.set(serverId, empty);
-          if (useCache) {
-            DatabaseService.dashboardLatencyHistoryCache.set(serverId, { cachedAt: now, window: empty });
-          }
-        }
-      };
-
-      for (let offset = 0; offset < serversToFetch.length; offset += DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY) {
-        await Promise.all(
-          serversToFetch
-            .slice(offset, offset + DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY)
-            .map(fetchServerLatency)
-        );
-      }
-
-      return result;
-    } catch (err) {
-      debug('[DashboardLatency] global query failed:', err?.message || err);
-      return result;
-    }
-  }
 }

@@ -1,4 +1,4 @@
-import { DatabaseService } from '../database/DatabaseService.js';
+import { readLimitedJson } from '../utils/requestBody.js';
 import { getServerDetail, clearServerDetailCache, patchServerDetailCache, clearServersListCache, getAllServers } from '../utils/cache.js';
 import { NotificationService } from '../services/NotificationService.js';
 import { getNotificationMessages } from '../services/notificationMessages.js';
@@ -9,14 +9,10 @@ import {
   mergeMetricsIntoServer,
   coerceNumericMetricFields
 } from '../utils/metrics.js';
-import { createErrorResponse, createUnauthorizedResponse, createBadRequestResponse } from '../utils/errors.js';
+import { AppError, createErrorResponse, createUnauthorizedResponse, createBadRequestResponse } from '../utils/errors.js';
 import { ensureServerOptimization, getNextServerHistoryPartitionId, HISTORY_MAX_PARTITION_ID } from '../database/indexOptimization.js';
 import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSiteSettings, normalizeBooleanSetting } from '../utils/settings.js';
 import { cacheLatestReportUpdate } from '../utils/latestReportCache.js';
-import {
-  hasRecentFrontendRealtimeActivity,
-  markFrontendRealtimeActive
-} from '../utils/realtimeBroadcastGate.js';
 import { checkWebSocketAuth } from '../middleware/auth.js';
 import {
   AGENT_CONFIG_MD5_HEADER,
@@ -32,11 +28,8 @@ import {
   HISTORY_METRIC_AGGREGATION_POLICY
 } from '../utils/historyFields.js';
 import {
-  UPDATE_FRONTEND_SUBSCRIBER_CHECK_INTERVAL_MS,
   UPDATE_MAX_BATCH_SAMPLES,
   UPDATE_MAX_REQUEST_BYTES,
-  UPDATE_REALTIME_BATCH_WINDOW_MS,
-  UPDATE_RESOURCE_ALERT_BATCH_WINDOW_MS
 } from '../utils/config.js';
 
 /**
@@ -108,13 +101,6 @@ export class UpdateController {
   }
   return headers;
 }
-  static batchQueue = new Map();
-  static flushingPromise = null;
-  static flushTimer = null;
-  static flushDueAt = 0;
-  static resolveFlushingPromise = null;
-  static frontendSubscriberSnapshot = { checkedAt: 0, count: 0 };
-
   static normalizeTimestamp(value, fallback = Date.now()) {
   const ts = Number(value);
   if (!Number.isFinite(ts) || ts <= 0) return fallback;
@@ -190,9 +176,8 @@ export class UpdateController {
   // Agent 按时间顺序追加样本；确认递增时才预截断，避免超大数组在服务端做全量 map/sort。
   // 乱序输入不预截断，交给末尾的 sort + slice 兜底，避免丢掉最新样本。
   const sampleTs = item => Number(item?.ts ?? item?.timestamp ?? item?.metrics?.timestamp);
-  const firstTs = sampleTs(rawSamples[0]);
-  const lastTs = sampleTs(rawSamples[rawSamples.length - 1]);
-  const chronological = Number.isFinite(firstTs) && Number.isFinite(lastTs) && firstTs <= lastTs;
+  const chronological = rawSamples.every((sample, index) => Number.isFinite(sampleTs(sample)) &&
+    (index === 0 || sampleTs(rawSamples[index - 1]) <= sampleTs(sample)));
   const boundedSamples = chronological && rawSamples.length > UPDATE_MAX_BATCH_SAMPLES
     ? rawSamples.slice(-UPDATE_MAX_BATCH_SAMPLES)
     : rawSamples;
@@ -393,92 +378,6 @@ export class UpdateController {
   });
 }
 
-  static queueBroadcastSamples(serverId, samples) {
-  if (!serverId || !Array.isArray(samples) || samples.length === 0) return;
-  const existing = UpdateController.batchQueue.get(serverId);
-  const merged = existing && Array.isArray(existing.samples)
-    ? existing.samples.concat(samples)
-    : samples;
-  UpdateController.batchQueue.set(serverId, { samples: merged.slice(-UPDATE_MAX_BATCH_SAMPLES) });
-}
-
-  static async getCachedFrontendSubscriberCount(env) {
-  const now = Date.now();
-  if (now - UpdateController.frontendSubscriberSnapshot.checkedAt < UPDATE_FRONTEND_SUBSCRIBER_CHECK_INTERVAL_MS) {
-    return UpdateController.frontendSubscriberSnapshot.count;
-  }
-
-  let count = 0;
-  try {
-    const id = env.METRICS_BROADCASTER.idFromName('global');
-    const stub = env.METRICS_BROADCASTER.get(id);
-    const response = await stub.fetch('http://internal/health', {
-      headers: { 'Cache-Control': 'no-store' }
-    });
-    if (response.ok) {
-      const data = await response.json();
-      count = Math.max(0, Number(data?.subscribers) || 0);
-    }
-  } catch (e) {
-    console.warn('[broadcast] subscriber check failed:', e?.message || e);
-  }
-
-  UpdateController.frontendSubscriberSnapshot = { checkedAt: now, count };
-  return count;
-}
-
-  static hasResourceAlertNotificationTarget(settings = {}) {
-  if (normalizeBooleanSetting(settings.notification_webhook_enabled) === 'true') {
-    return String(settings.notification_webhook_url || '').trim().length > 0;
-  }
-  return String(settings.tg_bot_token || '').trim().length > 0;
-}
-
-  static async getRealtimeBatchIntent(env) {
-  if (!env?.METRICS_BROADCASTER) return null;
-
-  let resourceAlertEnabled = false;
-  try {
-    const settings = await loadSiteSettings(env.DB);
-    resourceAlertEnabled = UpdateController.hasResourceAlertNotificationTarget(settings) && getResourceAlertConfig(settings).enabled;
-  } catch (e) {
-    console.warn('[broadcast] failed to load realtime gate settings:', e?.message || e);
-  }
-
-  const subscribers = await UpdateController.getCachedFrontendSubscriberCount(env);
-  if (subscribers > 0) {
-    return {
-      maintainState: resourceAlertEnabled
-    };
-  }
-
-  if (resourceAlertEnabled) {
-    return {
-      maintainState: true
-    };
-  }
-
-  return {
-    maintainState: false,
-    latestReportOnly: true
-  };
-}
-
-  static async getBatchFlushDelayMs(env, now = Date.now()) {
-  if (hasRecentFrontendRealtimeActivity(now)) return UPDATE_REALTIME_BATCH_WINDOW_MS;
-
-  try {
-    const settings = await loadSiteSettings(env.DB);
-    if (UpdateController.hasResourceAlertNotificationTarget(settings) && getResourceAlertConfig(settings).enabled) {
-      return UPDATE_RESOURCE_ALERT_BATCH_WINDOW_MS;
-    }
-  } catch (e) {
-    console.warn('[broadcast] failed to load batch delay settings:', e?.message || e);
-  }
-
-  return UPDATE_REALTIME_BATCH_WINDOW_MS;
-}
-
   static buildAgentWssStateHeaders(settings = {}, now = Date.now()) {
   const state = getWssReportScheduleState(settings, now);
   return {
@@ -520,87 +419,31 @@ export class UpdateController {
   });
 }
 
-  static async _flushBatch(env) {
-  if (UpdateController.batchQueue.size === 0) return;
-
-  // 原子性地取出当前队列，避免并发写入干扰
-  const queue = UpdateController.batchQueue;
-  UpdateController.batchQueue = new Map();
-
-  const updates = [];
-  for (const [serverId, item] of queue) {
-    if (item && Array.isArray(item.samples) && item.samples.length > 0) {
-      updates.push({ serverId, samples: item.samples });
-    } else if (item) {
-      const filtered = Object.assign({}, item);
-      BROADCAST_DELETE_FIELDS.forEach(field => delete filtered[field]);
-      updates.push({ serverId, payload: filtered });
-    }
-  }
-
-  if (updates.length === 0) return;
-
-  try {
-    const intent = await UpdateController.getRealtimeBatchIntent(env);
-    if (!intent) return;
-
-    const id = env.METRICS_BROADCASTER.idFromName('global');
-    const stub = env.METRICS_BROADCASTER.get(id);
-    await stub.fetch('http://internal/batch-push', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        updates,
-        maintainState: intent.maintainState,
-        latestReportOnly: intent.latestReportOnly === true
-      })
-    });
-  } catch (e) {
-    console.warn('[broadcast] batch push failed:', e.message || e);
-  }
-}
-
-  static _ensureBatchFlush(env) {
-  const now = Date.now();
-  if (UpdateController.flushingPromise) {
-    if (
-      hasRecentFrontendRealtimeActivity(now) &&
-      UpdateController.flushDueAt > now + UPDATE_REALTIME_BATCH_WINDOW_MS
-    ) {
-      if (UpdateController.flushTimer) clearTimeout(UpdateController.flushTimer);
-      UpdateController.flushDueAt = now + UPDATE_REALTIME_BATCH_WINDOW_MS;
-      UpdateController.flushTimer = setTimeout(() => {
-        const resolve = UpdateController.resolveFlushingPromise;
-        UpdateController.flushTimer = null;
-        UpdateController.flushDueAt = 0;
-        UpdateController.resolveFlushingPromise = null;
-        UpdateController._flushBatch(env).finally(() => {
-          UpdateController.flushingPromise = null;
-          if (resolve) resolve();
+  static async commitReport(env, update, reportId = null, maintainState = false) {
+    if (!env.METRICS_BROADCASTER) throw new AppError('Metrics storage unavailable', 503);
+    const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
+    const body = JSON.stringify({ updates: [update], reportId, maintainState });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await stub.fetch('http://internal/batch-push', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+          signal: AbortSignal.timeout(5000)
         });
-      }, UPDATE_REALTIME_BATCH_WINDOW_MS);
+        if (response.ok) {
+          const result = await response.json();
+          if (result.ok === true && result.persisted === true) return;
+          throw new Error('Metrics commit was not confirmed');
+        }
+        if (response.status >= 400 && response.status < 500) {
+          throw new AppError('Metrics report rejected', response.status);
+        }
+      } catch (error) {
+        if (error instanceof AppError && error.code < 500) throw error;
+      }
+      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
     }
-    return UpdateController.flushingPromise;
+    throw new AppError('Metrics storage unavailable; retry report', 503);
   }
-
-  UpdateController.flushingPromise = UpdateController.getBatchFlushDelayMs(env, now).then(delayMs => new Promise(resolve => {
-    UpdateController.resolveFlushingPromise = resolve;
-    const normalizedDelayMs = Math.max(0, Number(delayMs) || UPDATE_REALTIME_BATCH_WINDOW_MS);
-    UpdateController.flushDueAt = Date.now() + normalizedDelayMs;
-    UpdateController.flushTimer = setTimeout(() => {
-      const currentResolve = UpdateController.resolveFlushingPromise;
-      UpdateController.flushTimer = null;
-      UpdateController.flushDueAt = 0;
-      UpdateController.resolveFlushingPromise = null;
-      UpdateController._flushBatch(env).finally(() => {
-        UpdateController.flushingPromise = null;
-        if (currentResolve) currentResolve();
-      });
-    }, normalizedDelayMs);
-  }));
-
-  return UpdateController.flushingPromise;
-}
 
   static checkSecretAuthorization(secret, serverDetail, settings, env) {
   const isMaster = secret === env?.API_SECRET;
@@ -677,7 +520,7 @@ export class UpdateController {
   static async handleUpdate(request, env, ctx) {
   try {
     // 必须在 request.json() 之前：超大 body 的解析本身就可能耗尽 Worker CPU。
-    // 注意这是防呆而非硬上限：chunked 或缺少 Content-Length 的请求会跳过该检查。
+    // Content-Length is an early rejection; readLimitedJson also bounds streaming bodies.
     const declaredLength = UpdateController.getDeclaredContentLength(request);
     if (declaredLength !== null && declaredLength > UPDATE_MAX_REQUEST_BYTES) {
       console.warn('[Update] 413 Payload too large:', {
@@ -687,7 +530,7 @@ export class UpdateController {
       return UpdateController.createPayloadTooLargeResponse();
     }
 
-    const data = await request.json();
+    const data = await readLimitedJson(request, UPDATE_MAX_REQUEST_BYTES);
     const { id, secret } = data;
     const rawId = typeof id === 'string' ? id.trim() : '';
 
@@ -951,7 +794,6 @@ export class UpdateController {
     // 获取最后一条插入（如果是批量数据，取最后一个样本）
     const latestSample = samples[samples.length - 1];
     const latestMetrics = UpdateController.getReportMetrics(data, latestSample);
-    const isBatchBackfill = data.batch === true && samples.length > 1;
 
     // 当探针未提供或仅上报可达性标记（0 或 1）时，通过 Cloudflare 连接 IP 自动补全公网 IP
     const clientIp = request.headers.get('cf-connecting-ip') || '';
@@ -967,15 +809,13 @@ export class UpdateController {
       }
     }
 
-    // D1 入库已完全移除，指标数据纯由 DO 内存与 DO Storage 接管（方案 A）
+    // 交给 DO SQLite 事务保存；未确认写入时由 Agent 重试。
     const broadcastSamples = UpdateController.toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);
 
+    const maintainAlertState = NotificationService.hasNotificationTarget(settings) && getResourceAlertConfig(settings).enabled;
+    await UpdateController.commitReport(env, { serverId, samples: broadcastSamples }, data.reportId ?? null, maintainAlertState);
     cacheLatestReportUpdate(serverId, broadcastSamples, Date.now());
-    // 加入批量队列，由后台定时任务统一推送到 DO
-    UpdateController.queueBroadcastSamples(serverId, broadcastSamples);
-    if (ctx && ctx.waitUntil) {
-      ctx.waitUntil(UpdateController._ensureBatchFlush(env));
-      // 月流量阈值告警：复用已加载的 serverDetail 与 latestMetrics，非阻塞后台执行
+    if (ctx?.waitUntil) {
       ctx.waitUntil(NotificationService.evaluateTrafficAlert(env, serverDetail, latestMetrics, {
         patchCache: (sid, value) => patchServerDetailCache(sid, { traffic_alert_state: value })
       }));
@@ -1043,6 +883,7 @@ export class UpdateController {
       });
     }
   } catch (e) {
+    if (e instanceof AppError && e.code === 413) return UpdateController.createPayloadTooLargeResponse();
     return createErrorResponse(e);
   }
 }
@@ -1101,9 +942,6 @@ export class UpdateController {
   }
 
   const response = await UpdateController.forwardWebSocketUpgrade(request, env, '/ws', '[ws]');
-  if (response?.status === 101) {
-    markFrontendRealtimeActive();
-  }
   return response;
 }
 

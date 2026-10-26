@@ -13,6 +13,7 @@ export const NUMERIC_METRIC_FIELDS = Object.freeze([
 ]);
 
 export const HISTORY_ALL_QUERY_COLUMNS = Object.freeze([
+  'peaks', 'averages', 'ram_percent', 'swap_percent', 'disk_percent', 'disk',
   'cpu',
   'gpu_info',
   'ram_total',

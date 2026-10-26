@@ -21,7 +21,7 @@ A lightweight multi-server monitoring dashboard built on Cloudflare Workers, D1,
 
 ## Overview
 
-Serverless Monitor is a server monitoring system designed for Cloudflare Workers. Each server runs an Agent that reports metrics to a Worker. The Worker stores data in D1 and pushes realtime updates through Durable Objects and WebSocket, providing free-hosted, low-maintenance realtime monitoring.
+Serverless Monitor is a server monitoring system designed for Cloudflare Workers. Each server runs an Agent that reports metrics to a Worker. Configuration lives in D1; metrics commit to Durable Object SQLite before acknowledgement and realtime WebSocket delivery, providing free-hosted, low-maintenance realtime monitoring.
 
 It supports mainstream Linux distributions, Alpine Linux, OpenWrt, macOS, Synology DSM, Feiniu fnOS, Windows, and similar systems.
 
@@ -51,7 +51,7 @@ Security is stricter by design: the Agent only reports metrics one way, does not
 
 Compared with traditional controller-style monitoring tools, Serverless Monitor is designed for low cost, low maintenance, and security-first operation:
 
-- Free hosting: the dashboard, API, database, and realtime push run on Cloudflare and are designed around free-tier limits; the default 60-second reporting interval supports roughly 60 servers, and changing it to 120 seconds can theoretically double that capacity.
+- Free hosting: the dashboard, API, database, and realtime push run on Cloudflare and are designed around free-tier limits; capacity depends on HTTP/WSS reporting intervals, concurrent visitors, history queries, and actual Cloudflare quotas. Check usage in the admin panel.
 - Safer one-way reporting: no WebSSH, no remote command delivery, and no controller channel; the Agent only reports metrics to the Worker.
 - Practical feature coverage: realtime metrics, history charts, maps, offline notifications, resource alerts, expiration reminders, theme store, multi-language UI, and mobile support are built in.
 - Dynamic Agent config delivery: ping nodes, collect interval, report interval, network interfaces, traffic reset day, upload/download traffic correction, and similar parameters can be changed from the admin panel and picked up by the Agent later; Worker URL, `API_SECRET`, and the auto-update switch require running the install command again.
@@ -64,7 +64,7 @@ Compared with traditional controller-style monitoring tools, Serverless Monitor 
 | --- | --- |
 | Realtime monitoring | CPU, GPU, memory, swap, disk, disk IO, network, connections, process count, load average, uptime |
 | History | 7-day charts, long-range sampling, realtime network speed, monthly traffic and correction |
-| Network quality | Latency and packet loss tracking for CT, CU, CM, and BGP nodes; when three-net details are enabled, the dashboard samples up to 20 real points from the last 2 hours of D1 history and caches them for 5 minutes |
+| Network quality | Latency and packet loss tracking for CT, CU, CM, and BGP nodes; when three-net details are enabled, the dashboard builds 20 latency/loss slots from the last 3 hours of DO SQLite history |
 | Dashboard views | Bar chart, ring chart, table, and map views for desktop and mobile |
 | Admin panel | Server CRUD, drag sorting, hidden servers, import/export, batch delete, database maintenance |
 | Cross-platform Agent | Mainstream Linux, Alpine Linux, OpenWrt, Synology DSM, Feiniu fnOS, FreeBSD, macOS, Windows; Rust high-performance Agent |
@@ -75,15 +75,15 @@ Compared with traditional controller-style monitoring tools, Serverless Monitor 
 | Widget | iOS Scriptable widget script for quick mobile status checks |
 | Security | API Secret, admin password, JWT, Turnstile, CORS, CSP allowlists |
 | Theme ecosystem | Built-in theme, Mikus mode, theme store, third-party theme proxy and preview |
-| Cloudflare-friendly | Monthly table rotation, sampled history queries, caching, and rate controls for free-tier usage |
+| Cloudflare-friendly | Ten-second/minute aggregation, compressed hourly blocks, seven-day retention, caching, and WebSocket hibernation |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
   Agent["Server Agent<br/>Rust"] -->|"POST /update"| Worker["Cloudflare Worker"]
-  Worker --> D1["Cloudflare D1<br/>servers / settings / history"]
-  Worker <--> DO["Durable Object<br/>WebSocket broadcast"]
+  Worker --> D1["Cloudflare D1<br/>servers / settings"]
+  Worker <--> DO["Durable Object<br/>SQLite history / WebSocket"]
   Worker --> Assets["Vue Dashboard<br/>Admin Panel"]
   Browser["Browser / Mobile / Widget"] <--> Worker
 ```
@@ -93,9 +93,11 @@ Core flow:
 1. Add a server in the admin panel and copy the install command.
 2. Install the Agent on the target server.
 3. The Agent reports metrics to the Worker at the configured interval.
-4. The Worker verifies `API_SECRET`, writes to D1, and broadcasts realtime data through Durable Objects.
+4. The Worker verifies the Agent Secret, commits metrics in a Durable Object SQLite transaction, acknowledges the report, and broadcasts realtime data.
 5. The dashboard, server detail page, admin panel, and iOS widget read from the same API.
 
+
+Storage: ten-second aggregates are available for one hour, and minute statistics for seven days. History, latest reports and retry journals share compressed hourly SQLite blocks. Nine chart ranges select their own resolution; explicit point-count settings remain supported. Existing DO snapshots and minute SQL data migrate lazily; previously deleted history cannot be recovered. HTTP returns 503 when persistence is unconfirmed; WSS replies with `accepted:false, persisted:false`. Agents must retain and retry those reports. See the [sampling and compression design](docs/metrics-storage.md).
 
 Recent changes:
 
@@ -216,7 +218,7 @@ See [serverless-monitor-agent](https://github.com/veegn/serverless-monitor-agent
 | `-rx_correction` | Download traffic correction in GB | Empty |
 | `-tx_correction` | Upload traffic correction in GB | Empty |
 
-`-collect_interval` controls local sampling. `-interval` controls reporting frequency. Shorter intervals increase Workers requests and D1 writes.
+`-collect_interval` controls local sampling. `-interval` controls reporting frequency. Shorter intervals increase Workers / DO requests and SQLite writes.
 
 ### Non-root Install (Recommended)
 
@@ -488,13 +490,13 @@ After upgrading from older versions to versions with GPU, disk IO, packet loss, 
 | Cron | Description |
 | --- | --- |
 | `*/1 * * * *` | Detect offline nodes/resource alerts every minute |
-| `0 * * * *` | Run hourly combined tasks, including monthly table rotation, old table cleanup, and expiration checks at the configured notification timezone/hour |
+| `0 * * * *` | Run hourly combined tasks, including legacy table cleanup, and expiration checks at the configured notification timezone/hour |
 
 ## Local Development
 
 ### Requirements
 
-- Node.js 18+
+- Node.js 22.19+
 - npm
 - Wrangler 4
 
@@ -502,7 +504,7 @@ After upgrading from older versions to versions with GPU, disk IO, packet loss, 
 
 ```bash
 # Install dependencies
-npm install
+npm ci
 
 # Create D1 database for the first time
 npx wrangler d1 create server-monitor-db
@@ -535,8 +537,8 @@ API_SECRET=123456
 ### Mock Data
 
 ```bash
-node test/generate-sql.js
-wrangler d1 execute server-monitor-db --file=test/mock-data.sql
+npm run test:all
+node --test test/runtime.test.js
 ```
 
 See [test/README.md](test/README.md) for more local testing notes.
@@ -602,7 +604,7 @@ Due to the current Cloudflare version issue, you may need to temporarily modify 
 
 ### Is the D1 free quota enough?
 
-The default 60-second reporting interval is designed for roughly 60+ servers. Increasing the interval to 120 seconds reduces writes further. Reads mainly come from frontend visits and history queries; caching, sampling, and login restrictions reduce usage. Always check the current Cloudflare dashboard for actual quota numbers.
+D1 stores configuration and alert state; metric writes and history queries use DO SQLite. Reporting frequency, concurrent WebSocket visitors, and retained history affect Workers / DO usage. Node capacity cannot be inferred from D1 quotas alone; check actual Cloudflare dashboard usage.
 
 ### Background image does not show
 

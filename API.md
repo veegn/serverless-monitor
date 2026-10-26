@@ -72,6 +72,17 @@
 
 ***
 
+## 当前存储与确认契约
+
+- D1 保存服务器配置、站点设置和告警状态；实时指标与历史保存在 DO SQLite。
+- 最近 1 小时保留 10 秒聚合，7 天保留分钟统计；历史、最新报告与去重记录按小时压缩存储。查询合并区间内全部统计并限制点数；跨批次保留 sum/count/max/last，重叠时间戳不会重复计数。
+- HTTP `/update` 仅在事务提交成功后返回 200/204，存储不可用返回 503，`reportId` 内容冲突返回 409。512KB 上限同样适用于没有 Content-Length 的流式请求。
+- WSS 报告 ACK 的 `accepted:true, persisted:true` 表示 SQLite 已提交。失败返回 `accepted:false, persisted:false, retryAfterMs:1000`，Agent 应保留原报告并重试。`nextD1WriteAfterMs` 为兼容旧 Agent 保留，固定返回 0。
+- `reportId` 最长 128 字符；相同 ID 与内容在持久化的 10 分钟去重窗口内可安全重试（包括 Worker/DO 重启后）；相同时间戳样本也不会重复聚合。
+- WebSocket 的首次回放、实时广播和订阅变更均限制在服务端授权节点集合内；隐藏节点仅管理员可见。权限变更会关闭现有订阅，前端重新连接获取新权限。
+- 离线检测使用持久化的报告接收时间，不受前端 5 分钟回放缓存失效影响；读取失败跳过当次检测。冷启动且配置读取失败时，受保护接口返回 503。
+- 旧 DO 快照按节点首次访问自动迁移；已被旧版本删除的历史无法恢复。
+
 ## 0. 通用规范
 
 ### 0.1 鉴权机制
@@ -416,16 +427,16 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
   - `500 { "error": "WebSocket error", "code": 500 }`：Worker 转发至 DO 失败
 - 上报成功：服务端发送 ack，不关闭连接。
   ```json
-  { "type": "ack", "ts": 1737638343000, "persisted": true, "nextD1WriteAfterMs": 60000, "nextWssReportAfterMs": 60000 }
+  { "type": "ack", "ts": 1737638343000, "persisted": true, "nextD1WriteAfterMs": 0, "nextWssReportAfterMs": 60000 }
   ```
-  `persisted` 表示本条消息是否触发 D1 历史写入；`nextD1WriteAfterMs` 是距离下一次允许写入 D1 的最短等待时间。WSS 首条成功指标会立即写入一次 D1，后续按该服务器 `report_interval` 控制写入频率（允许值沿用配置：`30/60/120/180` 秒；异常回退 `60` 秒）。`nextWssReportAfterMs` 是服务端建议的下一次 WSS 上报间隔：有前端实时订阅时使用服务器 `wss_report_interval`；无前端访问时使用 `report_interval`，但最低为 `60` 秒，不区分资源告警缓存是否活跃。缺失或非法的 WSS 间隔回退为 `2` 秒。
+  `persisted` 表示本次报告已提交到 DO SQLite；`nextD1WriteAfterMs` 为兼容旧 Agent 固定返回 0。`nextWssReportAfterMs` 是服务端建议的下一次 WSS 上报间隔：有前端实时订阅时使用服务器 `wss_report_interval`；无前端访问时使用 `report_interval`，但最低为 `60` 秒，不区分资源告警缓存是否活跃。缺失或非法的 WSS 间隔回退为 `2` 秒。
   新版 WSS Agent 可在握手 URL query 中携带 `config_schema=6` / `config_md5=<md5>`，也兼容握手 Header `X-Agent-Config-Schema: 6` 与 `X-Agent-Config-Md5` 记录当前配置状态；当某次上报消息携带 `config_schema: 6` / `config_md5` 时，ack 会同时返回动态配置协商字段。schema `3` / `4` / `5` Agent 仍会收到各自版本的兼容配置：
   ```json
   {
     "type": "ack",
     "ts": 1737638343000,
     "persisted": false,
-    "nextD1WriteAfterMs": 30000,
+    "nextD1WriteAfterMs": 0,
     "nextWssReportAfterMs": 2000,
     "config_schema": 6,
     "config_md5": "b4d7c0d...",
@@ -477,13 +488,13 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 **WebSocket 计费注意**
 
 - 建立 `wss://.../update` 连接需要一次 `GET + Upgrade`，该握手按一次 Workers request 计入。
-- 连接建立后的 Agent 上报消息由 Durable Object 标准 WebSocket API 接收，不使用 Hibernation API 接管 `/update` 连接；它们作为 Durable Objects WebSocket incoming messages 计量，Cloudflare 计费口径按 `20:1` 折算为 DO requests。
-- 该模式避免高频 Agent 指标消息表现为 hibernation wakeup，但只要 Agent 长连接存在，DO 会保持非休眠状态并产生 duration（GB-s）。前端订阅 `/api/ws` 仍使用 WebSocket Hibernation API。
+- Agent 与前端订阅连接均使用 DO WebSocket Hibernation API；内置 ping/pong 可由自动响应处理。实际用量以 Cloudflare 控制台为准。
+- 指标消息会执行鉴权、SQLite 写入和广播；空闲连接可休眠。
 - 因此，Agent 应保持长连接；不要每次采样都断开重连。错误 `id` / `secret` 当前在 DO 消息阶段返回错误帧并关闭，避免每次上报都走 Worker 401。
 
 **副作用**
 
-1. `POST /update` 的 `metrics_history` 只写入本次请求中最新的一个样本；`wss://.../update` 首条成功指标立即写入一次，后续按服务器 `report_interval` 最多写入一次 D1。
+1. HTTP 和 WSS 上报统一在 DO SQLite 事务中保存最新状态与分钟聚合；只有事务成功提交后才确认报告。
 2. 触发 Durable Object `MetricsBroadcaster` 内部广播，统一发送 `{type:"batchUpdate", ts, updates:[...]}` 格式，前端按样本时间逐个回放。
 3. 写入 `request.cf.country`（或 `cf-ipcountry` Header）作为该条记录的 `region` 字段。~~服务端会统一转大写。~~ **2026-07-26 修订**：当前按原值入库；Cloudflare 的国家代码通常为大写，但自定义回退 Header 不会被规范化。
 
@@ -558,7 +569,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 | `last_agent_version` | string\|null | **仅登录时出现**；远程最新 Agent 版本，来源为 GitHub `version.json`，后端缓存 5 分钟 |
 | `theme_options`      | object       | 第三方主题自定义配置；未配置时为空对象，匿名请求也会返回 |
 | `frontend_ws_timeout_minutes` | number | 前端实时订阅连接超时分钟数，范围 `0`-`1440`；默认 `0` 表示不超时 |
-| `long_history_points` | number      | 长历史查询返回的采样点数，后台可选 `60`、`120`、`180`、`240` |
+| `long_history_points` | number\|string | 默认 `"auto"`，按时间范围选择间隔；后台仍可选 `60`、`120`、`180`、`240` 覆盖超过 1 小时的查询 |
 | `latency_window` | object      | `/api/servers` 的 `servers[].ping` / `servers[].loss` 窗口参数；`points` 为最多真实点数，`hours` 为回看小时数 |
 
 > ~~`X-Turnstile-Token` 携带且验证成功时，响应头会同步设置 `X-Turnstile-Verified`。~~ **2026-07-26 修订**：当前前端从响应体的 `turnstile_verified` 保存凭证；响应 Header 尚未实际写入。
@@ -665,12 +676,12 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 | 字段            | 说明                                                                    |
 | ------------- | --------------------------------------------------------------------- |
 | `servers`     | 已合并最新指标的服务器列表（按 `sort_order ASC`），未登录用户**自动过滤** **`is_hidden = '1'`** |
-| `latestReportUpdates` | 每台服务器最近一次批量上报的采样回放数据，用于新页面连续回放；来自 Worker/DO 内存状态，保留约 5 分钟，进程重启或 DO 回收后允许为空。REST 响应中的样本统一为 `{ ts, data }`，`data` 按探针批量采样包透传；内置探针默认只在普通采样点上报 `cpu`、`ram_total`、`ram_used`、`swap_total`、`swap_used`、`net_in_speed`、`net_out_speed` |
+| `latestReportUpdates` | 每台服务器最近一次批量上报的采样回放数据，用于新页面连续回放；DO SQLite 持久化并结合 Worker 内存缓存，展示窗口约 5 分钟，DO 重启后可恢复尚在窗口内的报告。REST 响应中的样本统一为 `{ ts, data }`，`data` 按探针批量采样包透传；内置探针默认只在普通采样点上报 `cpu`、`ram_total`、`ram_used`、`swap_total`、`swap_used`、`net_in_speed`、`net_out_speed` |
 | `stats`       | 聚合统计：在线阈值 300 秒（5 分钟无上报视为离线）                                          |
 | `regionStats` | 按 ISO 区域码（大写）统计的服务器数                                                  |
 | `sysConfig`   | 当前站点开关：`show_price`、`show_expire`、`show_tf`、`show_three_net_details`、`display_mode`。主题配置请从 `/api/config` 的 `theme_options` 读取。~~旧版示例中的 `site_title` 不在该对象内。~~（2026-07-26 修订） |
 
-> `/api/servers` 的 `latestReportUpdates` 每次请求都会读取 DO 实时状态，并与当前 Worker isolate 内约 5 分钟的最近上报回放合并。`servers[].ping` / `servers[].loss` 只在 `sysConfig.show_three_net_details === true` 时从 D1 最近 2 小时历史抽样返回，最多 20 个真实样本点；主题可从 `/api/config.latency_window` 读取这两个窗口参数。抽样结果在当前 Worker isolate 内缓存约 5 分钟；关闭三网详情时返回空数组且不触发这部分 D1 查询。抽样点保留真实上报时间，不做固定时间戳对齐，也不会用最近点补齐缺口。
+> `/api/servers` 的 `latestReportUpdates` 每次请求都会读取 DO 实时状态，并与当前 Worker isolate 内约 5 分钟的最近上报回放合并。`servers[].ping` / `servers[].loss` 只在 `sysConfig.show_three_net_details === true` 时从 DO SQLite 最近 3 小时历史生成 20 个窗口；主题可从 `/api/config.latency_window` 读取这两个窗口参数。窗口按固定时间范围对齐；关闭三网详情时不查询延迟历史。空窗口保留缺口，不用最近点填充。
 
 ***
 
@@ -830,24 +841,25 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 
 **采样间隔（自动）**
 
-~~旧版按 `≤1 / 1~6 / 6~12 / 12~24 / 24~48 / 48~96 / 96~168` 小时使用固定步长，并把大于 168 的值截断。~~ **2026-07-26 修订**：当前不接受白名单之外的时长；长历史查询按后台 `long_history_points` 配置动态计算窗口，默认 120 个点：
+默认 `long_history_points="auto"`，不接受时长白名单之外的值：
 
-```text
-intervalMs = max(10_000, ceil(hours * 60 * 60 * 1000 / long_history_points))
-```
+| 范围 | 间隔 | 最多点数 |
+| --- | --- | --- |
+| 10 分钟 | 10 秒 | 60 |
+| 30 分钟 | 20 秒 | 90 |
+| 1 小时 | 30 秒 | 120 |
+| 6 小时 | 3 分钟 | 120 |
+| 12 小时 | 5 分钟 | 144 |
+| 1 天 | 10 分钟 | 144 |
+| 2 天 | 20 分钟 | 144 |
+| 4 天 | 30 分钟 | 192 |
+| 7 天 | 1 小时 | 168 |
 
-> 历史查询使用 `ROW_NUMBER() OVER (PARTITION BY ts/interval ORDER BY ts)` 取每个采样窗口的第一条。
+超过 1 小时的查询可由既有 `60/120/180/240` 固定点数设置覆盖，间隔向上对齐到完整分钟。空窗口不补点；Agent 只有分钟样本时不生成虚假的 10 秒点。每个区间合并全部统计，CPU/内存/延迟等取有效样本加权均值，网速/磁盘 I/O/连接数等取峰值。响应 `peaks` 提供峰值、`averages` 提供峰值型指标的均值；`ram_percent/swap_percent/disk_percent` 反映按每个样本容量计算的使用率。缺失字段省略，`false` 与明确的 `null` 标记保留。
 
-~~**跨月查询**：当查询早于当月 1 日时读取旧表。~~ **2026-07-26 修订**：历史表在每周日 00:00 UTC 轮换；当查询起点早于本周日且存在 `metrics_history_old` 时，自动 `UNION ALL` 当前表和旧表。
+**历史保留**：最近 1 小时的 10 秒聚合、7 天的分钟统计，以压缩小时块存于 DO SQLite；不读取或轮换 D1 历史表。旧分钟结构只能保留其已有精度。详见 [采样与压缩设计](docs/metrics-storage.md)。
 
-**缓存**：命中内存缓存时返回 `X-Cache: HIT`，反之 `MISS`。TTL 取决于 `hours`：
-
-| hours | TTL   |
-| ----- | ----- |
-| ≥ 120 | 10 分钟 |
-| ≥ 60  | 5 分钟  |
-| ≥ 30  | 3 分钟  |
-| < 30  | 1 分钟  |
+**缓存**：命中内存缓存时返回 `X-Cache: HIT`，反之 `MISS`。TTL 为查询间隔，最短 10 秒、最长 20 分钟。`X-History-Interval-Seconds` 返回本次请求的目标采样间隔。
 
 **未登录限制**：`hours > 24` 时强制 `401`。
 
@@ -1739,7 +1751,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   "results": [
     { "name": "servers 表列更新", "success": true, "added": 5 },
     { "name": "servers 表多余字段清理", "success": true, "cleaned": 30, "message": "..." },
-    { "name": "metrics_history 表列更新", "success": true, "added": 14 },
+    { "name": "弃用 D1 metrics_history 表清理", "success": true },
     { "name": "废弃 settings key 清理", "success": true, "cleaned": 0 },
     { "name": "删除弃用的 metrics_aggregated 表", "success": true, "dropped": 0, "message": "..." }
   ]
@@ -1841,7 +1853,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 | `udp_conn`                                    | number             | UDP 套接字数                  |
 | `ping_ct` / `ping_cu` / `ping_cm` / `ping_bd` / `ping_node_1` 至 `ping_node_4` | number\|null\|false | 各运营商及自定义节点延时 (ms)；`false` 表示未配置/未上报/未取样（不显示），`null` 表示该轮超时/未取到有效 RTT（显示 Timeout） |
 | `loss_ct` / `loss_cu` / `loss_cm` / `loss_bd` / `loss_node_1` 至 `loss_node_4` | number\|null\|false | 各运营商及自定义节点丢包率 (%)；`false` 表示未配置/未上报/未取样（不显示），`null` 表示没有丢包样本，`0`–`100` 是有效值，`100` 配合对应 `ping_*` 的 `null` 表示全超时 |
-| `ping` / `loss`                               | array              | 仅 `/api/servers` 的 `servers[]` 列表项返回，`/api/server` 详情接口不返回；后台开启三网详情时，从 D1 最近 2 小时历史按时间范围抽样最多 20 个真实样本点，当前 Worker isolate 内缓存约 5 分钟；关闭三网详情时为空数组且不触发这部分 D1 查询。点格式为 `{ ts, ct, cu, cm, bd }`，`ct/cu/cm/bd` 分别对应电信、联通、移动、BGP。`ts` 为真实上报时间，不强制等差对齐，也不会用最近点补齐缺口 |
+| `ping` / `loss`                               | array              | 仅 `/api/servers` 的 `servers[]` 列表项返回，`/api/server` 详情接口不返回；后台开启三网详情时，从 DO SQLite 最近 3 小时历史生成 20 个窗口；关闭时不查询延迟历史。点格式为 `{ ts, ct, cu, cm, bd }`，`ct/cu/cm/bd` 分别对应电信、联通、移动、BGP。`ts` 为窗口起点，空窗口保留缺口 |
 | `ram_total` / `ram_used`                      | number             | MB                        |
 | `swap_total` / `swap_used`                    | number             | MB                        |
 | `disk_total` / `disk_used`                    | number             | MB                        |
@@ -1896,7 +1908,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   show_expire: 'true' | 'false',
   show_tf: 'true' | 'false',
   frontend_ws_timeout_minutes: string, // '0'-'1440'；0 = 不超时
-  long_history_points: '60' | '120' | '180' | '240',
+  long_history_points: 'auto' | '60' | '120' | '180' | '240',
   tg_notify: '0' | '2' ... '30',    // 0 = 关闭；旧值 false 兼容为 0，true 兼容为 5
   tg_bot_token: string,
   tg_chat_id: string,
@@ -1947,10 +1959,10 @@ Worker 同时注册了 cron 触发器（`scheduled` handler），可在 `wrangle
 | ------------- | --------------- | -------------------------------------------------------------- |
 | `*/1 * * * *` | 每分钟：检测离线节点、资源告警 | `checkOfflineNodes`、`checkResourceAlerts`（通知） |
 | `0 * * * *`   | 每小时：根据 UTC 日期分支 | 见下表                                                            |
-| <br />        | 每周日 0 点：表轮换    | `weeklyCleanup`（删除旧表、重命名 metrics\_history → metrics\_history\_old、创建新表） |
+| <br />        | 每周日 0 点：遗留表清理    | `weeklyCleanup`（清理遗留 D1 历史表） |
 | <br />        | 每小时按通知时区/到期提醒时间判断是否执行到期检测 | `checkExpiringServers` |
 
-每周日 00:00–00:04 UTC 的表轮换窗口内，分钟任务会跳过离线节点检测。
+分钟巡检始终执行；每周维护仅清理遗留 D1 表，不影响 DO 历史或离线检测。
 
 DEBUG 模式（`env.DEBUG=1`）下额外提供：
 

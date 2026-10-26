@@ -1,10 +1,7 @@
 import { saveSiteOptions, debug, getSettingByKey } from '../utils/settings.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
 
-export const HISTORY_PARTITION_MULTIPLIER = 10000000000000;
-export const HISTORY_AUTO_OPTIMIZED_MIN_ID = HISTORY_PARTITION_MULTIPLIER;
 export const HISTORY_MAX_PARTITION_ID = 900;
-export const HISTORY_MAX_TIME_KEY = 991231235959;
 
 // 确保servers历史记录分区优化
 export async function ensureServerOptimization(db) {
@@ -94,84 +91,4 @@ export async function getNextServerHistoryPartitionId(db) {
   }
   debug(`No available history partition id`);
   throw new Error(`No available history partition id`);
-}
-
-function padHistoryTimePart(value) {
-  return String(value).padStart(2, '0');
-}
-
-// 格式化历史记录时间戳
-export function normalizeHistoryTimestamp(value, fallback = Date.now()) {
-  const ts = Number(value);
-  if (!Number.isFinite(ts) || ts <= 0) return fallback;
-  return ts < 10000000000 ? ts * 1000 : ts;
-}
-
-export function formatHistoryTimeKey(timestamp) {
-  const normalized = normalizeHistoryTimestamp(timestamp);
-
-  const date = new Date(normalized);
-  const year = date.getUTCFullYear();
-  if (year < 2000 || year > 2099) {
-    debug(`Invalid year ${year} for history time key`);
-    throw new Error(`Invalid year ${year} for history time key`);
-  };
-
-  return Number([
-    padHistoryTimePart(year % 100),
-    padHistoryTimePart(date.getUTCMonth() + 1),
-    padHistoryTimePart(date.getUTCDate()),
-    padHistoryTimePart(date.getUTCHours()),
-    padHistoryTimePart(date.getUTCMinutes()),
-    padHistoryTimePart(date.getUTCSeconds())
-  ].join(''));
-}
-
-export function normalizeHistoryPartitionId(value) {
-  const partitionId = Number(value);
-  if (!Number.isInteger(partitionId) || partitionId <= 0 || partitionId > HISTORY_MAX_PARTITION_ID) {
-    return null;
-  }
-  return partitionId;
-}
-
-export function buildHistoryId(partitionId, timestamp) {
-  const normalizedPartitionId = normalizeHistoryPartitionId(partitionId);
-  if (!normalizedPartitionId) {
-    throw new Error('Invalid history partition id');
-  }
-  return normalizedPartitionId * HISTORY_PARTITION_MULTIPLIER + formatHistoryTimeKey(timestamp);
-}
-
-export async function getServerHistoryInfo(db, serverId, server = null) {
-  const target = server && server.id === serverId
-    ? server
-    : (await getAllServers(db, true)).find(s => s.id === serverId);
-
-  if (!target) {
-    debug(`Server ${serverId} not found`);
-    throw new Error(`Server ${serverId} not found`);
-  }
-
-  return {
-    partitionId: normalizeHistoryPartitionId(target.history_partition_id),
-    startTimestamp: normalizeHistoryTimestamp(target.timestamp, 0)
-  };
-}
-
-export function getHistoryIdRange(partitionId, startTimestamp = null, endTimestamp = null) {
-  const normalizedPartitionId = normalizeHistoryPartitionId(partitionId);
-  if (!normalizedPartitionId) {
-    throw new Error('Invalid history partition id');
-  }
-
-  const prefix = normalizedPartitionId * HISTORY_PARTITION_MULTIPLIER;
-  return {
-    startId: prefix + (startTimestamp === null || startTimestamp === undefined
-      ? 0
-      : formatHistoryTimeKey(startTimestamp)),
-    endId: prefix + (endTimestamp === null || endTimestamp === undefined
-      ? HISTORY_MAX_TIME_KEY
-      : formatHistoryTimeKey(endTimestamp))
-  };
 }

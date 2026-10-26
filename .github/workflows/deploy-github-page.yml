@@ -43,7 +43,10 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm install
+      - run: npm ci
+
+      - name: Run regression tests
+        run: npm run test:all
 
       - name: Build
         env:

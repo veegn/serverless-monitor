@@ -188,7 +188,8 @@ export class ServerlessMonitorApp {
       verified,
       turnstile_verified: turnstileVerified,
       frontend_ws_timeout_minutes: Number(normalizeFrontendWsTimeoutMinutes(sys.frontend_ws_timeout_minutes)),
-      long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points)),
+      long_history_points: normalizeLongHistoryPoints(sys.long_history_points) === 'auto'
+        ? 'auto' : Number(normalizeLongHistoryPoints(sys.long_history_points)),
       latency_window: {
         points: DASHBOARD_LATENCY_WINDOW_POINTS,
         hours: DASHBOARD_LATENCY_WINDOW_HOURS
@@ -210,6 +211,14 @@ export class ServerlessMonitorApp {
   }
 
   async fetch(request) {
+    try {
+      return await this.handleRequest(request);
+    } catch (error) {
+      return applyCors(createErrorResponse(error), request, getCorsAllowedOrigins(this.env));
+    }
+  }
+
+  async handleRequest(request) {
     setDebug(this.env.DEBUG);
 
     const url = new URL(request.url);
@@ -348,13 +357,12 @@ export class ServerlessMonitorApp {
           return simpleAuthResponse();
         }
         const result = await this.dbService.clearHistory();
-        try {
-          if (this.env?.METRICS_BROADCASTER) {
-            const id = this.env.METRICS_BROADCASTER.idFromName('global');
-            const stub = this.env.METRICS_BROADCASTER.get(id);
-            await stub.fetch('http://internal/clear-history', { method: 'POST' });
-          }
-        } catch (_) {}
+        if (!result.success) throw new AppError('Failed to clear history', 503);
+        if (!this.env.METRICS_BROADCASTER) throw new AppError('History storage unavailable', 503);
+        const id = this.env.METRICS_BROADCASTER.idFromName('global');
+        const stub = this.env.METRICS_BROADCASTER.get(id);
+        const response = await stub.fetch('http://internal/clear-history', { method: 'POST' });
+        if (!response.ok) throw new AppError('Failed to clear history', 503);
         return createSuccessResponse(result);
       }}
     ];
@@ -398,22 +406,14 @@ export class ServerlessMonitorApp {
     const cron = event.cron;
     debug(`[Cron] 定时任务触发: ${cron}`);
 
-    const now = new Date();
+    const now = new Date(event.scheduledTime ?? Date.now());
     const day = now.getUTCDay();
     const hour = now.getUTCHours();
     const minute = now.getUTCMinutes();
 
     if (cron === '*/1 * * * *') {
-      if (day === 0 && hour === 0 && minute < 5) {
-        debug('[Cron] 每周日0:00-0:05表轮换期间，跳过离线节点检测');
-      } else {
-        debug('[Cron] 开始执行离线节点检测');
-        await this.notificationService.checkOfflineNodes(this.db);
-        debug('[Cron] 离线节点检测完成');
-        debug('[Cron] 开始执行资源负载告警检测');
-        await this.notificationService.checkResourceAlerts({ minute });
-        debug('[Cron] 资源负载告警检测完成');
-      }
+      await this.notificationService.checkOfflineNodes(this.db);
+      await this.notificationService.checkResourceAlerts({ minute });
     } else if (cron === '0 * * * *') {
       if (day === 0 && hour === 0) {
         debug('[Cron] 开始执行每周数据清理任务（表轮换）');

@@ -9,32 +9,17 @@
  */
 
 import { clearAppearanceSettingsCache, clearSiteSettingsCache, debug } from './settings.js';
+import { historySampling } from './historyPolicy.js';
 
 const SERVERS_LIST_TTL = 120 * 1000;
 let serversListCache = null;
-
-const LATEST_ALL_TTL = 30 * 1000;
-let latestAllCache = null;
-let latestAllCacheTime = 0;
 
 const metricsHistoryCache = new Map();
 
 const serverDetailCache = new Map();
 
-export function getCacheDuration(hours) {
-  if (hours >= 48) {
-    return 20 * 60 * 1000;
-  }else if (hours >= 24) {
-    return 15 * 60 * 1000;
-  }else if (hours >= 12) {
-    return 10 * 60 * 1000;
-  } else if (hours >= 6) {
-    return 5 * 60 * 1000;
-  } else if (hours >= 1) {
-    return 2 * 60 * 1000;
-  } else {
-    return 1 * 60 * 1000;
-  }
+export function getCacheDuration(hours, points = null) {
+  return Math.max(10_000, Math.min(20 * 60_000, historySampling(hours, points).intervalMs));
 }
 
 function filterServersByHidden(servers, includeHidden) {
@@ -136,24 +121,6 @@ export async function checkServerExists(db, id) {
   return !!server;
 }
 
-/**
- * 获取最新指标缓存信息
- * @returns {object} 包含 cache、time、ttl 字段的对象
- */
-export function getLatestMetricsCache() {
-  return { cache: latestAllCache, time: latestAllCacheTime, ttl: LATEST_ALL_TTL };
-}
-
-export function setLatestMetricsCache(data) {
-  latestAllCache = data;
-  latestAllCacheTime = Date.now();
-}
-
-export function clearLatestMetricsCache() {
-  latestAllCache = null;
-  latestAllCacheTime = 0;
-}
-
 function getCacheKey(serverId, hours, columns, samplePoints = null) {
   const sortedColumns = columns.split(',').sort().join(',');
   const sampleSuffix = samplePoints ? `:points=${samplePoints}` : '';
@@ -162,12 +129,23 @@ function getCacheKey(serverId, hours, columns, samplePoints = null) {
 
 export function getMetricsHistoryCache(serverId, hours, columns, samplePoints = null) {
   const key = getCacheKey(serverId, hours, columns, samplePoints);
-  return metricsHistoryCache.get(key);
+  const entry = metricsHistoryCache.get(key);
+  if (entry && Date.now() >= entry.expiresAt) {
+    metricsHistoryCache.delete(key);
+    return null;
+  }
+  return entry;
 }
 
 export function setMetricsHistoryCache(serverId, hours, columns, data, samplePoints = null) {
   const key = getCacheKey(serverId, hours, columns, samplePoints);
-  metricsHistoryCache.set(key, { data, timestamp: Date.now() });
+  const now = Date.now();
+  for (const [cachedKey, entry] of metricsHistoryCache) {
+    if (entry.expiresAt <= now) metricsHistoryCache.delete(cachedKey);
+  }
+  metricsHistoryCache.delete(key);
+  metricsHistoryCache.set(key, { data, timestamp: now, expiresAt: now + getCacheDuration(hours, samplePoints) });
+  while (metricsHistoryCache.size > 512) metricsHistoryCache.delete(metricsHistoryCache.keys().next().value);
 }
 
 export function clearMetricsHistoryCache(serverId) {
@@ -180,7 +158,6 @@ export function clearMetricsHistoryCache(serverId) {
 
 export function clearAllCaches() {
   clearServersListCache();
-  clearLatestMetricsCache();
   metricsHistoryCache.clear();
   clearSiteSettingsCache();
   clearAppearanceSettingsCache();

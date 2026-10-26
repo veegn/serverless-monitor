@@ -35,7 +35,7 @@ test('handleUpdate rejects oversized payload before touching D1', async () => {
   assert.equal(dbTouched, false);
 });
 
-test('handleUpdate without Content-Length skips the size guard', async () => {
+test('handleUpdate accepts a small body without Content-Length', async () => {
   let queriedId = '';
   const env = {
     API_SECRET: 'secret',

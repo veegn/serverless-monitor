@@ -1206,7 +1206,7 @@ const expireReminderOptions = computed(() => [
 const longHistoryPointOptions = computed(() => (
   HISTORY.LONG_RANGE_POINT_OPTIONS.map(points => ({
     value: String(points),
-    label: props.trans.historyPointCount
+    label: points === 'auto' ? props.trans.historySamplingAuto : props.trans.historyPointCount
       ? props.trans.historyPointCount.replace('{points}', points)
       : `${points} points`
   }))

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -41,7 +41,8 @@ if (fs.existsSync(distDir)) {
 }
 
 console.log('Building theme frontend...');
-execSync('npx vite build', { cwd: rootDir, stdio: 'inherit', env: { ...process.env, VITE_BASE: './' } });
+const viteCli = path.join(path.dirname(fileURLToPath(import.meta.resolve('vite/package.json'))), 'bin/vite.js');
+execFileSync(process.execPath, [viteCli, 'build'], { cwd: rootDir, stdio: 'inherit', env: { ...process.env, VITE_BASE: './' } });
 
 // 构建时注入配置到 HTML
 const htmlFiles = fs.readdirSync(distDir).filter(f => f.endsWith('.html'));

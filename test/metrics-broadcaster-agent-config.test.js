@@ -1,3 +1,4 @@
+import { makeSqlStorage } from './helpers/sql-storage.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MetricsBroadcaster } from '../src/durable/MetricsBroadcaster.js';
@@ -57,12 +58,7 @@ function makeBroadcaster(webSockets = [], env = { DB: {} }) {
     getWebSockets() {
       return webSockets;
     },
-    storage: {
-      async get() {
-        return null;
-      },
-      async put() {}
-    }
+    storage: makeSqlStorage()
   }, env);
 }
 
@@ -907,8 +903,8 @@ test('Agent WSS batches all-scope subscribers while single-server subscribers st
     }
   });
   const broadcaster = makeBroadcaster([
-    makeFrontendSocket({ scope: 'all', serverIds: ['server-1', 'server-2'] }, allMessages),
-    makeFrontendSocket({ scope: 'server-1', serverIds: [] }, singleMessages)
+    makeFrontendSocket({ scope: 'all', serverIds: ['server-1', 'server-2'], accessVersion: 1, allowedServerIds: ['server-1', 'server-2'] }, allMessages),
+    makeFrontendSocket({ scope: 'server-1', serverIds: [], accessVersion: 1, allowedServerIds: ['server-1'] }, singleMessages)
   ]);
 
   await broadcaster._ingestRealtimeUpdates([{
@@ -929,7 +925,7 @@ test('Agent WSS batches all-scope subscribers while single-server subscribers st
   assert.equal(singleMessages.every(message => message.updates.length === 1), true);
   assert.notEqual(broadcaster.frontendBroadcastTimer, null);
 
-  broadcaster._flushFrontendBroadcastBatch();
+  await broadcaster._flushFrontendBroadcastBatch();
 
   assert.equal(allMessages.length, 1);
   assert.equal(allMessages[0].type, 'batchUpdate');
@@ -1546,159 +1542,26 @@ test('history metrics apply configured aggregation policies to batched POST samp
   assert.equal(metrics.disk.read_bps, 80 * 1024 * 1024);
 });
 
-test('WSS history persistence carries pending history aggregates into next D1 write', async () => {
-  const savedRows = [];
-  const db = {
-    prepare() {
-      return {
-        bind(...args) {
-          return {
-            async run() {
-              savedRows.push(args);
-              return { meta: { changes: 1 } };
-            }
-          };
-        }
-      };
-    }
-  };
-  const broadcaster = makeBroadcaster([], { DB: db });
-  const originalNow = Date.now;
-  let now = Date.UTC(2026, 0, 1, 0, 0, 0);
-  let attachment = {
-    reportIntervalMs: 60_000,
-    lastD1WriteTs: now
-  };
-  const ws = {
-    deserializeAttachment() {
-      return attachment;
-    },
-    serializeAttachment(value) {
-      attachment = value;
-    }
-  };
-
-  try {
-    Date.now = () => now;
-    const skipped = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
-      serverId: 'server-1',
-      historyPartitionId: 42,
-      metrics: {
-        cpu: 10,
-        net_in_speed: 40 * 1024 * 1024,
-        net_out_speed: 3 * 1024 * 1024
-      },
-      regionCode: 'US',
-      timestamp: now,
-      agentVersion: 'test',
-      reportIntervalMs: 60_000
-    });
-
-    assert.equal(skipped.persisted, false);
-    assert.equal(savedRows.length, 0);
-
-    now += 61_000;
-    const persisted = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
-      serverId: 'server-1',
-      historyPartitionId: 42,
-      metrics: {
-        cpu: 12,
-        net_in_speed: 128 * 1024,
-        net_out_speed: 9 * 1024 * 1024
-      },
-      regionCode: 'US',
-      timestamp: now,
-      agentVersion: 'test',
-      reportIntervalMs: 60_000
-    });
-
-    assert.equal(persisted.persisted, true);
-    assert.equal(savedRows.length, 0); // Metrics are no longer written to D1; handled by DO storage
-    assert.equal(
-      Object.prototype.hasOwnProperty.call(
-        broadcaster.agentHistoryWrites.get('server-1'),
-        'pendingHistoryAggregate'
-      ),
-      false
-    );
-  } finally {
-    Date.now = originalNow;
-  }
+test('concurrent reports in the same minute retain weighted averages and peak metrics', async () => {
+  const broadcaster = makeBroadcaster();
+  const now = Math.floor(Date.now() / 60000) * 60000 + 1000;
+  await Promise.all([10, 20, 60].map((cpu, index) => broadcaster._persistUpdates([{
+    serverId: 'server-1', samples: [{ ts: now + index, data: { cpu, net_in_speed: index === 0 ? 5000 : 1 } }]
+  }], `report-${index}`)));
+  const rows = await broadcaster.metricsStore.history('server-1', { now: now + 3 });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].cpu, 30);
+  assert.equal(rows[0].net_in_speed, 5000);
 });
 
-test('WSS history persistence keeps samples received during a flush for the next interval', async () => {
-  const broadcaster = makeBroadcaster([], { DB: {} });
-  const originalNow = Date.now;
-  let now = Date.UTC(2026, 0, 1, 0, 0, 0);
-  let attachment = {
-    reportIntervalMs: 30_000,
-    lastD1WriteTs: now - 31_000
-  };
-  const ws = {
-    deserializeAttachment() {
-      return attachment;
-    },
-    serializeAttachment(value) {
-      attachment = value;
-    }
-  };
-
-  try {
-    Date.now = () => now;
-    const firstWrite = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
-      serverId: 'server-1',
-      historyPartitionId: 42,
-      metrics: {
-        cpu: 10,
-        net_in_speed: 10 * 1024,
-        net_out_speed: 1024
-      },
-      regionCode: 'US',
-      timestamp: now,
-      agentVersion: 'test',
-      reportIntervalMs: 30_000
-    });
-
-    assert.equal(firstWrite.persisted, true);
-
-    now += 1_000;
-    const skippedDuringInterval = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
-      serverId: 'server-1',
-      historyPartitionId: 42,
-      metrics: {
-        cpu: 12,
-        net_in_speed: 5 * 1024 * 1024,
-        net_out_speed: 1024
-      },
-      regionCode: 'US',
-      timestamp: now,
-      agentVersion: 'test',
-      reportIntervalMs: 30_000
-    });
-
-    assert.equal(skippedDuringInterval.persisted, false);
-    assert.equal(
-      broadcaster.agentHistoryWrites.get('server-1').pendingHistoryAggregate.max.net_in_speed,
-      5 * 1024 * 1024
-    );
-
-    now += 31_000;
-    const secondResult = await broadcaster._persistAgentHistoryIfDue(ws, attachment, {
-      serverId: 'server-1',
-      historyPartitionId: 42,
-      metrics: {
-        cpu: 14,
-        net_in_speed: 10 * 1024,
-        net_out_speed: 2048
-      },
-      regionCode: 'US',
-      timestamp: now,
-      agentVersion: 'test',
-      reportIntervalMs: 30_000
-    });
-
-    assert.equal(secondResult.persisted, true);
-  } finally {
-    Date.now = originalNow;
-  }
+test('acknowledged reports remain idempotent after the broadcaster is recreated', async () => {
+  const broadcaster = makeBroadcaster();
+  const now = Date.now();
+  const updates = [{ serverId: 'server-1', samples: [{ ts: now, data: { cpu: 10 } }] }];
+  await broadcaster._persistUpdates(updates, 'restart-report');
+  const restarted = new MetricsBroadcaster(broadcaster.state, broadcaster.env);
+  assert.equal((await restarted._persistUpdates(updates, 'restart-report')).duplicate, true);
+  const rows = await restarted.metricsStore.history('server-1');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].cpu, 10);
 });

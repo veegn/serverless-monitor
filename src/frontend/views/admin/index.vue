@@ -515,6 +515,7 @@ const normalizeExpireNotificationTimeSetting = (value) => {
 }
 
 const normalizeLongHistoryPointsSetting = (value) => {
+  if (value === 'auto') return 'auto'
   const points = Number(value)
   return String(
     HISTORY.LONG_RANGE_POINT_OPTIONS.includes(points)

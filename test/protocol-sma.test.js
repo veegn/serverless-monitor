@@ -1,3 +1,5 @@
+import { SqlMetricsStore } from '../src/durable/SqlMetricsStore.js';
+import { makeSqlStorage } from './helpers/sql-storage.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { UpdateController } from '../src/handlers/UpdateController.js';
@@ -21,6 +23,8 @@ function makeMockEnv(siteSettings = {}, existingServers = []) {
   const servers = [...existingServers];
   const historyInserts = [];
 
+  const committed = new Map();
+  const metricsStore = new SqlMetricsStore(makeSqlStorage());
   const env = {
     API_SECRET: 'master_secret',
     DB: {
@@ -94,7 +98,19 @@ function makeMockEnv(siteSettings = {}, existingServers = []) {
       }
     }
   };
-  return { env, writes, servers, historyInserts };
+  env.METRICS_BROADCASTER = {
+    idFromName() { return 'global'; },
+    get() { return { async fetch(input, init) {
+      const body = JSON.parse(init.body || '{}');
+      if (body.updates) {
+        for (const item of body.updates) committed.set(item.serverId, item.samples);
+        await metricsStore.ingest(body.updates);
+      }
+      return Response.json({ ok: true, persisted: true });
+    } }; }
+  };
+  env.committedReports = committed;
+  return { env, writes, servers, historyInserts, metricsStore };
 }
 
 test('PROTOCOL: auto-discovery registration creates new node when id is empty', async () => {
@@ -327,7 +343,7 @@ test('PROTOCOL: batch backfill (batch: true) persists all samples', async () => 
 
   // Verify that metrics are NOT written to D1; handled exclusively by DO
   assert.equal(historyInserts.length, 0, 'No metrics inserted to D1');
-  const queued = UpdateController.batchQueue.get('srv-us-east-01')?.samples || [];
+  const queued = env.committedReports.get('srv-us-east-01') || [];
   assert.equal(queued.length, 50, 'All 50 samples must be queued for DO');
 });
 
@@ -346,7 +362,7 @@ test('PROTOCOL: Mode Push frame conforms to ADAPTIVE_REPORTING_SPEC', async () =
   const broadcaster = new MetricsBroadcaster({
     setWebSocketAutoResponse() {},
     getWebSockets() { return []; },
-    storage: { async get() { return null; }, async put() {} }
+    storage: makeSqlStorage()
   }, { DB: {} });
 
   broadcaster._sendWsJson(fakeWs, {
@@ -385,7 +401,7 @@ test('PROTOCOL: Report ACK frame conforms to ADAPTIVE_REPORTING_SPEC', async () 
   const broadcaster = new MetricsBroadcaster({
     setWebSocketAutoResponse() {},
     getWebSockets() { return []; },
-    storage: { async get() { return null; }, async put() {} }
+    storage: makeSqlStorage()
   }, { DB: {} });
 
   broadcaster._sendWsJson(fakeWs, {
@@ -457,7 +473,7 @@ test('PROTOCOL: batch backfill merges baseline metrics into samples when persist
   assert.equal(historyInserts.length, 0, 'No metrics inserted to D1');
 
   // Verify that the baseline metrics (disk_total, tcp_conn, load_avg) are preserved across samples queued for DO
-  const queued = UpdateController.batchQueue.get('srv-batch-base-01')?.samples || [];
+  const queued = env.committedReports.get('srv-batch-base-01') || [];
   assert.equal(queued.length, 2);
   for (const sample of queued) {
     const payload = sample.payload;
@@ -536,22 +552,22 @@ test('DO WebSocket pushes cached batchUpdate on initial connect', async () => {
     send(str) { sent.push(JSON.parse(str)); },
     close() {},
     serializeAttachment() {},
-    deserializeAttachment() { return { scope: 'all' }; }
+    deserializeAttachment() { return { scope: 'all', accessVersion: 1, allowedServerIds: ['srv-cache-01'] }; }
   };
   const broadcaster = new MetricsBroadcaster({
     setWebSocketAutoResponse() {},
     getWebSockets() { return []; },
-    storage: { async get() { return null; }, async put() {} }
+    storage: makeSqlStorage()
   }, { DB: {} });
 
   const now = Date.now();
-  broadcaster._cacheLatestReportUpdates([{
+  await broadcaster._persistUpdates([{
     serverId: 'srv-cache-01',
     samples: [
       { ts: now - 2000, payload: { cpu: 10 } },
       { ts: now, payload: { cpu: 20 } }
     ]
-  }], now);
+  }]);
 
   await broadcaster._pushLatestUpdatesToSubscriber(fakeWs, 'all');
 

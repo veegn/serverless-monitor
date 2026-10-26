@@ -9,26 +9,20 @@ export const JWT_SECRET_MIN_LENGTH = 32;
 // 首页三网延迟/丢包小窗口：影响 /api/servers 的 servers[].ping/loss 抽样，并通过 /api/config 暴露给主题。
 export const DASHBOARD_LATENCY_WINDOW_POINTS = 20;
 export const DASHBOARD_LATENCY_WINDOW_HOURS = 3;
-export const DASHBOARD_LATENCY_WINDOW_CACHE_TTL_MS = 5 * 60 * 1000;
-export const DASHBOARD_LATENCY_WINDOW_CACHE_MAX_SERVERS = 1000;
-export const DASHBOARD_LATENCY_WINDOW_QUERY_CONCURRENCY = 20;
 
 // 首页从 Durable Object 批量读取最新上报回放时，每次请求携带的服务器 ID 数量。
-export const DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE = 500;
+export const DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE = 50;
 
 // 最新上报回放缓存：Worker isolate 与 Durable Object 使用同一组保留时长/容量。
 export const LATEST_REPORT_CACHE_TTL_MS = 5 * 60 * 1000;
 export const LATEST_REPORT_CACHE_MAX_SERVERS = 1000;
 
-// /update 上报后的实时广播批处理参数；资源告警无前端订阅时使用较长窗口降低 DO 请求。
-export const UPDATE_REALTIME_BATCH_WINDOW_MS = 5 * 1000;
-export const UPDATE_RESOURCE_ALERT_BATCH_WINDOW_MS = 25 * 1000;
+// 每次上报最多保留的样本数。
 export const UPDATE_MAX_BATCH_SAMPLES = 300;
 
 // /update 请求体上限：正常 300 样本约 60KB，512KB 留足余量。
 // 超过上限在 JSON 解析前直接拒绝，避免超大 payload 打满 Worker CPU。
 export const UPDATE_MAX_REQUEST_BYTES = 512 * 1024;
-export const UPDATE_FRONTEND_SUBSCRIBER_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 // Agent WSS 上报策略：默认历史写入间隔、服务器配置缓存，以及无前端订阅时的最小上报间隔。
 export const AGENT_WSS_FRONTEND_BATCH_WINDOW_MS = 250;
@@ -49,6 +43,3 @@ export const THEME_STORE_CACHE_TTL_SECONDS = 300;
 export const THEME_ASSET_CACHE_TTL_SECONDS = 3600;
 export const THEME_COMMIT_CACHE_TTL_SECONDS = 86400;
 export const THEME_PREVIEW_AUTH_TTL_SECONDS = 600;
-
-// 前端实时订阅活跃标记的保留时间；用于决定 /update 是否走短批处理窗口。
-export const FRONTEND_REALTIME_ACTIVE_GRACE_MS = 2 * 60 * 1000;

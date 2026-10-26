@@ -1,6 +1,3 @@
-import { DatabaseService } from '../database/DatabaseService.js';
-import { DashboardController } from '../handlers/DashboardController.js';
-import { getLatestReportSampleTimestamp } from '../utils/latestReportCache.js';
 import { clearServersListCache, getAllServers } from '../utils/cache.js';
 import {
   DEFAULT_NOTIFICATION_TEMPLATE,
@@ -65,7 +62,7 @@ export class NotificationService {
   }
 
   async checkOfflineNodes(db = this.env?.DB) {
-    return NotificationService.checkOfflineNodes(db);
+    return NotificationService.checkOfflineNodes(db, this.env);
   }
 
   async checkResourceAlerts(options = {}) {
@@ -1038,7 +1035,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   }
 }
 
-  static async checkOfflineNodes(db) {
+  static async checkOfflineNodes(db, env) {
   const siteSettings = await loadSiteSettings(db);
   const tgNotifyMinutes = getTgNotifyMinutes(siteSettings.tg_notify);
 
@@ -1047,22 +1044,18 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   try {
     const allServers = await getAllServers(db);
     
-    let latestTimestampsMap = new Map();
-    if (env?.METRICS_BROADCASTER) {
-      const serverIds = allServers.map(s => s.id);
-      const realtimeState = await DashboardController.getRealtimeStateForServers(env, serverIds, { maskPublicIp: false });
-      for (const update of realtimeState?.latestReportUpdates || []) {
-        const sampleTs = getLatestReportSampleTimestamp(update);
-        const reportTs = Number(update.reportTs || sampleTs);
-        latestTimestampsMap.set(String(update.serverId), Math.max(sampleTs || 0, reportTs || 0));
-      }
-    } else {
-      latestTimestampsMap = await DatabaseService.getLatestTimestampsForAllServers(db);
-    }
-    if (!latestTimestampsMap) {
-      // 获取失败时跳过本次检测，避免把所有服务器误判为离线
-      debug('[Cron] 获取最新上报时间戳失败，跳过本次离线检测');
-      return;
+    if (!env?.METRICS_BROADCASTER) return;
+    const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
+    const latestTimestampsMap = new Map();
+    for (let offset = 0; offset < allServers.length; offset += 500) {
+      const response = await stub.fetch('http://internal/latest-timestamps', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ serverIds: allServers.slice(offset, offset + 500).map(server => server.id) })
+      });
+      if (!response.ok) throw new Error('Latest report timestamps unavailable');
+      const result = await response.json();
+      if (!result.timestamps || typeof result.timestamps !== 'object') throw new Error('Invalid timestamps response');
+      for (const [id, timestamp] of Object.entries(result.timestamps)) latestTimestampsMap.set(id, Number(timestamp));
     }
 
     let alertState = {};
@@ -1078,6 +1071,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       }
     }
 
+    const previousState = { ...alertState };
     const now = Date.now();
     const offlineThreshold = tgNotifyMinutes * 60 * 1000;
     const offlineNodes = [];
@@ -1096,6 +1090,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
 
       if (isOffline && !alertState[s.id]) {
         offlineNodes.push({
+          id: s.id,
           name: s.name,
           lastReportTime
         });
@@ -1106,37 +1101,39 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       }
     }
 
-    if (offlineNodes.length > 0 || recoveredNodes.length > 0) {
-      await db.prepare(
-        'INSERT INTO settings (key, value) VALUES ("alert_state", ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-      ).bind(JSON.stringify(alertState)).run();
-    }
-
+    const nextState = { ...previousState };
     const messages = getNotificationMessages(siteSettings);
     if (offlineNodes.length > 0) {
       const nodeList = offlineNodes
         .map(n => `${n.name}  ${messages.lastReport(NotificationService.formatLastReportTime(n.lastReportTime, siteSettings))}`)
         .join('\n');
       const msg = nodeList;
-      await NotificationService.sendNotification(siteSettings, msg, {
+      const error = await NotificationService.sendNotification(siteSettings, msg, {
         event: messages.events.offline,
         emoji: '❌',
         clients: offlineNodes.map(n => n.name),
         count: offlineNodes.length,
         message: nodeList
       });
+      if (!error) for (const node of offlineNodes) nextState[node.id] = true;
     }
 
     if (recoveredNodes.length > 0) {
       const nodeList = recoveredNodes.map(n => n.name).join('\n');
       const msg = nodeList;
-      await NotificationService.sendNotification(siteSettings, msg, {
+      const error = await NotificationService.sendNotification(siteSettings, msg, {
         event: messages.events.recovered,
         emoji: '✅',
         clients: recoveredNodes.map(n => n.name),
         count: recoveredNodes.length,
         message: nodeList
       });
+      if (!error) for (const node of recoveredNodes) delete nextState[node.id];
+    }
+    if (JSON.stringify(nextState) !== JSON.stringify(previousState)) {
+      await db.prepare(
+        'INSERT INTO settings (key, value) VALUES ("alert_state", ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
+      ).bind(JSON.stringify(nextState)).run();
     }
   } catch (e) {
     console.error('Offline detection failed:', e);

@@ -6,16 +6,21 @@
 //   scope = <serverId>   -> 只订阅某台服务器的更新（详情页）
 //
 // - 后端 /update WSS 由本 DO 接收 Agent 指标，并向所有订阅者广播。
-// - 兼容旧 POST 上报，/update 处理器在成功写入 DB 后会调用 /__do_push/<id>。
+// - POST 上报转交 DO，并在 SQLite 事务提交后返回成功。
 //
 // - 前端订阅连接与 Agent 上报连接均使用 DO WebSocket Hibernation API，闲置时休眠以节省资源。
 //   通过 setWebSocketAutoResponse 自动响应 ping，无需唤醒 DO。
 
+import { SqlMetricsStore } from './SqlMetricsStore.js';
+import { ReportReplayCache } from '../utils/ReportReplayCache.js';
+import { isDisabledProbeMetric } from '../utils/metrics.js';
+import { AppError } from '../utils/errors.js';
 import { DatabaseService } from '../database/DatabaseService.js';
+import { FrontendSubscriptions } from './FrontendSubscriptions.js';
 import { NotificationService } from '../services/NotificationService.js';
 import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
-import { getWssReportScheduleState, isWssReportConfigured, loadSiteSettings } from '../utils/settings.js';
+import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSiteSettings } from '../utils/settings.js';
 import {
   AGENT_CONFIG_MD5_HEADER,
   AGENT_CONFIG_LEGACY_SCHEMA_VERSION,
@@ -32,7 +37,7 @@ import {
   logAgentAuth,
   logAgentConnect,
   logAgentReport,
-  logD1BatchPersist,
+  logMetricsPersist,
   logFrontendConnect,
   logFrontendDisconnect,
   logFrontendSubscribe,
@@ -78,13 +83,6 @@ const RESOURCE_ALERT_MODE_AVERAGE = 'average';
 const RESOURCE_ALERT_MODE_CONTINUOUS = 'continuous';
 const MODE_REVISION_STORAGE_KEY = 'agent_mode_revision';
 const MODE_STATE_STORAGE_KEY = 'agent_mode_state';
-const LATEST_REPORT_STORAGE_KEY = 'cfsm:latest_report_updates';
-const DO_HISTORY_WINDOW_MS = 24 * 3600 * 1000;
-const DO_HISTORY_MAX_POINTS_PER_SERVER = 1440;
-const DO_HISTORY_STORAGE_PREFIX = 'durable_history_v1:';
-const DO_HISTORY_SNAPSHOT_INTERVAL_MS = 60 * 1000;
-const PROCESSED_REPORTS_MAX_ENTRIES = 1000;
-const PROCESSED_REPORTS_TTL_MS = 10 * 60 * 1000;
 function getAlertCutoffMinute(now, buckets) {
   return Math.floor(now / RESOURCE_ALERT_BUCKET_MS) * RESOURCE_ALERT_BUCKET_MS -
     Math.max(0, buckets - 1) * RESOURCE_ALERT_BUCKET_MS;
@@ -133,6 +131,14 @@ function firstDefined(...values) {
     if (value !== undefined && value !== null && value !== '') return value;
   }
   return undefined;
+}
+
+function canonicalReportValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalReportValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalReportValue(value[key])]));
+  }
+  return value;
 }
 
 function maskPublicIpFields(data) {
@@ -290,9 +296,9 @@ export class MetricsBroadcaster {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    // 仅用于新页面快速接上最近一包数据；DO 重启或休眠回收后允许自然丢失。
-    this.latestReportUpdates = new Map();
-    this.latestReportUpdatesLoaded = false;
+    this.metricsStore = new SqlMetricsStore(state.storage);
+    this.frontendSubscriptions = new FrontendSubscriptions(env, state.storage);
+    this.latestReportUpdates = new ReportReplayCache();
     this.resourceAlertWindows = new Map();
     this.resourceAlertSnapshotLoaded = false;
     this.resourceAlertSnapshotDirty = false;
@@ -304,15 +310,10 @@ export class MetricsBroadcaster {
     this.modeRevision = 1;
     this.modeRevisionLoaded = false;
     this.lastModeState = null;
-    this.processedReports = new Map();
-    this.historyWindows = new Map();
-    this.historyLoadedServers = new Set();
-    this.historyDirtyServers = new Set();
-    this.historyLastSnapshotSave = 0;
+    this.maintenanceAlarmAt = 0;
     this.pendingFrontendBroadcasts = new Map();
     this.frontendBroadcastTimer = null;
     this.pendingFrontendBroadcastTs = 0;
-    this.d1QuotaExceededUntil = 0;
 
     // 自动响应 ping 心跳，DO 无需被唤醒
     // @ts-ignore - Cloudflare Workers 运行时提供 WebSocketRequestResponsePair
@@ -361,19 +362,6 @@ export class MetricsBroadcaster {
       } catch (_) {}
     }
     return this.lastModeState;
-  }
-
-  _pruneProcessedReports(now = Date.now()) {
-    for (const [key, item] of this.processedReports) {
-      if (!item || now - item.ts > PROCESSED_REPORTS_TTL_MS) {
-        this.processedReports.delete(key);
-      }
-    }
-    while (this.processedReports.size > PROCESSED_REPORTS_MAX_ENTRIES) {
-      const oldestKey = this.processedReports.keys().next().value;
-      if (oldestKey === undefined) break;
-      this.processedReports.delete(oldestKey);
-    }
   }
 
   _isValidServerId(id) {
@@ -494,7 +482,7 @@ export class MetricsBroadcaster {
   _shouldDeliver(sessionScope, serverId, serverIds) {
     if (!sessionScope) return false;
     if (sessionScope === 'all') {
-      if (!serverIds || serverIds.length === 0) return false;
+      if (!serverIds || serverIds.length === 0) return true;
       return serverIds.includes(serverId);
     }
     return sessionScope === serverId;
@@ -818,6 +806,7 @@ export class MetricsBroadcaster {
       agentVersion,
       reportIntervalMs,
       wssReportIntervalMs,
+      resourceAlertEnabled: NotificationService.hasNotificationTarget(settings) && getResourceAlertConfig(settings).enabled,
       agentConfig
     };
   }
@@ -958,9 +947,16 @@ export class MetricsBroadcaster {
   }
 
   async alarm() {
+    this.maintenanceAlarmAt = 0;
+    const more = this.metricsStore.cleanup();
+    const moreSessions = await this.frontendSubscriptions.cleanup(this._getFrontendWebSockets());
+    await this._ensureResourceAlertSnapshotLoaded();
+    await this._persistResourceAlertSnapshotIfNeeded(Date.now(), true);
     const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
-    if (!isWssReportConfigured(settings)) {
-      this._closeAgentReportWebSockets();
+    if (!isWssReportConfigured(settings)) this._closeAgentReportWebSockets();
+    if (this.state.storage?.setAlarm) {
+      this.maintenanceAlarmAt = Date.now() + (more || moreSessions ? 1000 : this.resourceAlertSnapshotDirty ? 60_000 : 3600_000);
+      await this.state.storage.setAlarm(this.maintenanceAlarmAt);
     }
   }
 
@@ -1055,10 +1051,10 @@ export class MetricsBroadcaster {
     }
     this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
     if (options.batchFrontend === true) {
-      this._broadcastBatch(normalizedUpdates, reportTs, 'single');
+      await this._broadcastBatch(normalizedUpdates, reportTs, 'single');
       this._queueFrontendBroadcastBatch(normalizedUpdates, reportTs);
     } else {
-      this._broadcastBatch(normalizedUpdates, reportTs);
+      await this._broadcastBatch(normalizedUpdates, reportTs);
     }
   }
 
@@ -1097,11 +1093,11 @@ export class MetricsBroadcaster {
 
     this.frontendBroadcastTimer = setTimeout(() => {
       this.frontendBroadcastTimer = null;
-      this._flushFrontendBroadcastBatch();
+      this._flushFrontendBroadcastBatch().catch(error => console.warn('[ws] Broadcast failed:', error?.message || error));
     }, AGENT_WSS_FRONTEND_BATCH_WINDOW_MS);
   }
 
-  _flushFrontendBroadcastBatch() {
+  async _flushFrontendBroadcastBatch() {
     if (this.frontendBroadcastTimer !== null) {
       clearTimeout(this.frontendBroadcastTimer);
       this.frontendBroadcastTimer = null;
@@ -1115,7 +1111,7 @@ export class MetricsBroadcaster {
     const ts = this.pendingFrontendBroadcastTs || Date.now();
     this.pendingFrontendBroadcasts = new Map();
     this.pendingFrontendBroadcastTs = 0;
-    this._broadcastBatch(updates, ts, 'all');
+    await this._broadcastBatch(updates, ts, 'all');
   }
 
   _getAgentRealtimeState(now = Date.now()) {
@@ -1236,94 +1232,51 @@ export class MetricsBroadcaster {
     return hinted;
   }
 
-  async _persistAgentHistoryIfDue(ws, attachment, payload) {
-    const serverId = String(payload.serverId || '');
+  _evaluateAgentTrafficAlertIfDue(context, metrics) {
     const now = Date.now();
-    const state = this.agentHistoryWrites.get(serverId) || {};
-    const currentAggregate = payload.historyAggregate ||
-      UpdateController.collectHistoryMetricAggregates([{ metrics: payload.metrics }]);
-
-    if (state.flushing) {
-      state.pendingHistoryAggregate = UpdateController.mergeHistoryMetricAggregates(
-        state.pendingHistoryAggregate,
-        currentAggregate
-      );
-      this.agentHistoryWrites.set(serverId, state);
-      return { persisted: false, nextD1WriteAfterMs: 0 };
-    }
-
-    state.pendingHistoryAggregate = UpdateController.mergeHistoryMetricAggregates(
-      state.pendingHistoryAggregate,
-      currentAggregate
-    );
-    const intervalMs = Math.max(
-      1000,
-      Number(payload.reportIntervalMs) ||
-      Number(attachment.reportIntervalMs) ||
-      AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS
-    );
-    const lastWriteTs = Math.max(
-      Number(state.lastD1WriteTs) || 0,
-      Number(attachment.lastD1WriteTs) || 0
-    );
-    const nextWriteTs = lastWriteTs + intervalMs;
-
-    if (lastWriteTs > 0 && now < nextWriteTs) {
-      state.lastD1WriteTs = lastWriteTs;
-      this.agentHistoryWrites.set(serverId, state);
-      return { persisted: false, nextD1WriteAfterMs: nextWriteTs - now };
-    }
-
-    state.flushing = true;
-    const aggregateForWrite = state.pendingHistoryAggregate;
-    delete state.pendingHistoryAggregate;
-    this.agentHistoryWrites.set(serverId, state);
-    try {
-      const metrics = UpdateController.applyHistoryMetricAggregates(payload.metrics, aggregateForWrite);
-      // D1 入库已完全移除，仅保留 DO 存储；月流量阈值告警非阻塞后台执行（waitUntil）
-      if (typeof this.state?.waitUntil === 'function') {
-        this.state.waitUntil((async () => {
-          try {
-            const trafficServerDetail = await this._getAgentServerDetail(serverId);
-            if (!trafficServerDetail) return;
-            await NotificationService.evaluateTrafficAlert(this.env, trafficServerDetail, metrics, {
-              patchCache: (id, value) => {
-                const entry = this.agentServerDetails.get(id);
-                if (entry && entry.data) entry.data.traffic_alert_state = value;
-              }
-            });
-          } catch (e) {
-            console.error('[traffic-alert] DO evaluate failed:', e);
-          }
-        })());
-      }
-      const persistedAt = Date.now();
-      state.lastD1WriteTs = persistedAt;
-      const currentAttachment = ws.deserializeAttachment() || attachment;
-      ws.serializeAttachment({
-        ...currentAttachment,
-        lastD1WriteTs: persistedAt
+    const last = this.agentHistoryWrites.get(context.serverId) || 0;
+    if (now - last < context.reportIntervalMs) return;
+    this.agentHistoryWrites.set(context.serverId, now);
+    const promise = (async () => {
+      const server = await this._getAgentServerDetail(context.serverId);
+      if (server) await NotificationService.evaluateTrafficAlert(this.env, server, metrics, {
+        patchCache: (id, value) => {
+          const entry = this.agentServerDetails.get(id);
+          if (entry?.data) entry.data.traffic_alert_state = value;
+        }
       });
-      return {
-        persisted: true,
-        nextD1WriteAfterMs: intervalMs
-      };
-    } catch (e) {
-      state.pendingHistoryAggregate = UpdateController.mergeHistoryMetricAggregates(
-        aggregateForWrite,
-        state.pendingHistoryAggregate
-      );
-      throw e;
-    } finally {
-      state.flushing = false;
-      this.agentHistoryWrites.set(serverId, state);
+    })().catch(error => console.warn('[traffic-alert] Evaluation failed:', error?.message || error));
+    this.state.waitUntil?.(promise);
+  }
+
+  async _persistUpdates(updates, reportId = null) {
+    updates = this._normalizeBatchUpdates(updates);
+    if (!updates.length) throw new AppError('Missing metrics', 400);
+    const fingerprintBytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(canonicalReportValue(updates))));
+    const fingerprint = Array.from(new Uint8Array(fingerprintBytes), byte => byte.toString(16).padStart(2, '0')).join('');
+    if (reportId !== null && (typeof reportId !== 'string' || reportId.length === 0 || reportId.length > 128)) {
+      throw new AppError('Invalid reportId', 400);
     }
+    const reportKey = `${updates.map(update => update.serverId).join(',')}:${reportId || fingerprint}`;
+    const result = await this.metricsStore.ingest(updates, { reportKey, fingerprint });
+    await this._ensureMaintenanceAlarm();
+    return result;
+  }
+
+  async _ensureMaintenanceAlarm(delayMs = 3600_000) {
+    if (!this.state.storage?.setAlarm) return;
+    const now = Date.now();
+    const desired = now + delayMs;
+    if (this.maintenanceAlarmAt > now && this.maintenanceAlarmAt <= desired) return;
+    const existing = await this.state.storage.getAlarm();
+    this.maintenanceAlarmAt = existing && existing <= desired ? existing : desired;
+    if (this.maintenanceAlarmAt !== existing) await this.state.storage.setAlarm(this.maintenanceAlarmAt);
   }
 
   async _handleAgentReportMessage(ws, rawMessage, attachment = {}) {
     // 帧尺寸守卫必须在 decode/JSON.parse 之前：超大帧先复制再解析会白烧 DO 的 CPU 配额。
     const rawSize = typeof rawMessage === 'string'
-      ? rawMessage.length
+      ? new TextEncoder().encode(rawMessage).byteLength
       : (rawMessage?.byteLength ?? rawMessage?.buffer?.byteLength ?? 0);
     if (rawSize > UPDATE_MAX_REQUEST_BYTES) {
       // 当前 Agent 单帧约 60KB，此路径只对异常客户端生效。
@@ -1386,35 +1339,7 @@ export class MetricsBroadcaster {
       }
     }
 
-    const rawReportId = data.reportId;
-    const reportId = typeof rawReportId === 'string' && rawReportId.trim() ? rawReportId.trim() : null;
-    const reportKey = reportId ? `${context.serverId}:${reportId}` : null;
-    const contentFingerprint = JSON.stringify(data.batch === true ? samples : latestMetrics);
-
-    if (reportKey) {
-      this._pruneProcessedReports();
-      const existing = this.processedReports.get(reportKey);
-      if (existing) {
-        if (existing.fingerprint === contentFingerprint) {
-          this._sendWsJson(ws, {
-            type: 'ack',
-            ackFor: 'report',
-            ts: Date.now(),
-            reportId,
-            accepted: existing.ack.accepted,
-            ...(existing.ack.persisted !== undefined ? { persisted: existing.ack.persisted } : {}),
-            ...(existing.ack.acceptedSamples !== undefined ? { acceptedSamples: existing.ack.acceptedSamples } : {}),
-            ...(existing.ack.nextD1WriteAfterMs !== undefined ? { nextD1WriteAfterMs: existing.ack.nextD1WriteAfterMs } : {})
-          });
-          return;
-        } else {
-          this._closeWsWithError(ws, 'Conflicting reportId with different content', 400);
-          return;
-        }
-      }
-    }
-
-    const historyAggregate = UpdateController.collectHistoryMetricAggregates(samples);
+    const reportId = data.reportId ?? null;
     const broadcastSamples = UpdateController.toBroadcastSamples(
       context.serverId,
       samples,
@@ -1427,81 +1352,43 @@ export class MetricsBroadcaster {
       serverId: context.serverId,
       samples: broadcastSamples
     }];
-    const realtimeState = this._getAgentRealtimeState(reportTs);
-    if (realtimeState.realtimeActive) {
-      await this._ingestRealtimeUpdates(normalizedUpdates, reportTs, { batchFrontend: true });
-    } else {
-      this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
-    }
-
-    let persisted;
-    let acceptedSamples = undefined;
-    let accepted = true;
-
-    if (data.batch === true && samples.length > 0) {
-      // D1 入库已完全移除，指标数据纯由 DO 内存与 DO Storage 接管（方案 A）
-      persisted = { persisted: true, nextD1WriteAfterMs: 0 };
-      acceptedSamples = samples.length;
-      accepted = true;
-      logD1BatchPersist({
-        serverId: context.serverId,
-        sampleCount: samples.length,
-        durationMs: 0
-      }, true);
-    } else {
-      try {
-        persisted = await this._persistAgentHistoryIfDue(ws, context.attachment, {
-          serverId: context.serverId,
-          historyPartitionId: context.historyPartitionId,
-          metrics: latestMetrics,
-          historyAggregate,
-          regionCode: context.regionCode,
-          timestamp: latestSample.ts,
-          agentVersion: context.agentVersion,
-          reportIntervalMs: context.reportIntervalMs
-        });
-      } catch (err) {
-        console.warn('[update-ws] D1 realtime history persist degraded to DO storage:', err?.message || err);
-        persisted = { persisted: false, nextD1WriteAfterMs: 0 };
+    let persistence;
+    try {
+      persistence = await this._persistUpdates(normalizedUpdates, reportId);
+    } catch (error) {
+      if (error instanceof AppError && error.code < 500) {
+        this._closeWsWithError(ws, error.message, error.code);
+      } else {
+        console.error('[update-ws] Metrics commit failed:', error?.message || error);
+        this._sendWsJson(ws, { type: 'ack', ackFor: 'report', ts: Date.now(),
+          accepted: false, persisted: false, retryAfterMs: 1000, ...(reportId ? { reportId } : {}) });
       }
+      return;
     }
-
-    logAgentReport({
-      serverId: context.serverId,
-      mode: data.batch === true ? 'batch' : 'realtime',
-      sampleCount: samples.length,
-      reportId,
-      persisted: persisted?.persisted === true,
-      durationMs: Date.now() - reportTs
-    });
-
+    if (!persistence.duplicate) {
+      if (context.resourceAlertEnabled) this._activateResourceAlertCache(reportTs);
+      const realtimeState = this._getAgentRealtimeState(reportTs);
+      if (realtimeState.realtimeActive) {
+        await this._ingestRealtimeUpdates(normalizedUpdates, reportTs, { batchFrontend: true });
+      } else {
+        this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
+      }
+      this._evaluateAgentTrafficAlertIfDue(context, latestMetrics);
+    }
+    if (this.env.DEBUG == 1) {
+      logMetricsPersist({ serverId: context.serverId, sampleCount: samples.length, durationMs: Date.now() - reportTs });
+      logAgentReport({ serverId: context.serverId, mode: data.batch === true ? 'batch' : 'realtime',
+        sampleCount: samples.length, reportId, persisted: true, durationMs: Date.now() - reportTs });
+    }
     const configAck = await this._buildAgentConfigAck(context);
-
-    if (reportKey && accepted) {
-      this.processedReports.set(reportKey, {
-        fingerprint: contentFingerprint,
-        ack: {
-          accepted,
-          ...(data.batch === true ? {
-            persisted: persisted.persisted,
-            acceptedSamples
-          } : {}),
-          nextD1WriteAfterMs: persisted.nextD1WriteAfterMs
-        },
-        ts: Date.now()
-      });
-    }
-
     this._sendWsJson(ws, {
       type: 'ack',
       ackFor: 'report',
       ts: Date.now(),
-      accepted,
-      ...(data.batch === true ? {
-        persisted: persisted.persisted,
-        acceptedSamples
-      } : {}),
-      ...(persisted.nextD1WriteAfterMs !== undefined ? { nextD1WriteAfterMs: persisted.nextD1WriteAfterMs } : {}),
+      accepted: true,
+      persisted: true,
+      ...(data.batch === true ? { acceptedSamples: samples.length } : {}),
+      nextD1WriteAfterMs: 0,
       ...(reportId ? { reportId } : {}),
       ...(configAck || {})
     });
@@ -1605,6 +1492,14 @@ export class MetricsBroadcaster {
       return this._handleAgentConfigChanged(request);
     }
 
+    if (method === 'POST' && path === '/frontend-access-changed') {
+      this.frontendSubscriptions.invalidate();
+      for (const ws of this._getFrontendWebSockets()) {
+        try { ws.close(1012, 'Permissions changed'); } catch (_) {}
+      }
+      return Response.json({ ok: true });
+    }
+
     if (method === 'GET' && (path === '/history' || path.endsWith('/history'))) {
       return this._handleHistoryQuery(request, url);
     }
@@ -1635,6 +1530,16 @@ export class MetricsBroadcaster {
         return new Response('Invalid subscription scope', { status: 400 });
       }
 
+      let access;
+      try {
+        access = await this.frontendSubscriptions.authorize(request);
+      } catch (error) {
+        return Response.json({ error: error.message }, { status: error instanceof AppError ? error.code : 503 });
+      }
+      if (!this.frontendSubscriptions.canSubscribe(access, scope)) {
+        return new Response('Forbidden', { status: 403 });
+      }
+
       // @ts-ignore - Cloudflare Workers 运行时提供 WebSocketPair
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -1643,7 +1548,13 @@ export class MetricsBroadcaster {
       this.state.acceptWebSocket(server);
 
       // 将订阅 scope 和空 serverIds 附加到 WebSocket（休眠后仍保留）
-      server.serializeAttachment({ scope, serverIds: [] });
+      try {
+        await this.frontendSubscriptions.save(server, { ...access, scope, serverIds: [] });
+        await this._ensureMaintenanceAlarm();
+      } catch (_) {
+        try { server.close(1013, 'Subscription storage unavailable'); } catch (_) {}
+        return new Response('Subscription storage unavailable', { status: 503 });
+      }
 
       // 立即发送 hello 让客户端确认连接成功
       try {
@@ -1713,6 +1624,7 @@ export class MetricsBroadcaster {
 
       const reportTs = Date.now();
       const subscribers = this._getFrontendSubscriberCount();
+      await this._persistUpdates([{ serverId, samples: [{ ts: reportTs, data: payload }] }]);
       this._cacheLatestReportUpdates([{
         serverId,
         samples: [{ ts: reportTs, data: payload }]
@@ -1729,7 +1641,7 @@ export class MetricsBroadcaster {
           samples: [{ ts: reportTs, data: payload }]
         }], reportTs);
       }
-      this._broadcast(serverId, payload);
+      await this._broadcast(serverId, payload);
       return new Response(JSON.stringify({ ok: true, subscribers }), {
         headers: { 'Content-Type': 'application/json' }
       });
@@ -1769,13 +1681,24 @@ export class MetricsBroadcaster {
       const subscribers = this._getFrontendSubscriberCount();
       const reportTs = Date.now();
 
-      if (!maintainState && subscribers === 0) {
+      if (maintainState) this._activateResourceAlertCache(reportTs);
+      try {
+        const persistence = await this._persistUpdates(normalizedUpdates, body.reportId ?? null);
+        if (persistence.duplicate) return Response.json({ ok: true, persisted: true, duplicate: true });
+      } catch (error) {
+        return Response.json({ error: error.message, persisted: false }, {
+          status: error instanceof AppError ? error.code : 503
+        });
+      }
+
+      if (!maintainState && !this._shouldCacheResourceAlertSamples(reportTs) && subscribers === 0) {
         this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
         return new Response(JSON.stringify({
           ok: true,
           count: normalizedUpdates.length,
           subscribers: 0,
-          latestReportOnly: true
+          latestReportOnly: true,
+          persisted: true
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
@@ -1783,12 +1706,19 @@ export class MetricsBroadcaster {
 
       await this._ingestRealtimeUpdates(normalizedUpdates, reportTs);
 
-      return new Response(JSON.stringify({ ok: true, count: normalizedUpdates.length, subscribers }), {
+      return new Response(JSON.stringify({ ok: true, persisted: true, count: normalizedUpdates.length, subscribers }), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
 
     // Worker 内部读取每台服务器最近一次上报的完整样本包。
+    if (method === 'POST' && path === '/latest-timestamps') {
+      const body = await request.json();
+      const ids = this._normalizeServerIds(body?.serverIds);
+      if (!ids.ok) return new Response('Invalid serverIds', { status: 400 });
+      return Response.json({ timestamps: await this.metricsStore.timestamps(ids.ids) });
+    }
+
     if (method === 'POST' && path === '/latest-report-updates') {
       let body = null;
       try {
@@ -1896,14 +1826,14 @@ export class MetricsBroadcaster {
   }
 
   // 向所有匹配 scope 的 WebSocket 广播推送
-  _broadcast(serverId, payload) {
+  async _broadcast(serverId, payload) {
     const ts = Date.now();
     const updates = [{
       serverId,
       samples: [{ ts, data: payload }]
     }];
     this._cacheLatestReportUpdates(updates, ts);
-    this._broadcastBatch(updates, ts);
+    await this._broadcastBatch(updates, ts);
   }
 
   _pruneLatestReportUpdates(now = Date.now()) {
@@ -1924,7 +1854,7 @@ export class MetricsBroadcaster {
       this.latestReportUpdates.delete(serverId);
       this.latestReportUpdates.set(serverId, {
         serverId,
-        reportTs,
+        reportTs: update.reportTs ?? reportTs,
         samples: update.samples
       });
     }
@@ -1935,127 +1865,6 @@ export class MetricsBroadcaster {
       this.latestReportUpdates.delete(oldestServerId);
     }
 
-    this._persistLatestReportUpdates();
-    this._ingestHistoryUpdates(updates, reportTs);
-  }
-
-  _ingestHistoryUpdates(updates, reportTs = Date.now()) {
-    const promise = this._ingestHistoryUpdatesAsync(updates, reportTs).catch(e => {
-      console.warn('[do-history] Ingest history failed:', e?.message || e);
-    });
-    if (typeof this.state?.waitUntil === 'function') {
-      this.state.waitUntil(promise);
-    }
-  }
-
-  async _ensureServerHistoryLoaded(serverId) {
-    if (this.historyLoadedServers.has(serverId)) return;
-    this.historyLoadedServers.add(serverId);
-    try {
-      const stored = await this.state?.storage?.get?.(`${DO_HISTORY_STORAGE_PREFIX}${serverId}`);
-      if (Array.isArray(stored)) {
-        const now = Date.now();
-        const cutoff = now - DO_HISTORY_WINDOW_MS;
-        const valid = stored.filter(p => p && Number(p.timestamp) >= cutoff);
-        if (!this.historyWindows.has(serverId)) {
-          this.historyWindows.set(serverId, valid);
-        } else {
-          const existing = this.historyWindows.get(serverId) || [];
-          const minuteMap = new Map();
-          for (const p of valid) {
-            minuteMap.set(Math.floor(p.timestamp / 60000) * 60000, p);
-          }
-          for (const p of existing) {
-            minuteMap.set(Math.floor(p.timestamp / 60000) * 60000, p);
-          }
-          const merged = Array.from(minuteMap.values())
-            .filter(p => Number(p.timestamp) >= cutoff)
-            .sort((a, b) => a.timestamp - b.timestamp);
-          this.historyWindows.set(serverId, merged);
-        }
-      }
-    } catch (e) {
-      console.warn(`[do-history] Failed to restore history for ${serverId}:`, e?.message || e);
-    }
-  }
-
-  async _ingestHistoryUpdatesAsync(updates, reportTs = Date.now()) {
-    if (!Array.isArray(updates) || updates.length === 0) return;
-
-    for (const update of updates) {
-      if (!update || !update.serverId || !Array.isArray(update.samples) || update.samples.length === 0) continue;
-      const serverId = String(update.serverId);
-
-      await this._ensureServerHistoryLoaded(serverId);
-
-      const downsampled = DatabaseService.downsampleHistorySamples(update.samples);
-      if (downsampled.length === 0) continue;
-
-      let window = this.historyWindows.get(serverId);
-      if (!Array.isArray(window)) {
-        window = [];
-        this.historyWindows.set(serverId, window);
-      }
-
-      const minuteMap = new Map();
-      for (const point of window) {
-        if (!point || !point.timestamp) continue;
-        const key = Math.floor(point.timestamp / 60000) * 60000;
-        minuteMap.set(key, point);
-      }
-
-      for (const item of downsampled) {
-        const ts = item.ts;
-        const key = Math.floor(ts / 60000) * 60000;
-        const pointData = { timestamp: ts, ...(item.metrics || {}) };
-        minuteMap.set(key, pointData);
-      }
-
-      const cutoff = reportTs - DO_HISTORY_WINDOW_MS;
-      const mergedWindow = Array.from(minuteMap.values())
-        .filter(p => Number(p.timestamp) >= cutoff)
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .slice(-DO_HISTORY_MAX_POINTS_PER_SERVER);
-
-      this.historyWindows.set(serverId, mergedWindow);
-      this.historyDirtyServers.add(serverId);
-    }
-
-    await this._persistHistorySnapshotIfNeeded(reportTs);
-  }
-
-  async _persistHistorySnapshotIfNeeded(now = Date.now(), force = false) {
-    if (this.historyDirtyServers.size === 0) return;
-    if (!force && now - this.historyLastSnapshotSave < DO_HISTORY_SNAPSHOT_INTERVAL_MS) return;
-
-    this.historyLastSnapshotSave = now;
-    const serversToSave = Array.from(this.historyDirtyServers);
-    this.historyDirtyServers.clear();
-
-    for (const serverId of serversToSave) {
-      const history = this.historyWindows.get(serverId) || [];
-      try {
-        await this.state?.storage?.put?.(`${DO_HISTORY_STORAGE_PREFIX}${serverId}`, history);
-      } catch (e) {
-        console.warn(`[do-history] Failed to persist history for ${serverId}:`, e?.message || e);
-      }
-    }
-  }
-
-  static _sampleHistoryPoints(points, maxPoints = 160) {
-    if (!Array.isArray(points) || points.length <= maxPoints) {
-      return points || [];
-    }
-    if (maxPoints <= 1) {
-      return [points[points.length - 1]];
-    }
-    const result = [];
-    const step = (points.length - 1) / (maxPoints - 1);
-    for (let i = 0; i < maxPoints; i++) {
-      const index = Math.round(i * step);
-      result.push(points[index]);
-    }
-    return result;
   }
 
   async _handleHistoryQuery(request, url) {
@@ -2067,17 +1876,14 @@ export class MetricsBroadcaster {
       });
     }
 
-    await this._ensureServerHistoryLoaded(serverId);
     const hours = Math.max(0.1, Math.min(168, Number(url.searchParams.get('hours')) || 1));
     const columnsParam = url.searchParams.get('columns') || '';
-    const pointsLimit = Math.max(1, Math.min(1000, Number(url.searchParams.get('points')) || 160));
+    const requestedPoints = Number(url.searchParams.get('points'));
+    const pointsLimit = Number.isFinite(requestedPoints) && requestedPoints > 0
+      ? Math.max(1, Math.min(1000, Math.floor(requestedPoints))) : null;
 
     const now = Date.now();
-    const cutoff = now - hours * 3600 * 1000;
-    const history = this.historyWindows.get(serverId) || [];
-    const filtered = history.filter(p => p && Number(p.timestamp) >= cutoff);
-
-    const sampled = MetricsBroadcaster._sampleHistoryPoints(filtered, pointsLimit);
+    const sampled = await this.metricsStore.history(serverId, { hours, points: pointsLimit, now });
 
     let result = sampled;
     if (columnsParam) {
@@ -2085,9 +1891,7 @@ export class MetricsBroadcaster {
       result = sampled.map(p => {
         const item = { timestamp: p.timestamp };
         for (const col of columnList) {
-          if (col !== 'timestamp') {
-            item[col] = p[col] !== undefined ? p[col] : null;
-          }
+          if (col !== 'timestamp' && Object.prototype.hasOwnProperty.call(p, col)) item[col] = p[col];
         }
         return item;
       });
@@ -2103,71 +1907,18 @@ export class MetricsBroadcaster {
   }
 
   async _handleClearHistory() {
-    this.historyWindows.clear();
-    this.historyLoadedServers.clear();
-    this.historyDirtyServers.clear();
+    await this.metricsStore.clear();
     this.latestReportUpdates.clear();
-    try {
-      if (typeof this.state?.storage?.list === 'function') {
-        const list = await this.state.storage.list({ prefix: DO_HISTORY_STORAGE_PREFIX });
-        for (const key of list.keys()) {
-          await this.state.storage.delete(key);
-        }
-      }
-      await this.state?.storage?.delete?.(LATEST_REPORT_STORAGE_KEY);
-    } catch (e) {
-      console.warn('[do-history] Failed to clear DO history storage:', e?.message || e);
-    }
     return new Response(JSON.stringify({ ok: true }), {
-      status: 200,
       headers: { 'Content-Type': 'application/json' }
     });
   }
 
-  async _ensureLatestReportUpdatesLoaded() {
-    if (this.latestReportUpdatesLoaded) return;
-    this.latestReportUpdatesLoaded = true;
-    try {
-      const stored = await this.state?.storage?.get?.(LATEST_REPORT_STORAGE_KEY);
-      if (Array.isArray(stored)) {
-        const now = Date.now();
-        for (const [serverId, update] of stored) {
-          if (update && now - (update.reportTs || 0) <= LATEST_REPORT_CACHE_TTL_MS) {
-            if (!this.latestReportUpdates.has(String(serverId))) {
-              this.latestReportUpdates.set(String(serverId), update);
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('[update-ws] Failed to restore latestReportUpdates from storage:', e?.message || e);
-    }
-  }
-
-  _persistLatestReportUpdates() {
-    try {
-      const entries = Array.from(this.latestReportUpdates.entries());
-      this.state?.storage?.put?.(LATEST_REPORT_STORAGE_KEY, entries).catch(err => {
-        console.warn('[update-ws] Failed to persist latestReportUpdates to storage:', err?.message || err);
-      });
-    } catch (_) {}
-  }
-
   async _getLatestReportUpdates(serverIds) {
-    await this._ensureLatestReportUpdatesLoaded();
     const now = Date.now();
-    this._pruneLatestReportUpdates(now);
-    const updates = [];
-    for (const serverId of serverIds) {
-      const update = this.latestReportUpdates.get(serverId);
-      if (update) {
-        updates.push({
-          ...update,
-          reportAgeMs: Math.max(0, now - update.reportTs)
-        });
-      }
-    }
-    return updates;
+    const stored = await this.metricsStore.latest(serverIds, now - LATEST_REPORT_CACHE_TTL_MS);
+    this._cacheLatestReportUpdates(stored);
+    return stored.map(update => ({ ...update, reportAgeMs: Math.max(0, now - update.reportTs) }));
   }
 
   async _getDashboardLatencyWindows(serverIds, hours = DASHBOARD_LATENCY_WINDOW_HOURS, points = DASHBOARD_LATENCY_WINDOW_POINTS) {
@@ -2178,8 +1929,7 @@ export class MetricsBroadcaster {
     const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
 
     for (const serverId of serverIds) {
-      await this._ensureServerHistoryLoaded(serverId);
-      const history = this.historyWindows.get(serverId) || [];
+      const history = await this.metricsStore.history(serverId, { hours, points: Math.ceil(hours * 60), now });
 
       if (!history || history.length === 0) {
         windows[serverId] = { ping: [], loss: [] };
@@ -2205,8 +1955,9 @@ export class MetricsBroadcaster {
                 pingSums[field] = (pingSums[field] || 0) + pingVal;
                 pingCounts[field] = (pingCounts[field] || 0) + 1;
               }
-              const lossVal = Number(m[`loss_${field}`]);
-              if (Number.isFinite(lossVal) && lossVal >= 0) {
+              const rawLoss = m[`loss_${field}`];
+              const lossVal = Number(rawLoss);
+              if (rawLoss !== null && rawLoss !== undefined && rawLoss !== '' && !isDisabledProbeMetric(rawLoss) && Number.isFinite(lossVal) && lossVal >= 0) {
                 if (lossMax[field] === undefined || lossVal > lossMax[field]) {
                   lossMax[field] = lossVal;
                 }
@@ -2215,10 +1966,14 @@ export class MetricsBroadcaster {
           }
 
           for (const field of DatabaseService.LATENCY_NODE_FIELDS) {
-            if (pingCounts[field] > 0) {
+            if (isDisabledProbeMetric(matches.at(-1)[`ping_${field}`])) {
+              aggregated[`ping_${field}`] = false;
+            } else if (pingCounts[field] > 0) {
               aggregated[`ping_${field}`] = Math.round(pingSums[field] / pingCounts[field]);
             }
-            if (lossMax[field] !== undefined) {
+            if (isDisabledProbeMetric(matches.at(-1)[`loss_${field}`])) {
+              aggregated[`loss_${field}`] = false;
+            } else if (lossMax[field] !== undefined) {
               aggregated[`loss_${field}`] = lossMax[field];
             }
           }
@@ -2237,23 +1992,23 @@ export class MetricsBroadcaster {
 
   async _pushLatestUpdatesToSubscriber(ws, scope, serverIds = []) {
     try {
-      await this._ensureLatestReportUpdatesLoaded();
+      const allowedIds = this.frontendSubscriptions.allowedIds(await this.frontendSubscriptions.load(ws));
       let targetIds = [];
       if (scope === 'all') {
         targetIds = Array.isArray(serverIds) && serverIds.length > 0
           ? serverIds
-          : Array.from(this.latestReportUpdates.keys());
+          : allowedIds;
       } else {
         targetIds = [scope];
       }
       if (targetIds.length === 0) return;
 
-      const updates = await this._getLatestReportUpdates(targetIds);
-      if (updates.length > 0) {
-        this._sendWsJson(ws, {
-          type: 'batchUpdate',
-          ts: Date.now(),
-          updates: updates.map(maskPublicIpUpdate)
+      targetIds = targetIds.filter(id => allowedIds.includes(id));
+      // Keep individual frames bounded even if many nodes have large backfill batches.
+      for (let offset = 0; offset < targetIds.length; offset += 10) {
+        const updates = await this._getLatestReportUpdates(targetIds.slice(offset, offset + 10));
+        if (updates.length > 0) this._sendWsJson(ws, {
+          type: 'batchUpdate', ts: Date.now(), updates: updates.map(maskPublicIpUpdate)
         });
       }
     } catch (e) {
@@ -2360,6 +2115,7 @@ export class MetricsBroadcaster {
     }
 
     await this._persistResourceAlertSnapshotIfNeeded(now);
+    if (this.resourceAlertSnapshotDirty) await this._ensureMaintenanceAlarm(60_000);
   }
 
   async _persistResourceAlertSnapshotIfNeeded(now = Date.now(), force = false) {
@@ -2505,7 +2261,7 @@ export class MetricsBroadcaster {
       if (!item || !item.serverId) return null;
       const serverId = String(item.serverId);
       const rawSamples = Array.isArray(item.samples)
-        ? item.samples
+        ? item.samples.slice(-UPDATE_MAX_BATCH_SAMPLES)
         : (item.payload ? [{ ts: now, payload: item.payload }] : []);
 
       const samples = rawSamples.map(sample => {
@@ -2522,17 +2278,33 @@ export class MetricsBroadcaster {
     }).filter(Boolean);
   }
 
-  _broadcastBatch(updates, ts = Date.now(), targetScope = null) {
+  async _broadcastBatch(updates, ts = Date.now(), targetScope = null) {
     const websockets = this._getFrontendWebSockets();
 
     for (const ws of websockets) {
-      const attachment = ws.deserializeAttachment();
-      if (!attachment) continue;
+      let attachment;
+      try { attachment = await this.frontendSubscriptions.load(ws); } catch (_) {}
+      if (!attachment) {
+        try { ws.close(1012, 'Reload subscription'); } catch (_) {}
+        continue;
+      }
+      if ((attachment.accessValidUntil && Date.now() >= attachment.accessValidUntil) ||
+        (attachment.authorizationExpiresAt && Date.now() >= attachment.authorizationExpiresAt) ||
+        attachment.accessVersion !== 1) {
+        try {
+          attachment = await this.frontendSubscriptions.refresh(attachment);
+          await this.frontendSubscriptions.save(ws, attachment);
+        } catch (_) {
+          try { ws.close(1012, 'Refresh permissions'); } catch (_) {}
+          continue;
+        }
+      }
       if (targetScope === 'all' && attachment.scope !== 'all') continue;
       if (targetScope === 'single' && attachment.scope === 'all') continue;
 
       const scopedUpdates = updates
-        .filter(item => this._shouldDeliver(attachment.scope, item.serverId, attachment.serverIds))
+        .filter(item => this.frontendSubscriptions.allowedIds(attachment).includes(item.serverId) &&
+          this._shouldDeliver(attachment.scope, item.serverId, attachment.serverIds))
         .map(maskPublicIpUpdate);
       if (scopedUpdates.length === 0) continue;
 
@@ -2562,11 +2334,16 @@ export class MetricsBroadcaster {
       }
       return;
     }
+    const messageBytes = typeof message === 'string' ? new TextEncoder().encode(message).byteLength : message?.byteLength || 0;
+    if (messageBytes > 64 * 1024) {
+      try { ws.close(WS_MESSAGE_TOO_BIG, 'Subscription message too large'); } catch (_) {}
+      return;
+    }
     // 保留处理扩展消息的入口
     try {
       const msg = JSON.parse(message || '{}');
       if (msg && msg.type === 'subscribe') {
-        const current = ws.deserializeAttachment() || {};
+        const current = await this.frontendSubscriptions.load(ws) || {};
         const rawScope = this._getSubscribeScope(msg, current);
         if (rawScope === null) {
           this._closeInvalidSubscription(ws);
@@ -2586,7 +2363,11 @@ export class MetricsBroadcaster {
         }
 
         const serverIds = normalizedServerIds.ids;
-        ws.serializeAttachment({ scope, serverIds });
+        if (!this.frontendSubscriptions.canSubscribe(current, scope, serverIds)) {
+          this._closeInvalidSubscription(ws);
+          return;
+        }
+        await this.frontendSubscriptions.save(ws, { ...current, scope, serverIds });
         try {
           ws.send(JSON.stringify({
             type: 'subscribed',
@@ -2619,13 +2400,17 @@ export class MetricsBroadcaster {
   }
 
   // WebSocket 关闭 — DO 自动清理，处理会话状态清理与前端断连感知
-  webSocketClose(ws, code, reason) {
+  async webSocketClose(ws, code, reason) {
     const attachment = ws.deserializeAttachment() || {};
     if (attachment.kind === AGENT_REPORT_KIND) {
       if (attachment.serverId) {
         this.agentServerDetails.delete(attachment.serverId);
       }
       return;
+    }
+
+    try { await this.frontendSubscriptions.remove(ws); } catch (error) {
+      console.warn('[ws] Session cleanup deferred:', error?.message || error);
     }
 
     logFrontendDisconnect({

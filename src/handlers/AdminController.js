@@ -1,5 +1,4 @@
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
-import { DatabaseService } from '../database/DatabaseService.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
 import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
@@ -11,7 +10,7 @@ import { NotificationService } from '../services/NotificationService.js';
 import { getNotificationMessages } from '../services/notificationMessages.js';
 import { getNextServerHistoryPartitionId, HISTORY_MAX_PARTITION_ID } from '../database/indexOptimization.js';
 import { isValidTrafficCorrection, normalizeConnectionMode, normalizePingMode, normalizeWssReportInterval, validateAgentConfigInput, validatePingNode, validateNetworkInterfaces } from '../utils/agentConfig.js';
-import { scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../utils/agentConfigNotify.js';
+import { notifyFrontendAccessChanged, scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../utils/agentConfigNotify.js';
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import { THEME_PREVIEW_AUTH_TTL_SECONDS } from '../utils/config.js';
 import { DashboardController } from './DashboardController.js';
@@ -908,6 +907,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
         }
       }
       await saveSiteOptions(env.DB, siteOptions);
+      await notifyFrontendAccessChanged(env);
       // 保存设置后非致命补列：确保 servers 表的告警相关列存在，避免启用月流量阈值后
       // 告警状态因缺列无法持久化而重复发送通知。设置已保存成功，补列失败不回滚、不报错。
       try {
@@ -960,6 +960,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       }
       
       clearServersListCache();
+      await notifyFrontendAccessChanged(env);
       
       return createSuccessResponse({ 
         success: true, 
@@ -976,6 +977,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       await AdminController.deleteServer(env.DB, id);
       
       clearServersListCache();
+      await notifyFrontendAccessChanged(env);
       
       return createSuccessResponse({ 
         success: true, 
@@ -996,6 +998,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       }
       
       clearServersListCache();
+      await notifyFrontendAccessChanged(env);
       
       return createSuccessResponse({ 
         success: true, 
@@ -1101,6 +1104,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       }
       
       clearServersListCache();
+      await notifyFrontendAccessChanged(env);
       scheduleAgentConfigChanged(env, ctx, id);
       
       return createSuccessResponse({ 
@@ -1125,6 +1129,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       }
       
       clearServersListCache();
+      await notifyFrontendAccessChanged(env);
       
       return createSuccessResponse({ 
         success: true, 
@@ -1263,6 +1268,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       }
 
       clearServersListCache();
+      await notifyFrontendAccessChanged(env);
 
       return createSuccessResponse({
         success: true,

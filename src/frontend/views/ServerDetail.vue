@@ -407,14 +407,20 @@ import { fetchServerDetail, fetchAllHistory, fetchConfig, formatBytes, createLiv
 import { isAdminLoggedIn } from '../utils/http'
 import { getTrafficUsageBytes } from '../composables/useServerCardData'
 import { getPublicAssetUrl } from '../utils/config.js'
-import Chart from 'chart.js/auto'
+import { Chart, LineController, LineElement, PointElement, CategoryScale, LinearScale, Filler, Legend, Tooltip } from 'chart.js'
+import { createChartUpdateScheduler } from '../utils/chartUpdates.js'
 import { t, currentLang, useTranslation } from '../utils/i18n'
-import { CHART, HISTORY } from '../utils/constants'
+import { CHART } from '../utils/constants'
+import { HISTORY_RANGES, historySampling } from '../../utils/historyPolicy.js'
+import { historySeries } from '../utils/historyCharts.js'
 import { formatDateTime, normalizeTimestamp as normalizeMetricTimestamp } from '../utils/time.js'
 import useTheme from '../composables/useTheme'
 import { isDisabledProbeMetric } from '../utils/server.js'
 import { resolvePlaybackCursor } from '../utils/playback.js'
 import { applyMikusThemeOptions } from '../utils/themeOptions.js'
+
+Chart.register(LineController, LineElement, PointElement, CategoryScale, LinearScale, Filler, Legend, Tooltip)
+const chartUpdates = createChartUpdateScheduler()
 
 const route = useRoute()
 const router = useRouter()
@@ -553,17 +559,7 @@ const formatDiskIoAxisTick = (value) => {
 }
 
 const timeOptions = computed(() => {
-  return [
-    { hours: REALTIME_HISTORY_HOURS, label: '10m' },
-    { hours: 0.5, label: '30m' },
-    { hours: 1, label: '1h' },
-    { hours: 6, label: '6h' },
-    { hours: 12, label: '12h' },
-    { hours: 24, label: '24h' },
-    { hours: 48, label: '2d' },
-    { hours: 96, label: '4d' },
-    { hours: 168, label: '7d' },
-  ]
+  return HISTORY_RANGES
 })
 
 const isOnline = computed(() => isServerOnline(server.value))
@@ -721,7 +717,7 @@ const resizeChartAfterLayout = (key) => {
       const chart = charts[key]
       if (!chart) return
       if (typeof chart.resize === 'function') chart.resize()
-      chart.update('none')
+      chartUpdates.schedule(chart)
     })
   })
 }
@@ -740,7 +736,7 @@ const showDiskIoChart = () => {
   nextTick(() => {
     if (!charts.diskIo) return
     if (typeof charts.diskIo.resize === 'function') charts.diskIo.resize()
-    charts.diskIo.update('none')
+    chartUpdates.schedule(charts.diskIo)
   })
 }
 
@@ -930,6 +926,7 @@ const GPU_CHART_FIELD = {
 }
 
 const gpuFieldAccessor = (gpuId, chartKey) => (d) => {
+  if (!hasOwn(d, 'gpu_info')) return undefined
   const list = parseGpuInfo(d.gpu_info)
   const found = list.find(g => String(g.id) === String(gpuId))
   if (!found) return null
@@ -1002,7 +999,7 @@ const syncProbeChartVisibility = () => {
         }
       }
     }
-    chart.update('none')
+    chartUpdates.schedule(chart)
   }
 }
 
@@ -1029,7 +1026,7 @@ const rebuildGpuChartDatasets = () => {
       newDatasets.push(ds('GPU', '#ff7b72', { fill: true }))
     }
     chart.data.datasets = newDatasets
-    chart.update('none')
+    chartUpdates.schedule(chart)
   }
 }
 
@@ -1127,7 +1124,14 @@ const initCharts = () => {
                 label += typeof value === 'number' ? value.toFixed(2) : value
                 label += unit
               }
-              return '$ ' + label
+              const formatStat = (v) => typeof datasetFormatter === 'function' ? datasetFormatter(v)
+                : formatCallback ? formatCallback(v) : `${Number(v).toFixed(2)}${unit}`
+              const result = ['$ ' + label]
+              const peak = context.raw?.peak
+              const average = context.raw?.average
+              if (typeof peak === 'number' && peak !== value) result.push(`${trans.value.historyPeak}: ${formatStat(peak)}`)
+              if (typeof average === 'number' && average !== value) result.push(`${trans.value.historyAverage}: ${formatStat(average)}`)
+              return result
             }
           }
         }
@@ -1214,21 +1218,16 @@ const updateChartsTheme = () => {
       }
     }
 
-    chart.update('none')
+    chartUpdates.schedule(chart)
   })
 }
 
 const { onThemeChange } = useTheme()
 onThemeChange(updateChartsTheme)
 
-// ≤1h: gap超过5分钟断线; >1h: 按 long_history_points 计算采样间隔，允许点落在桶内不同位置造成的正常漂移
+// Use the same policy as the API, including explicit point-count overrides.
 const getHistoryGapBreakMs = (hours = currentHours.value) => {
-  if (hours <= 1) return 5 * 60 * 1000
-  const configuredPoints = Number(config.value?.long_history_points)
-  const samplePoints = HISTORY.LONG_RANGE_POINT_OPTIONS.includes(configuredPoints)
-    ? configuredPoints
-    : HISTORY.DEFAULT_LONG_RANGE_POINTS
-  const expectedIntervalMs = Math.ceil(hours * 60 * 60 * 1000 / samplePoints)
+  const expectedIntervalMs = historySampling(hours, hours > 1 ? config.value?.long_history_points : null).intervalMs
   return Math.max(5 * 60 * 1000, expectedIntervalMs * 1.9)
 }
 
@@ -1296,25 +1295,26 @@ const updateChartDataset = (chart, datasetIndex, dataPoints, yAccessor) => {
 
   let processedData = []
   if (dataPoints && dataPoints.length > 0) {
-    processedData = dataPoints.map(d => {
-      return createChartPoint(new Date(d.timestamp).getTime(), yAccessor(d))
-    })
-
-    processedData.sort((a, b) => getChartTimestamp(a) - getChartTimestamp(b))
+    processedData = historySeries(dataPoints, yAccessor)
     processedData = applyGapBreak(processedData)
   }
 
   dataset.data = processedData
   syncChartLabels(chart)
-  chart.update('none')
+  chartUpdates.schedule(chart)
 }
 
 const percentAccessor = (usedField, totalField) => (d) => {
+  const percent = d[`${usedField.split('_')[0]}_percent`]
+  if (typeof percent === 'number') return percent
+  if (!hasOwn(d, usedField) || !hasOwn(d, totalField)) return undefined
+  if (d[usedField] === null || d[totalField] === null) return null
   const total = parseFloat(d[totalField]) || 0
   return total === 0 ? 0 : (parseFloat(d[usedField]) / total) * 100
 }
 
 const fieldAccessor = (field, allowZero = false) => (d) => {
+  if (!hasOwn(d, field) || isDisabledProbeMetric(d[field])) return undefined
   const val = parseFloat(d[field])
   if (Number.isNaN(val)) return null
   return allowZero ? val : (val > 0 ? val : null)
@@ -1325,9 +1325,8 @@ const updateLoadChart = (chart, dataPoints) => {
 
   let processedData = []
   if (dataPoints && dataPoints.length > 0) {
-    processedData = dataPoints.map(d => {
-      const loadVal = d.load_avg || '0 0 0'
-      const loads = parseLoadAvg(loadVal)
+    processedData = dataPoints.filter(d => hasOwn(d, 'load_avg')).map(d => {
+      const loads = d.load_avg === null ? [null, null, null] : parseLoadAvg(d.load_avg)
       return { 
         x: new Date(d.timestamp).getTime(), 
         load1: loads[0],
@@ -1347,7 +1346,7 @@ const updateLoadChart = (chart, dataPoints) => {
   chart.data.datasets[1].data = applyGapBreak(load5Data)
   chart.data.datasets[2].data = applyGapBreak(load15Data)
   syncChartLabels(chart)
-  chart.update('none')
+  chartUpdates.schedule(chart)
 }
 
 const clearDiskIoChart = () => {
@@ -1357,7 +1356,7 @@ const clearDiskIoChart = () => {
     dataset.data = []
   }
   chart.data.labels = []
-  chart.update('none')
+  chartUpdates.schedule(chart)
 }
 
 const loadAllHistory = async (hours) => {
@@ -1456,7 +1455,7 @@ const loadAllHistory = async (hours) => {
     requestAnimationFrame(() => {
       Object.values(charts).forEach(chart => {
         chart.resize()
-        chart.update('none')
+        chartUpdates.schedule(chart)
       })
     })
   } catch (e) {
@@ -1490,7 +1489,7 @@ const updateAllChartTimeUnits = (hours) => {
     }
     if (chart) {
       syncChartLabels(chart)
-      chart.update('none')
+      chartUpdates.schedule(chart)
     }
   })
 }
@@ -1526,7 +1525,7 @@ const appendDataToChart = (chart, datasetIndex, timestamp, value, isPing = false
   dataset.data = dataset.data.filter(d => getChartTimestamp(d) >= startTime)
   syncChartLabels(chart)
   
-  chart.update('none')
+  chartUpdates.schedule(chart)
 }
 
 const STATIC_FIELDS = ['id', 'name', 'region', 'arch', 'os', 'kernel_version', 'cpu_info', 'cpu_cores', 'gpu_info', 'expire_date', 'server_group', 'traffic_limit', 'net_rx_monthly', 'net_tx_monthly', 'boot_time', 'timestamp', 'ip_v4', 'ip_v6']
@@ -1556,7 +1555,7 @@ const appendLoadChartData = (timestamp, loadAvg) => {
   }
 
   syncChartLabels(chart)
-  chart.update('none')
+  chartUpdates.schedule(chart)
 }
 
 const isRealtimeHistoryRange = () => Math.abs(Number(currentHours.value) - REALTIME_HISTORY_HOURS) < 0.001
@@ -1925,6 +1924,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  chartUpdates.cancel()
   document.removeEventListener('visibilitychange', handleVisibility)
   if (liveSocket) liveSocket.close()
   clearLatestReportReplayTimers()

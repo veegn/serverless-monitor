@@ -126,23 +126,21 @@ export async function checkAuth(request, env, sys) {
 }
 
 export async function checkWebSocketAuth(request, env, sys) {
-  if (await checkAuth(request, env, sys)) {
-    return true;
-  }
+  return (await getWebSocketIdentity(request, env, sys)).authenticated;
+}
 
-  let url;
-  try {
-    url = new URL(request.url);
-  } catch (_) {
-    return false;
-  }
-
-  for (const key of TOKEN_QUERY_KEYS) {
-    if (await verifyToken(url.searchParams.get(key), env, sys)) {
-      return true;
+export async function getWebSocketIdentity(request, env, sys) {
+  const url = new URL(request.url);
+  const tokens = [extractBearerToken(request), getCookieValue(request, AUTH_COOKIE_NAME),
+    ...TOKEN_QUERY_KEYS.map(key => url.searchParams.get(key))];
+  for (const token of tokens) {
+    if (!token) continue;
+    const payload = await verifyJwt(token, getJwtSecret(env, sys));
+    if (payload?.sub === 'admin' && Number.isFinite(payload.exp) && payload.exp * 1000 > Date.now()) {
+      return { authenticated: true, expiresAt: payload.exp * 1000, token };
     }
   }
-  return false;
+  return { authenticated: false, expiresAt: null };
 }
 
 export function buildAuthCookie(request, token, maxAge = 604800) {

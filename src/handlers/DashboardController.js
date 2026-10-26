@@ -1,16 +1,15 @@
 import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
-import { DatabaseService } from '../database/DatabaseService.js';
 import { ServerService } from '../services/ServerService.js';
 import { getAllServers, getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from '../utils/cache.js';
 import { mergeMetricsIntoServer, coerceNumericMetricFields } from '../utils/metrics.js';
 import { normalizeLongHistoryPoints, loadSiteSettings, debug } from '../utils/settings.js';
-import { createSuccessResponse, createBadRequestResponse, createNotFoundResponse, createUnauthorizedResponse } from '../utils/errors.js';
+import { HISTORY_RANGES, historySampling } from '../utils/historyPolicy.js';
+import { AppError, createSuccessResponse, createBadRequestResponse, createNotFoundResponse, createUnauthorizedResponse } from '../utils/errors.js';
 import {
   cacheLatestReportUpdate,
   getLatestReportSampleTimestamp,
   getWorkerLatestReportUpdates
 } from '../utils/latestReportCache.js';
-import { markFrontendRealtimeActive } from '../utils/realtimeBroadcastGate.js';
 import {
   DASHBOARD_LATENCY_WINDOW_HOURS,
   DASHBOARD_LATENCY_WINDOW_POINTS,
@@ -140,7 +139,7 @@ export class DashboardController {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ serverIds: chunk })
       });
-      if (!response.ok) continue;
+      if (!response.ok) throw new AppError('Realtime metrics unavailable', 503);
       const data = await response.json();
       if (Array.isArray(data?.updates)) updates.push(...data.updates);
     }
@@ -148,7 +147,7 @@ export class DashboardController {
     return { latestReportUpdates: updates };
   } catch (e) {
     console.warn('[Dashboard] Failed to read realtime state:', e?.message || e);
-    return empty;
+    throw new AppError('Realtime metrics unavailable', 503);
   }
 }
 
@@ -189,19 +188,19 @@ export class DashboardController {
     }
   }
 
-  static async getDurableHistory(env, serverId, hours = 1, columns = '', points = 160) {
+  static async getDurableHistory(env, serverId, hours = 1, columns = '', points = null) {
     if (!env?.METRICS_BROADCASTER || !serverId) return null;
     try {
       const id = env.METRICS_BROADCASTER.idFromName('global');
       const stub = env.METRICS_BROADCASTER.get(id);
       const url = `http://internal/history?serverId=${encodeURIComponent(serverId)}&hours=${encodeURIComponent(hours)}&columns=${encodeURIComponent(columns)}&points=${encodeURIComponent(points)}`;
       const response = await stub.fetch(url);
-      if (!response.ok) return null;
+      if (!response.ok) throw new AppError('History storage unavailable', 503);
       const json = await response.json();
       return Array.isArray(json?.data) ? json.data : null;
     } catch (e) {
       console.warn('[Dashboard] Failed to read history from DO:', e?.message || e);
-      return null;
+      throw new AppError('History storage unavailable', 503);
     }
   }
 
@@ -264,21 +263,20 @@ export class DashboardController {
 
   static async handleServerAPI(request, env, sys) {
   const isLoggedIn = await checkAuth(request, env, sys);
-  
+
   if (sys.is_public !== 'true' && !isLoggedIn) {
     return simpleAuthResponse();
   }
-  markFrontendRealtimeActive();
-  
+
   const url = new URL(request.url);
   const id = url.searchParams.get('id');
-  
+
   if (!id) return createBadRequestResponse('Missing ID');
-  
+
   const server = await getServerDetail(env.DB, id, isLoggedIn);
   if (!server) return createNotFoundResponse('Server not found');
-  
-  const realtimeState = await DashboardController.getRealtimeStateForServers(env, [id]).catch(() => ({ latestReportUpdates: [] }));
+
+  const realtimeState = await DashboardController.getRealtimeStateForServers(env, [id]);
   let effectiveMetrics = null;
   if (realtimeState?.latestReportUpdates?.length > 0) {
     const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === id) || realtimeState.latestReportUpdates[0];
@@ -306,19 +304,19 @@ export class DashboardController {
   }
   server.latestReportUpdates = latestReportUpdates;
   server.sysConfig = {
-    long_history_points: Number(normalizeLongHistoryPoints(sys.long_history_points))
+    long_history_points: normalizeLongHistoryPoints(sys.long_history_points) === 'auto'
+      ? 'auto' : Number(normalizeLongHistoryPoints(sys.long_history_points))
   };
-  
+
   return createSuccessResponse(DashboardController.omitNullLossProbeFields(DashboardController.withoutPrivateServerFields(server)));
 }
 
   static async handleServersAPI(request, env, sys) {
     const isLoggedIn = await checkAuth(request, env, sys);
-    
+
     if (sys.is_public !== 'true' && !isLoggedIn) {
       return simpleAuthResponse();
     }
-    markFrontendRealtimeActive();
 
     const shouldIncludeLatencyHistory = sys.show_three_net_details === 'true';
     const { servers, latestReportUpdates, stats, regionStats } = await ServerService.getServersWithState(env, {
@@ -356,7 +354,7 @@ export class DashboardController {
   static async fetchHistoryData(env, request, id, hours, columns, sys = null) {
   if (!id) return createBadRequestResponse('Missing ID');
 
-  const ALLOWED_HOURS = [0.167, 0.5, 1, 6, 12, 24, 48, 96, 168];
+  const ALLOWED_HOURS = HISTORY_RANGES.map(range => range.hours);
   if (!ALLOWED_HOURS.includes(hours)) {
     return createBadRequestResponse('Invalid hours parameter');
   }
@@ -379,17 +377,19 @@ export class DashboardController {
 
   // 最多查询7天数据
   const clampedHours = Math.min(hours, 168);
-  const cacheDuration = getCacheDuration(clampedHours);
   const longHistoryPoints = clampedHours > 1
-    ? Number(normalizeLongHistoryPoints(sys.long_history_points))
+    ? normalizeLongHistoryPoints(sys.long_history_points)
     : null;
+  const cacheDuration = getCacheDuration(clampedHours, longHistoryPoints);
+  const sampling = historySampling(clampedHours, longHistoryPoints);
+  const headers = { 'X-History-Interval-Seconds': String(sampling.intervalMs / 1000) };
 
   const cached = getMetricsHistoryCache(id, clampedHours, columns, longHistoryPoints);
   if (cached && Date.now() - cached.timestamp < cacheDuration) {
     const cachedData = Array.isArray(cached.data)
       ? cached.data.map(DashboardController.omitNullLossProbeFields)
       : cached.data;
-    return createSuccessResponse(cachedData, { 'X-Cache': 'HIT' });
+    return createSuccessResponse(cachedData, { ...headers, 'X-Cache': 'HIT' });
   }
 
   let data = await DashboardController.getDurableHistory(env, id, clampedHours, columns, longHistoryPoints);
@@ -402,6 +402,6 @@ export class DashboardController {
     : data;
   setMetricsHistoryCache(id, clampedHours, columns, sanitizedData, longHistoryPoints);
 
-  return createSuccessResponse(sanitizedData, { 'X-Cache': 'MISS' });
+  return createSuccessResponse(sanitizedData, { ...headers, 'X-Cache': 'MISS' });
 }
 }

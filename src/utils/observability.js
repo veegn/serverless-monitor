@@ -95,7 +95,7 @@ export function logAgentReport(metadata) {
   logWssEvent(
     'Agent',
     'REPORT',
-    `Report: server=${serverId} mode=${mode} samples=${sampleCount}${reportId ? ` reportId=${reportId}` : ''} d1=${persisted ? 'yes' : 'no'} (${durationMs}ms)`,
+    `Report: server=${serverId} mode=${mode} samples=${sampleCount}${reportId ? ` reportId=${reportId}` : ''} persisted=${persisted ? 'yes' : 'no'} (${durationMs}ms)`,
     metadata,
     LogLevel.INFO
   );
@@ -146,11 +146,11 @@ export function logFrontendDisconnect(metadata) {
   );
 }
 
-export function logD1BatchPersist(metadata, success = true, err = null) {
+export function logMetricsPersist(metadata, success = true, err = null) {
   const { serverId, sampleCount = 0, durationMs = 0 } = metadata;
   if (success) {
     logWssEvent(
-      'D1',
+      'Storage',
       'BATCH_WRITE_OK',
       `Saved ${sampleCount} samples for server=${serverId} in ${durationMs}ms`,
       metadata,
@@ -158,7 +158,7 @@ export function logD1BatchPersist(metadata, success = true, err = null) {
     );
   } else {
     logWssEvent(
-      'D1',
+      'Storage',
       'BATCH_WRITE_FAIL',
       `Failed to save ${sampleCount} samples for server=${serverId}: ${err?.message || err}`,
       { ...metadata, error: err?.message || String(err) },

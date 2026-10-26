@@ -1,5 +1,4 @@
 import { getAllServers } from '../utils/cache.js';
-import { DatabaseService } from '../database/DatabaseService.js';
 import { DashboardController } from '../handlers/DashboardController.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { DASHBOARD_LATENCY_WINDOW_HOURS, DASHBOARD_LATENCY_WINDOW_POINTS } from '../utils/config.js';
@@ -17,7 +16,7 @@ export class ServerService {
   }
 
   /**
-   * 统一获取整合了实时指标（DO/D1）、在线状态判定、字段脱敏与统计汇总的服务器列表
+   * 统一获取整合了实时指标（DO SQLite）、在线状态判定、字段脱敏与统计汇总的服务器列表
    *
    * @param {Record<string, any>} env - Cloudflare Workers 环境变量与绑定的存储
    * @param {object} [options={}] - 控制选项
@@ -40,9 +39,9 @@ export class ServerService {
     const rawServers = await getAllServers(env.DB, includeHidden);
     const serverIds = rawServers.map(server => server.id).filter(Boolean);
 
-    // 优先向 DO 获取实时状态与 3 小时三网延时窗口（纯内存，0 D1 读取）
+    // 优先向 DO 获取实时状态与 3 小时三网延时窗口（指标不读取 D1）
     const [realtimeState, durableLatencyMap] = await Promise.all([
-      DashboardController.getRealtimeStateForServers(env, serverIds, { maskPublicIp }).catch(() => ({ latestReportUpdates: [] })),
+      DashboardController.getRealtimeStateForServers(env, serverIds, { maskPublicIp }),
       includeLatencyHistory
         ? DashboardController.getDurableDashboardLatencyWindows(env, serverIds, {
             hours: DASHBOARD_LATENCY_WINDOW_HOURS,
@@ -52,7 +51,7 @@ export class ServerService {
     ]);
 
     const latencyHistory = durableLatencyMap || new Map();
-    const latestMetricsMap = new Map();
+    const reportsById = new Map((realtimeState?.latestReportUpdates || []).map(update => [update.serverId, update]));
 
     const now = Date.now();
     let globalOnline = 0;
@@ -64,11 +63,10 @@ export class ServerService {
     const regionStats = {};
 
     const servers = rawServers.map(server => {
-      const rawMetrics = latestMetricsMap.get(server.id) || null;
       let latestMetrics = null;
 
       if (realtimeState?.latestReportUpdates) {
-        const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === server.id);
+        const doReport = reportsById.get(server.id);
         if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
           const lastSample = doReport.samples[doReport.samples.length - 1];
           latestMetrics = {
@@ -76,10 +74,6 @@ export class ServerService {
             ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
           };
         }
-      }
-
-      if (!latestMetrics) {
-        latestMetrics = rawMetrics;
       }
 
       const item = {
@@ -102,21 +96,6 @@ export class ServerService {
         item.ip_v4 = '0';
         item.ip_v6 = '0';
         item.boot_time = '';
-      }
-
-      // 静态规格与公网真实 IP 兜底补齐（从历史库读取）
-      if (rawMetrics) {
-        if ((!item.ip_v4 || item.ip_v4 === '0' || item.ip_v4 === '1') && rawMetrics.ip_v4 && rawMetrics.ip_v4 !== '0' && rawMetrics.ip_v4 !== '1') {
-          item.ip_v4 = rawMetrics.ip_v4;
-        }
-        if ((!item.ip_v6 || item.ip_v6 === '0' || item.ip_v6 === '1') && rawMetrics.ip_v6 && rawMetrics.ip_v6 !== '0' && rawMetrics.ip_v6 !== '1') {
-          item.ip_v6 = rawMetrics.ip_v6;
-        }
-        if (!item.os && rawMetrics.os) item.os = rawMetrics.os;
-        if (!item.arch && rawMetrics.arch) item.arch = rawMetrics.arch;
-        if (!item.cpu_info && rawMetrics.cpu_info) item.cpu_info = rawMetrics.cpu_info;
-        if (!item.cpu_cores && rawMetrics.cpu_cores) item.cpu_cores = rawMetrics.cpu_cores;
-        if (!item.boot_time && rawMetrics.boot_time) item.boot_time = rawMetrics.boot_time;
       }
 
       if (maskPublicIp) {

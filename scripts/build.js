@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -17,7 +17,8 @@ if (fs.existsSync(distDir)) {
 console.log('Building frontend...');
 const preloadPath = path.join(__dirname, 'preload.cjs');
 const nodeOptions = `--require ${preloadPath} ${process.env.NODE_OPTIONS || ''}`.trim();
-execSync('npx vite build', {
+const viteCli = path.join(path.dirname(fileURLToPath(import.meta.resolve('vite/package.json'))), 'bin/vite.js');
+execFileSync(process.execPath, [viteCli, 'build'], {
   cwd: rootDir,
   stdio: 'inherit',
   env: { ...process.env, NODE_OPTIONS: nodeOptions }

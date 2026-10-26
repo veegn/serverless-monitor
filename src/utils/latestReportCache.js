@@ -2,9 +2,10 @@ import {
   LATEST_REPORT_CACHE_MAX_SERVERS,
   LATEST_REPORT_CACHE_TTL_MS
 } from './config.js';
+import { ReportReplayCache } from './ReportReplayCache.js';
 
 // 普通 Worker isolate 内的尽力而为缓存；不同 isolate 之间不共享。
-const latestReportUpdates = new Map();
+const latestReportUpdates = new ReportReplayCache();
 
 function normalizeTimestamp(value, fallback = 0) {
   const timestamp = Number(value);

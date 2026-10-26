@@ -48,3 +48,10 @@ export function scheduleAgentReportModeChanged(env, ctx) {
 
   return promise;
 }
+
+export async function notifyFrontendAccessChanged(env) {
+  if (!env?.METRICS_BROADCASTER) return;
+  const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
+  const response = await stub.fetch('http://internal/frontend-access-changed', { method: 'POST' });
+  if (!response.ok) throw new Error('Failed to refresh frontend permissions');
+}

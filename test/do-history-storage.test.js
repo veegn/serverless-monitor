@@ -1,3 +1,4 @@
+import { makeSqlStorage } from './helpers/sql-storage.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { MetricsBroadcaster } from '../src/durable/MetricsBroadcaster.js';
@@ -11,31 +12,7 @@ if (!globalThis.WebSocketRequestResponsePair) {
   globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {};
 }
 
-function makeMockStorage() {
-  const store = new Map();
-  return {
-    async get(key) {
-      return store.has(key) ? structuredClone(store.get(key)) : null;
-    },
-    async put(key, val) {
-      store.set(key, structuredClone(val));
-    },
-    async delete(key) {
-      store.delete(key);
-    },
-    async list(options = {}) {
-      const result = new Map();
-      const prefix = options.prefix || '';
-      for (const [k, v] of store.entries()) {
-        if (k.startsWith(prefix)) {
-          result.set(k, v);
-        }
-      }
-      return result;
-    },
-    store
-  };
-}
+const makeMockStorage = makeSqlStorage;
 
 function makeBroadcasterWithStorage(storage) {
   return new MetricsBroadcaster({
@@ -61,10 +38,10 @@ test('DO History: Ingests, persists to DO storage, and responds to GET /history'
   }];
 
   // 1. Ingest updates into DO
-  await broadcaster._ingestHistoryUpdatesAsync(updates, baseTs + 65000);
+  await broadcaster._persistUpdates(updates);
 
   // Verify memory history window
-  const window = broadcaster.historyWindows.get('server-do-01');
+  const window = await broadcaster.metricsStore.history('server-do-01');
   assert.ok(Array.isArray(window));
   assert.equal(window.length, 2); // 2 minute buckets
 
@@ -77,11 +54,8 @@ test('DO History: Ingests, persists to DO storage, and responds to GET /history'
   assert.equal(window[1].cpu, 50);
   assert.equal(window[1].net_in_speed, 8000);
 
-  // 2. Persist to storage
-  await broadcaster._persistHistorySnapshotIfNeeded(baseTs + 65000, true);
-  assert.ok(storage.store.has('durable_history_v1:server-do-01'));
-  const stored = storage.store.get('durable_history_v1:server-do-01');
-  assert.equal(stored.length, 2);
+  assert.ok(storage.db.prepare('SELECT COUNT(*) AS count FROM metric_blocks').get().count <= 2);
+  assert.equal(storage.db.prepare('SELECT COUNT(*) AS count FROM metric_history').get().count, 0);
 
   // 3. Query via GET /history
   const req = new Request(`http://internal/history?serverId=server-do-01&hours=1&columns=cpu,net_in_speed`);
@@ -112,7 +86,7 @@ test('DO History: Restores lazily from storage on cold start', async () => {
   ]);
 
   const newBroadcaster = makeBroadcasterWithStorage(storage);
-  assert.equal(newBroadcaster.historyWindows.has('server-reboot-01'), false);
+  assert.equal(storage.store.has('durable_history_v1:server-reboot-01'), true);
 
   // Querying /history restores it lazily
   const req = new Request(`http://internal/history?serverId=server-reboot-01&hours=1`);
@@ -124,7 +98,7 @@ test('DO History: Restores lazily from storage on cold start', async () => {
   assert.equal(body.data.length, 2);
   assert.equal(body.data[0].cpu, 12);
   assert.equal(body.data[1].cpu, 25);
-  assert.equal(newBroadcaster.historyWindows.has('server-reboot-01'), true);
+  assert.equal(storage.store.has('durable_history_v1:server-reboot-01'), false);
 });
 
 test('HTTP Update: D1 quota error is gracefully caught and does not block broadcast', async () => {
@@ -165,7 +139,12 @@ test('HTTP Update: D1 quota error is gracefully caught and does not block broadc
     })
   });
 
-  const res = await UpdateController.handleUpdate(req, { DB: failingDb }, { waitUntil() {} });
+  const broadcaster = makeBroadcasterWithStorage(makeMockStorage());
+  const env = { DB: failingDb, METRICS_BROADCASTER: {
+    idFromName() { return 'global'; },
+    get() { return { fetch(input, init) { return broadcaster.fetch(new Request(input, init)); } }; }
+  } };
+  const res = await UpdateController.handleUpdate(req, env, { waitUntil() {} });
   // Must return 200 OK despite D1 write failure
   assert.equal(res.status, 200);
 });
@@ -222,12 +201,12 @@ test('DO History: Clears history on POST /clear-history', async () => {
   const storage = makeMockStorage();
   const broadcaster = makeBroadcasterWithStorage(storage);
   storage.store.set('durable_history_v1:server-clear-01', [{ timestamp: Date.now(), cpu: 10 }]);
-  broadcaster.historyWindows.set('server-clear-01', [{ timestamp: Date.now(), cpu: 10 }]);
+  await broadcaster.metricsStore.migrateServer('server-clear-01');
 
   const req = new Request('http://internal/clear-history', { method: 'POST' });
   const res = await broadcaster.fetch(req);
   assert.equal(res.status, 200);
-  assert.equal(broadcaster.historyWindows.size, 0);
+  assert.equal(storage.db.prepare('SELECT COUNT(*) AS count FROM metric_blocks').get().count, 0);
   assert.equal(storage.store.size, 0);
 });
 
@@ -447,7 +426,7 @@ test('DO History: responds to POST /dashboard-latency-windows with 3-hour sample
   const win = json.windows['srv-latency-do-1'];
   assert.equal(win.ping.length, 20);
   assert.equal(win.loss.length, 20);
-  const sampledPoint = win.ping.find(p => p.ct !== undefined);
+  const sampledPoint = win.ping.find(p => Number.isFinite(p.ct));
   assert.ok(sampledPoint);
   assert.ok(sampledPoint.ct >= 28 && sampledPoint.ct <= 30);
 });

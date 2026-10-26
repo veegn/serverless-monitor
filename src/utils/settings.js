@@ -4,6 +4,9 @@ import {
   SITE_SETTINGS_CACHE_TTL_MS
 } from './config.js';
 import { normalizePct } from './traffic.js';
+import { AppError } from './errors.js';
+import { LONG_HISTORY_POINT_OPTIONS, DEFAULT_LONG_HISTORY_POINTS } from './historyPolicy.js';
+export { LONG_HISTORY_POINT_OPTIONS, DEFAULT_LONG_HISTORY_POINTS } from './historyPolicy.js';
 
 export const APPEARANCE_FIELDS = ['site_title', 'custom_bg', 'custom_bg_mobile', 'favicon', 'custom_head', 'custom_script', 'csp_static', 'csp_api', 'display_mode', 'preferred_theme', 'default_language', 'theme_options'];
 
@@ -13,8 +16,6 @@ export const TG_NOTIFY_MINUTES_MIN = 2;
 export const TG_NOTIFY_MINUTES_MAX = 30;
 export const TG_NOTIFY_LEGACY_TRUE_MINUTES = 5;
 export const EXPIRE_REMINDER_DAYS_MAX = 365;
-export const LONG_HISTORY_POINT_OPTIONS = [60, 120, 180, 240];
-export const DEFAULT_LONG_HISTORY_POINTS = 120;
 export const FRONTEND_WS_TIMEOUT_MINUTES_MAX = 1440;
 export const DEFAULT_NOTIFICATION_TIMEZONE = 'UTC';
 export const NOTIFICATION_LANGUAGES = ['zh', 'en', 'es'];
@@ -59,6 +60,8 @@ export const RESOURCE_ALERT_METRICS = [
 ];
 const BYTES_PER_MEGABIT = 1000 * 1000 / 8;
 let cachedSiteSettings = null;
+let cachedSiteSettingsDb = null;
+const lastKnownSiteSettings = new WeakMap();
 let siteSettingsCacheExpiry = 0;
 let cachedAppearanceOptions = null;
 let appearanceOptionsCacheExpiry = 0;
@@ -132,6 +135,7 @@ const defaults = {
 };
 
 export function normalizeLongHistoryPoints(value) {
+  if (value === 'auto') return 'auto';
   const points = Number(value);
   return String(
     LONG_HISTORY_POINT_OPTIONS.includes(points)
@@ -612,7 +616,7 @@ async function ensurePersistedJwtSecret(db, result, siteOptions) {
 export async function loadSiteSettings(db, options = {}) {
   const forceRefresh = options === true || Boolean(options && options.forceRefresh);
   const now = Date.now();
-  if (!forceRefresh && cachedSiteSettings && now < siteSettingsCacheExpiry) {
+  if (!forceRefresh && cachedSiteSettingsDb === db && cachedSiteSettings && now < siteSettingsCacheExpiry) {
     debug('Settings缓存命中');
     return cachedSiteSettings;
   }
@@ -627,8 +631,10 @@ export async function loadSiteSettings(db, options = {}) {
     ).first();
     if (siteRow) {
       const parsed = tryParseJSON(siteRow.value);
-      if (parsed) {
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         siteOptions = parsed;
+      } else {
+        throw new AppError('Invalid site settings', 503);
       }
     }
 
@@ -661,15 +667,22 @@ export async function loadSiteSettings(db, options = {}) {
     result.auto_register_default_group = String(result.auto_register_default_group || 'Default').trim().slice(0, 50) || 'Default';
   } catch (e) {
     console.error('Failed to load site settings:', e);
+    // Authentication policy must never fall back to the public defaults during an outage.
+    const previous = db && lastKnownSiteSettings.get(db);
+    if (previous) return previous;
+    throw new AppError('Site settings unavailable', 503);
   }
 
   cachedSiteSettings = result;
+  cachedSiteSettingsDb = db;
+  if (db) lastKnownSiteSettings.set(db, result);
   siteSettingsCacheExpiry = now + SITE_SETTINGS_CACHE_TTL_MS;
   return result;
 }
 
 export function clearSiteSettingsCache() {
   cachedSiteSettings = null;
+  cachedSiteSettingsDb = null;
   siteSettingsCacheExpiry = 0;
 }
 

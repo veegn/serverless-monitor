@@ -21,7 +21,7 @@
 
 ## 项目简介
 
-Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系统。服务器端安装 Agent 后会单向上报指标到 Worker，数据写入 D1，并通过 Durable Objects + WebSocket 推送到前端，实现免费托管、低维护的实时监控。
+Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控系统。服务器端安装 Agent 后会单向上报指标到 Worker，配置保存在 D1，指标提交到 Durable Object SQLite 后通过 WebSocket 推送到前端，实现免费托管、低维护的实时监控。
 
 支持主流 Linux 发行版、Alpine Linux、OpenWrt、macOS、群晖 DSM、飞牛 fnOS、Windows 等系统。
 
@@ -51,7 +51,7 @@ Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控�
 
 相比传统主控式探针，Serverless Monitor 更适合低成本、低维护和安全优先的监控场景：
 
-- 免费托管：面板、API、数据库和实时推送都运行在 Cloudflare 上，按免费额度友好设计；默认 60 秒上报间隔可支持约 60 台服务器，改为 120 秒后理论上可翻倍。
+- 免费托管：面板、API、数据库和实时推送都运行在 Cloudflare 上，配置与指标分开存储；容量取决于 HTTP/WSS 上报频率、访问人数、历史查询和 Cloudflare 实际额度，请在后台查看用量。
 - 单向上报更安全：没有 WebSSH、没有远程命令下发、没有主控通道；Agent 只向 Worker 上报指标。
 - 功能覆盖完整：实时指标、历史图表、地图展示、离线通知、资源告警、到期提醒、主题商店、多语言和移动端适配都已内置。
 - 参数动态下发：后台可修改 Ping 节点、采集间隔、HTTP 上报间隔、WSS 上报间隔、统计网卡、流量重置日、上下行流量校正等参数，Agent 后续自动拉取并生效；Worker 地址、`API_SECRET` 和自动更新开关变更需要重新执行安装命令。
@@ -64,7 +64,7 @@ Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控�
 | --------- | -------------------------------------------------------------------------------- |
 | 实时监控      | CPU、GPU、内存、交换分区、磁盘、磁盘 IO、网络、连接数、进程数、负载、运行时间                                      |
 | 历史数据      | 7 天历史图表、长时段采样、实时网速、月流量统计与校正                                                      |
-| 网络质量      | 电信、联通、移动、BGP 节点延迟与丢包率追踪；三网详情开启时首页从 D1 最近 2 小时抽样最多 20 个真实点并缓存 5 分钟 |
+| 网络质量      | 电信、联通、移动、BGP 节点延迟与丢包率追踪；三网详情开启时首页从 DO SQLite 最近 3 小时历史生成 20 个延迟/丢包窗口 |
 | 多视图前台     | 条形图、环形图、表格、地图视图，支持桌面端和移动端                                                        |
 | 管理后台      | 服务器增删改查、拖拽排序、隐藏服务器、导入导出、批量删除、数据库维护                                               |
 | 多系统 Agent | 主流 Linux、Alpine Linux、OpenWrt、群晖 DSM、飞牛 fnOS、FreeBSD、macOS、Windows；Rust 高性能探针 |
@@ -75,15 +75,15 @@ Serverless Monitor 是一个部署在 Cloudflare Workers 上的服务器监控�
 | 小组件       | 提供 iOS Scriptable 小组件脚本，适合移动端快速查看                                                |
 | 安全控制      | API Secret、管理员密码、JWT、Turnstile、CORS、CSP 白名单                                      |
 | 主题生态      | 内置主题、Mikus 模式、主题商店、第三方主题反代与预览                                                    |
-| 额度友好      | 按月表轮换、历史查询采样、缓存与限流设计，适配 Cloudflare 免费额度                                          |
+| 额度友好      | 10 秒/分钟分层聚合、小时块压缩、7 天保留、缓存与 WebSocket 休眠                                    |
 
 ## 系统架构
 
 ```mermaid
 flowchart LR
   Agent["Server Agent<br/>Rust"] -->|"POST /update"| Worker["Cloudflare Worker"]
-  Worker --> D1["Cloudflare D1<br/>servers / settings / history"]
-  Worker <--> DO["Durable Object<br/>WebSocket broadcast"]
+  Worker --> D1["Cloudflare D1<br/>servers / settings"]
+  Worker <--> DO["Durable Object<br/>SQLite history / WebSocket"]
   Worker --> Assets["Vue Dashboard<br/>Admin Panel"]
   Browser["Browser / Mobile / Widget"] <--> Worker
 ```
@@ -92,8 +92,10 @@ flowchart LR
 
 1. 在管理后台添加服务器，复制安装命令。
 2. 目标服务器安装 Agent，按上报间隔向 Worker 发送指标。
-3. Worker 校验 `API_SECRET`，写入 D1，并通过 Durable Object 广播实时数据。
+3. Worker 校验 Agent Secret，将指标交给 Durable Object；SQLite 事务提交成功后确认上报，并广播实时数据。
 4. 前台大盘、详情页、管理后台和 iOS 小组件读取同一套 API。
+
+存储与升级说明：最近 1 小时保留 10 秒聚合，7 天保留分钟统计，按小时压缩为 SQLite BLOB。CPU/内存等保留加权均值和峰值，网速/连接数等以峰值绘图并提供均值；历史、最新报告与去重信息共用小时行。9 个时间范围使用不同采样间隔，后台可选择自动或固定点数。旧 DO 快照和分钟 SQL 数据自动迁移，已经删除的历史无法恢复。HTTP 上报未确认写入时返回 503；WSS 返回 `accepted:false, persisted:false`，Agent 应保留报告并重试。详见 [采样与压缩设计](docs/metrics-storage.md) 和 [API 文档](API.md)。
 
 近期变化：
 
@@ -489,13 +491,13 @@ Rust 探针和旧 Shell / PowerShell 版本卸载脚本只清理各自安装的�
 | Cron          | 说明                         |
 | ------------- | -------------------------- |
 | `*/1 * * * *` | 每分钟检测离线节点、资源告警 |
-| `0 * * * *`   | 每小时执行合并任务，包括月表轮换、旧表清理，并按通知时区/到期通知小时执行到期检测 |
+| `0 * * * *`   | 每小时执行合并任务，包括每周日的遗留表清理，并按通知时区/到期通知小时执行到期检测 |
 
 ## 本地开发
 
 ### 环境要求
 
-- Node.js 18+
+- Node.js 22.19+
 - npm
 - Wrangler 4
 
@@ -503,7 +505,7 @@ Rust 探针和旧 Shell / PowerShell 版本卸载脚本只清理各自安装的�
 
 ```bash
 # 安装依赖
-npm install
+npm ci
 
 # 首次创建 D1 数据库
 npx wrangler d1 create server-monitor-db
@@ -536,8 +538,8 @@ API_SECRET=123456
 ### 测试数据
 
 ```bash
-node test/generate-sql.js
-wrangler d1 execute server-monitor-db --file=test/mock-data.sql
+npm run test:all
+node --test test/runtime.test.js
 ```
 
 更多本地测试说明见 [test/README.md](test/README.md)。
@@ -604,7 +606,7 @@ serverless-monitor/
 
 ### D1 免费额度够用吗
 
-默认 60 秒上报间隔按约 60 台服务器设计；改为 120 秒后可以进一步降低写入。读取主要来自前端访问和历史查询，项目已通过缓存、采样和登录限制降低消耗。实际额度以 Cloudflare 控制台显示为准。
+D1 只保存配置和告警状态；指标与历史查询使用 DO SQLite。上报频率、WebSocket 访问人数、7 天历史写入和查询都会影响 Workers / DO 用量，不能仅由 D1 配额推算节点容量。实际额度以 Cloudflare 控制台显示为准。
 
 ### 背景图没有显示
 
