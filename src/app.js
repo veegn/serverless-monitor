@@ -13,7 +13,6 @@ import {
   loadAppearanceOptions,
   normalizeFrontendWsTimeoutMinutes,
   normalizeLongHistoryPoints,
-  setDebug,
   debug
 } from './utils/settings.js';
 import { checkAuth, simpleAuthResponse } from './middleware/auth.js';
@@ -27,6 +26,7 @@ import { verifyTurnstileToken } from './utils/common.js';
 import { getCorsAllowedOrigins, createOptionsResponse, applyCors } from './utils/cors.js';
 import { getRemoteVersion } from './utils/version.js';
 import { HISTORY_ALL_QUERY_COLUMNS } from './utils/historyFields.js';
+import { withLogContext, requestLogContext, getLogContext, getLogCounts, getSlowThresholdMs, logEvent, logError, wasResponseLogged, correlationHeaders } from './utils/observability.js';
 import {
   CURRENT_VERSION,
   DASHBOARD_LATENCY_WINDOW_HOURS,
@@ -204,23 +204,34 @@ export class ServerlessMonitorApp {
     try {
       const id = this.env.METRICS_BROADCASTER.idFromName('global');
       const stub = this.env.METRICS_BROADCASTER.get(id);
-      return await stub.fetch('http://internal/health');
+      return await stub.fetch('http://internal/health', { headers: correlationHeaders() });
     } catch (e) {
       return createSuccessResponse({ ok: false, reason: e.message });
     }
   }
 
   async fetch(request) {
-    try {
-      return await this.handleRequest(request);
-    } catch (error) {
-      return applyCors(createErrorResponse(error), request, getCorsAllowedOrigins(this.env));
-    }
+    return withLogContext(requestLogContext(request), async () => {
+      const started = Date.now();
+      let response;
+      try { response = await this.handleRequest(request); }
+      catch (error) { response = applyCors(createErrorResponse(error), request, getCorsAllowedOrigins(this.env)); }
+      const durationMs = Date.now() - started;
+      const slow = response.status < 400 && durationMs >= getSlowThresholdMs();
+      if (response.status < 400 || !wasResponseLogged()) {
+        logEvent('http', response.status >= 400 ? 'http.request.rejected' : slow ? 'http.request.slow' : 'http.request.completed',
+          `${request.method} ${new URL(request.url).pathname} → ${response.status} (${durationMs}ms)`,
+          { status: response.status, durationMs }, response.status >= 500 ? 'error' : response.status >= 400 || slow ? 'warn' : 'debug');
+      }
+      if (response.status === 101) return response;
+      const headers = new Headers(response.headers);
+      headers.set('X-Request-ID', getLogContext().requestId);
+      return applyCors(new Response(response.body, { status: response.status, statusText: response.statusText, headers }),
+        request, getCorsAllowedOrigins(this.env));
+    }, this.env);
   }
 
   async handleRequest(request) {
-    setDebug(this.env.DEBUG);
-
     const url = new URL(request.url);
     const method = request.method;
     const path = url.pathname;
@@ -361,7 +372,7 @@ export class ServerlessMonitorApp {
         if (!this.env.METRICS_BROADCASTER) throw new AppError('History storage unavailable', 503);
         const id = this.env.METRICS_BROADCASTER.idFromName('global');
         const stub = this.env.METRICS_BROADCASTER.get(id);
-        const response = await stub.fetch('http://internal/clear-history', { method: 'POST' });
+        const response = await stub.fetch('http://internal/clear-history', { method: 'POST', headers: correlationHeaders() });
         if (!response.ok) throw new AppError('Failed to clear history', 503);
         return createSuccessResponse(result);
       }}
@@ -403,6 +414,23 @@ export class ServerlessMonitorApp {
   }
 
   async scheduled(event) {
+    return withLogContext({ runtime: 'worker', trigger: 'cron', cron: event.cron,
+      requestId: crypto.randomUUID(), scheduledTime: new Date(event.scheduledTime ?? Date.now()).toISOString() }, async () => {
+      const started = Date.now();
+      try {
+        await this.runScheduled(event);
+        const counts = getLogCounts();
+        logEvent('cron', 'cron.completed', `Scheduled checks finished | ${event.cron}`,
+          { ...counts, durationMs: Date.now() - started, outcome: counts.errors ? 'partial_failure' : counts.warnings ? 'degraded' : 'success' },
+          counts.errors || counts.warnings ? 'warn' : event.cron === '*/1 * * * *' ? 'debug' : 'info');
+      } catch (error) {
+        logError('cron', 'cron.failed', 'Scheduled checks failed', error, { durationMs: Date.now() - started });
+        throw error;
+      }
+    }, this.env);
+  }
+
+  async runScheduled(event) {
     const cron = event.cron;
     debug(`[Cron] 定时任务触发: ${cron}`);
 

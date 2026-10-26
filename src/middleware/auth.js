@@ -1,3 +1,4 @@
+import { logError } from '../utils/observability.js';
 const ALGORITHM = { name: 'HMAC', hash: 'SHA-256' };
 import { verifyPasswordHash } from '../utils/common.js';
 import { isValidJwtSecret } from '../utils/settings.js';
@@ -59,7 +60,7 @@ async function verifyJwt(token, secret) {
     
     return payload;
   } catch (e) {
-    console.error('JWT verification error:', e);
+    logError('auth', 'auth.token.invalid', 'Malformed authentication token rejected', e, {}, 'debug');
     return null;
   }
 }
@@ -102,7 +103,7 @@ async function verifyToken(token, env, sys) {
     const payload = await verifyJwt(token, secret);
     return payload !== null;
   } catch (e) {
-    console.error('Auth check error:', e);
+    logError('auth', 'auth.check.failed', 'Authentication check failed', e);
     return false;
   }
 }
@@ -181,7 +182,7 @@ export async function validateCredentials(username, password, env, sys) {
     );
     return { valid, needsPasswordUpgrade: false };
   } catch (e) {
-    console.error('Credential validation error:', e);
+    logError('auth', 'auth.credentials.failed', 'Credential verification failed', e);
     return { valid: false, needsPasswordUpgrade: false };
   }
 }

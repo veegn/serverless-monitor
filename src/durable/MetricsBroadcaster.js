@@ -36,13 +36,12 @@ import { UpdateController } from '../handlers/UpdateController.js';
 import {
   logAgentAuth,
   logAgentConnect,
-  logAgentReport,
   logMetricsPersist,
   logFrontendConnect,
   logFrontendDisconnect,
   logFrontendSubscribe,
   logModeTransition,
-  logWssEvent
+  logEvent, logError, withLogContext, requestLogContext, getLogContext, getSlowThresholdMs, setLogContext, ReportLogSummary
 } from '../utils/observability.js';
 import {
   AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,
@@ -296,6 +295,7 @@ export class MetricsBroadcaster {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    this.reportLogs = new ReportLogSummary();
     this.metricsStore = new SqlMetricsStore(state.storage);
     this.frontendSubscriptions = new FrontendSubscriptions(env, state.storage);
     this.latestReportUpdates = new ReportReplayCache();
@@ -335,7 +335,7 @@ export class MetricsBroadcaster {
           this.modeRevision = stored;
         }
       } catch (e) {
-        console.warn('[update-ws] Failed to load modeRevision:', e?.message || e);
+        logError('agent', 'mode.revision.load_failed', 'Reporting mode revision read failed', e, {}, 'warn');
       }
     }
     return this.modeRevision;
@@ -347,7 +347,7 @@ export class MetricsBroadcaster {
     try {
       await this.state?.storage?.put?.(MODE_REVISION_STORAGE_KEY, this.modeRevision);
     } catch (e) {
-      console.warn('[update-ws] Failed to persist modeRevision:', e?.message || e);
+      logError('agent', 'mode.revision.save_failed', 'Reporting mode revision write failed', e, {}, 'warn');
     }
     return this.modeRevision;
   }
@@ -526,6 +526,7 @@ export class MetricsBroadcaster {
   }
 
   _closeWsWithError(ws, message, code = 400, extra = {}, closeCode = WS_POLICY_VIOLATION, closeReason = message) {
+    logEvent('websocket', 'websocket.message.rejected', message, { status: code, closeCode, outcome: 'rejected' }, code >= 500 ? 'error' : 'warn');
     this._sendWsJson(ws, {
       type: 'error',
       ts: Date.now(),
@@ -690,7 +691,7 @@ export class MetricsBroadcaster {
     } catch (e) {
       // 查询异常不等于服务器被删除：已认证会话用附件续期，绝不因为 D1 抖动踢掉健康连接。
       // 未认证会话无法续期，用 503 + 1013 让 Agent 稍后重试。
-      console.warn('[update-ws] Server detail lookup failed:', e?.message || e);
+      logError('agent', 'agent.config.lookup_failed', 'Agent configuration lookup failed', e, { fallback: !!attachment.authenticated }, 'warn');
       if (attachment.authenticated && attachment.historyPartitionId) {
         serverDetail = { id: serverId, history_partition_id: attachment.historyPartitionId };
       } else {
@@ -723,7 +724,6 @@ export class MetricsBroadcaster {
       }
 
       if (!auth.isAuthorizedForNew) {
-        logAgentAuth({ serverId, ip: attachment?.clientIp || '' }, false, 'Invalid secret for new server');
         this._closeWsWithError(ws, 'Invalid secret', 401);
         return null;
       }
@@ -740,7 +740,6 @@ export class MetricsBroadcaster {
       const hasSecret = Object.prototype.hasOwnProperty.call(data, 'secret');
       if (!attachment.authenticated || hasSecret) {
         if (!auth.isAuthorizedForExisting) {
-          logAgentAuth({ serverId, ip: attachment?.clientIp || '' }, false, 'Invalid secret for existing server');
           this._closeWsWithError(ws, 'Invalid secret', 401);
           return null;
         }
@@ -776,6 +775,7 @@ export class MetricsBroadcaster {
         : this._getWssReportIntervalMs(serverDetail));
     const nextAttachment = {
       ...attachment,
+      connectionId: attachment.connectionId || crypto.randomUUID(),
       kind: AGENT_REPORT_KIND,
       authenticated: true,
       serverId,
@@ -787,6 +787,7 @@ export class MetricsBroadcaster {
       configMd5: agentConfig.md5
     };
     ws.serializeAttachment(nextAttachment);
+    setLogContext({ connectionId: nextAttachment.connectionId, serverId });
 
     if (!attachment.authenticated) {
       logAgentAuth({
@@ -865,7 +866,7 @@ export class MetricsBroadcaster {
 
       return ack;
     } catch (e) {
-      console.warn('[update-ws] Failed to build agent configuration:', e?.message || e);
+      logError('agent', 'agent.config.build_failed', 'Agent configuration response could not be built', e, {}, 'warn');
       return null;
     }
   }
@@ -947,6 +948,18 @@ export class MetricsBroadcaster {
   }
 
   async alarm() {
+    return withLogContext({ runtime: 'durable-object', trigger: 'alarm', requestId: crypto.randomUUID() }, async () => {
+      const started = Date.now();
+      this.reportLogs.flush();
+      try { return await this.runMaintenance(started); }
+      catch (error) {
+        logError('storage', 'maintenance.failed', 'Durable Object maintenance failed; Alarm will retry', error, { durationMs: Date.now() - started });
+        throw error;
+      }
+    }, this.env);
+  }
+
+  async runMaintenance(started = Date.now()) {
     this.maintenanceAlarmAt = 0;
     const more = this.metricsStore.cleanup();
     const moreSessions = await this.frontendSubscriptions.cleanup(this._getFrontendWebSockets());
@@ -958,6 +971,10 @@ export class MetricsBroadcaster {
       this.maintenanceAlarmAt = Date.now() + (more || moreSessions ? 1000 : this.resourceAlertSnapshotDirty ? 60_000 : 3600_000);
       await this.state.storage.setAlarm(this.maintenanceAlarmAt);
     }
+    logEvent('storage', 'maintenance.completed', 'Durable Object maintenance completed',
+      { historyPending: more, sessionsPending: moreSessions, snapshotPending: this.resourceAlertSnapshotDirty,
+        nextAlarmAt: this.maintenanceAlarmAt ? new Date(this.maintenanceAlarmAt).toISOString() : undefined, durationMs: Date.now() - started },
+      more || moreSessions ? 'debug' : 'info');
   }
 
   async _handleAgentConfigChanged(request) {
@@ -1093,7 +1110,7 @@ export class MetricsBroadcaster {
 
     this.frontendBroadcastTimer = setTimeout(() => {
       this.frontendBroadcastTimer = null;
-      this._flushFrontendBroadcastBatch().catch(error => console.warn('[ws] Broadcast failed:', error?.message || error));
+      this._flushFrontendBroadcastBatch().catch(error => logError('frontend', 'frontend.broadcast.failed', 'Realtime broadcast failed', error, {}, 'warn'));
     }, AGENT_WSS_FRONTEND_BATCH_WINDOW_MS);
   }
 
@@ -1168,7 +1185,7 @@ export class MetricsBroadcaster {
           if (configuredReportIntervalMs) return configuredReportIntervalMs;
         }
       } catch (e) {
-        console.warn('[update-ws] Failed to load agent interval for realtime hint:', e?.message || e);
+        logError('agent', 'agent.interval.lookup_failed', 'Agent report interval lookup failed', e, {}, 'warn');
       }
     }
     if (Number.isFinite(attachedReportIntervalMs) && attachedReportIntervalMs > 0) {
@@ -1224,7 +1241,7 @@ export class MetricsBroadcaster {
 
     logModeTransition({
       isFrontendActive,
-      subscribers: this._getFrontendSubscriberCount(),
+      subscribers: isFrontendActive ? this._getFrontendSubscriberCount() : 0,
       hintedAgents: hinted,
       modeRevision
     });
@@ -1245,7 +1262,7 @@ export class MetricsBroadcaster {
           if (entry?.data) entry.data.traffic_alert_state = value;
         }
       });
-    })().catch(error => console.warn('[traffic-alert] Evaluation failed:', error?.message || error));
+    })().catch(error => logError('alert', 'alert.traffic.failed', 'Traffic alert evaluation failed', error));
     this.state.waitUntil?.(promise);
   }
 
@@ -1258,9 +1275,28 @@ export class MetricsBroadcaster {
       throw new AppError('Invalid reportId', 400);
     }
     const reportKey = `${updates.map(update => update.serverId).join(',')}:${reportId || fingerprint}`;
-    const result = await this.metricsStore.ingest(updates, { reportKey, fingerprint });
-    await this._ensureMaintenanceAlarm();
-    return result;
+    const started = Date.now();
+    const metadata = { serverId: updates.length === 1 ? updates[0].serverId : undefined,
+      serverCount: updates.length, reportId, sampleCount: updates.reduce((sum, update) => sum + update.samples.length, 0) };
+    setLogContext({ serverId: metadata.serverId, reportId });
+    let result;
+    try {
+      result = await this.metricsStore.ingest(updates, { reportKey, fingerprint });
+      await this._ensureMaintenanceAlarm();
+      const durationMs = Date.now() - started;
+      this.reportLogs.record({ serverIds: updates.map(update => update.serverId), sampleCount: metadata.sampleCount,
+        duplicate: result.duplicate, durationMs, transport: getLogContext().transport || 'http' });
+      logMetricsPersist({ ...metadata, duplicate: result.duplicate, durationMs });
+      if (durationMs >= getSlowThresholdMs()) logEvent('storage', 'metrics.commit.slow', 'Metrics commit confirmed after a slow operation',
+        { ...metadata, duplicate: result.duplicate, persisted: true, durationMs }, 'warn');
+      return result;
+    } catch (error) {
+      const status = error instanceof AppError ? error.code : 503;
+      logError('storage', result ? 'metrics.maintenance.failed' : 'metrics.commit.failed',
+        result ? 'Metrics committed but maintenance scheduling failed; retry is safe' : status < 500 ? 'Metrics report rejected' : 'Metrics commit failed; Agent must retry',
+        error, { ...metadata, persisted: result?.persisted === true, status, durationMs: Date.now() - started }, status < 500 ? 'warn' : 'error');
+      throw error;
+    }
   }
 
   async _ensureMaintenanceAlarm(delayMs = 3600_000) {
@@ -1299,6 +1335,8 @@ export class MetricsBroadcaster {
       this._closeWsWithError(ws, 'Invalid report payload', 400);
       return;
     }
+
+    setLogContext({ serverId: data.id, reportId: data.reportId });
 
     const context = await this._resolveAgentContext(ws, attachment, data);
     if (!context) return;
@@ -1359,7 +1397,6 @@ export class MetricsBroadcaster {
       if (error instanceof AppError && error.code < 500) {
         this._closeWsWithError(ws, error.message, error.code);
       } else {
-        console.error('[update-ws] Metrics commit failed:', error?.message || error);
         this._sendWsJson(ws, { type: 'ack', ackFor: 'report', ts: Date.now(),
           accepted: false, persisted: false, retryAfterMs: 1000, ...(reportId ? { reportId } : {}) });
       }
@@ -1374,11 +1411,6 @@ export class MetricsBroadcaster {
         this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
       }
       this._evaluateAgentTrafficAlertIfDue(context, latestMetrics);
-    }
-    if (this.env.DEBUG == 1) {
-      logMetricsPersist({ serverId: context.serverId, sampleCount: samples.length, durationMs: Date.now() - reportTs });
-      logAgentReport({ serverId: context.serverId, mode: data.batch === true ? 'batch' : 'realtime',
-        sampleCount: samples.length, reportId, persisted: true, durationMs: Date.now() - reportTs });
     }
     const configAck = await this._buildAgentConfigAck(context);
     this._sendWsJson(ws, {
@@ -1418,6 +1450,7 @@ export class MetricsBroadcaster {
 
     const initialAttachment = {
       kind: AGENT_REPORT_KIND,
+      connectionId: getLogContext().requestId || crypto.randomUUID(),
       authenticated: false,
       serverId: '',
       historyPartitionId: 0,
@@ -1442,11 +1475,12 @@ export class MetricsBroadcaster {
 
     // Agent WebSocket 使用 DO WebSocket Hibernation API 接管连接
     this.state.acceptWebSocket(server);
+    setLogContext({ connectionId: initialAttachment.connectionId, transport: 'wss' });
 
     logAgentConnect({
       ip: request.headers.get('cf-connecting-ip') || '',
       agentVersion: initialAttachment.agentVersion,
-      isHibernating: true
+      hibernationEnabled: true
     });
 
     const realtimeState = this._getAgentRealtimeState();
@@ -1480,6 +1514,13 @@ export class MetricsBroadcaster {
   }
 
   async fetch(request) {
+    return withLogContext(requestLogContext(request, 'durable-object'), async () => {
+      try { return await this.handleFetch(request); }
+      catch (error) { logError('durable-object', 'durable.request.failed', 'Durable Object request failed', error); throw error; }
+    }, this.env);
+  }
+
+  async handleFetch(request) {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
@@ -1550,6 +1591,7 @@ export class MetricsBroadcaster {
       // 将订阅 scope 和空 serverIds 附加到 WebSocket（休眠后仍保留）
       try {
         await this.frontendSubscriptions.save(server, { ...access, scope, serverIds: [] });
+        setLogContext({ transport: 'wss', connectionId: server.deserializeAttachment()?.sessionId });
         await this._ensureMaintenanceAlarm();
       } catch (_) {
         try { server.close(1013, 'Subscription storage unavailable'); } catch (_) {}
@@ -1568,7 +1610,7 @@ export class MetricsBroadcaster {
 
       // 连上后立即推送已缓存的最新批量数据，避免客户端在 60s 节能批处理模式下陷入盲等
       this._pushLatestUpdatesToSubscriber(server, scope, []).catch(err => {
-        console.warn('[ws] Failed to push latest updates to subscriber on connect:', err?.message || err);
+        logError('frontend', 'frontend.replay.failed', 'Initial report replay failed', err, { phase: 'connect' }, 'warn');
       });
 
       logFrontendConnect({
@@ -1582,7 +1624,7 @@ export class MetricsBroadcaster {
         resourceAlertActive: this._shouldCacheResourceAlertSamples(),
         realtimeActive: true
       }).catch(err => {
-        console.warn('[ws] Failed to hint agent realtime interval on connect:', err?.message || err);
+        logError('agent', 'agent.mode_hint.failed', 'Realtime interval hint failed', err, { phase: 'connect' }, 'warn');
       });
 
       const responseHeaders = new Headers();
@@ -2012,7 +2054,7 @@ export class MetricsBroadcaster {
         });
       }
     } catch (e) {
-      console.warn('[ws] Failed to push latest updates to subscriber:', e?.message || e);
+      logError('frontend', 'frontend.replay.failed', 'Report replay failed', e, {}, 'warn');
     }
   }
 
@@ -2050,7 +2092,7 @@ export class MetricsBroadcaster {
 
       this.resourceAlertLastSnapshotSave = Number(snapshot?.savedAt) || 0;
     } catch (e) {
-      console.warn('[resource-alert] load snapshot failed:', e.message || e);
+      logError('alert', 'alert.snapshot.load_failed', 'Resource alert snapshot read failed', e, {}, 'warn');
     }
   }
 
@@ -2140,7 +2182,7 @@ export class MetricsBroadcaster {
       this.resourceAlertSnapshotDirty = false;
       this.resourceAlertLastSnapshotSave = now;
     } catch (e) {
-      console.warn('[resource-alert] persist snapshot failed:', e.message || e);
+      logError('alert', 'alert.snapshot.save_failed', 'Resource alert snapshot write failed; maintenance will retry', e, {}, 'warn');
     }
   }
 
@@ -2323,13 +2365,24 @@ export class MetricsBroadcaster {
   }
 
   async webSocketMessage(ws, message) {
+    return this.withSocketLogContext(ws, 'websocket.message', () => this.handleSocketMessage(ws, message));
+  }
+
+  withSocketLogContext(ws, trigger, callback) {
+    const attachment = ws.deserializeAttachment() || {};
+    return withLogContext({ runtime: 'durable-object', trigger, transport: 'wss', requestId: crypto.randomUUID(),
+      connectionId: attachment.connectionId || attachment.sessionId, serverId: attachment.serverId,
+      scope: attachment.scope, role: attachment.kind === AGENT_REPORT_KIND ? 'agent' : 'frontend' }, callback, this.env);
+  }
+
+  async handleSocketMessage(ws, message) {
     const attachment = ws.deserializeAttachment() || {};
     if (attachment.kind === AGENT_REPORT_KIND) {
       // 与标准 WebSocket 路径保持一致：未捕获异常会直接抛给 DO runtime，可能重置整个对象。
       try {
         await this._handleAgentReportMessage(ws, message, attachment);
       } catch (error) {
-        console.warn('[update-ws] Agent hibernation message failed:', error?.message || error);
+        logError('agent', 'agent.message.failed', 'Agent WebSocket message failed', error);
         this._closeWsWithError(ws, 'Internal error', 500);
       }
       return;
@@ -2377,7 +2430,7 @@ export class MetricsBroadcaster {
           }));
         } catch (_) {}
         this._pushLatestUpdatesToSubscriber(ws, scope, serverIds).catch(err => {
-          console.warn('[ws] Failed to push latest updates to subscriber on subscribe:', err?.message || err);
+          logError('frontend', 'frontend.replay.failed', 'Report replay failed', err, { phase: 'subscribe' }, 'warn');
         });
         logFrontendSubscribe({
           scope,
@@ -2391,7 +2444,7 @@ export class MetricsBroadcaster {
             realtimeActive: true
           });
         } catch (e) {
-          console.warn('[ws] Failed to hint agent realtime interval:', e?.message || e);
+          logError('agent', 'agent.mode_hint.failed', 'Realtime interval hint failed', e, { phase: 'subscribe' }, 'warn');
         }
         return;
       }
@@ -2400,9 +2453,15 @@ export class MetricsBroadcaster {
   }
 
   // WebSocket 关闭 — DO 自动清理，处理会话状态清理与前端断连感知
-  async webSocketClose(ws, code, reason) {
+  async webSocketClose(ws, code, reason, wasClean) {
+    return this.withSocketLogContext(ws, 'websocket.close', () => this.handleSocketClose(ws, code, reason, wasClean));
+  }
+
+  async handleSocketClose(ws, code, reason, wasClean) {
     const attachment = ws.deserializeAttachment() || {};
     if (attachment.kind === AGENT_REPORT_KIND) {
+      this.reportLogs.flush();
+      logEvent('agent', 'agent.disconnect', 'Agent WebSocket disconnected', { code, reason, wasClean }, [1000, 1001].includes(code) ? 'info' : 'warn');
       if (attachment.serverId) {
         this.agentServerDetails.delete(attachment.serverId);
       }
@@ -2410,24 +2469,27 @@ export class MetricsBroadcaster {
     }
 
     try { await this.frontendSubscriptions.remove(ws); } catch (error) {
-      console.warn('[ws] Session cleanup deferred:', error?.message || error);
+      logError('frontend', 'frontend.session.cleanup_deferred', 'Session cleanup deferred to maintenance', error, {}, 'warn');
     }
 
     logFrontendDisconnect({
       scope: attachment.scope,
       remainingSubscribers: this._getFrontendSubscriberCount(ws),
+      code, wasClean,
       reason: reason || ''
     });
 
     if (this._getFrontendSubscriberCount(ws) === 0) {
       return this._hintAgentRealtimeIntervals({ frontendActive: false, realtimeActive: false }).catch(err => {
-        console.warn('[ws] Failed to hint agent idle interval on frontend disconnect:', err?.message || err);
+        logError('agent', 'agent.mode_hint.failed', 'Idle interval hint failed', err, { phase: 'disconnect' }, 'warn');
       });
     }
   }
 
   // WebSocket 错误 — DO 自动处理
-  webSocketError(ws, error) {}
+  webSocketError(ws, error) {
+    return this.withSocketLogContext(ws, 'websocket.error', () => logError('websocket', 'websocket.error', 'WebSocket transport failed', error));
+  }
 }
 
 export default MetricsBroadcaster;

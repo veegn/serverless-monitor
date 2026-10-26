@@ -1,3 +1,4 @@
+import { logError } from './observability.js';
 /**
  * 公共工具函数模块
  * 统一存放各处重复定义的函数
@@ -35,7 +36,7 @@ export async function verifyTurnstileToken(token, secretKey) {
     const data = await response.json();
     return data.success === true;
   } catch (e) {
-    console.error('Turnstile verification error:', e);
+    logError('auth', 'auth.turnstile.failed', 'Turnstile verification request failed', e, {}, 'warn');
     return false;
   } finally {
     clearTimeout(timeout);

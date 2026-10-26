@@ -63,6 +63,11 @@ export function applyCors(response, request, allowedOrigins) {
   const newHeaders = new Headers(response.headers);
   newHeaders.set('Access-Control-Allow-Origin', origin);
   newHeaders.set('Access-Control-Allow-Credentials', 'true');
+  const exposed = (newHeaders.get('Access-Control-Expose-Headers') || '').split(',').map(value => value.trim()).filter(Boolean);
+  for (const header of ['X-Request-ID', 'X-Cache', 'X-History-Interval-Seconds']) {
+    if (!exposed.some(value => value.toLowerCase() === header.toLowerCase())) exposed.push(header);
+  }
+  newHeaders.set('Access-Control-Expose-Headers', exposed.join(', '));
   
   const vary = newHeaders.get('Vary') || '';
   if (!vary.includes('Origin')) {

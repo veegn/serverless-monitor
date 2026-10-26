@@ -1,3 +1,4 @@
+import { logError, setLogContext, correlationHeaders } from '../utils/observability.js';
 import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
 import { ServerService } from '../services/ServerService.js';
 import { getAllServers, getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from '../utils/cache.js';
@@ -39,6 +40,7 @@ export class DashboardController {
   }
 
   async handleHistory(request, id, hours, columns, sys) {
+    setLogContext({ serverId: id });
     return DashboardController.fetchHistoryData(this.env, request, id, hours, columns, sys);
   }
 
@@ -136,7 +138,7 @@ export class DashboardController {
       const chunk = serverIds.slice(offset, offset + DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE);
       const response = await stub.fetch('http://internal/latest-report-updates', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: correlationHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ serverIds: chunk })
       });
       if (!response.ok) throw new AppError('Realtime metrics unavailable', 503);
@@ -146,7 +148,7 @@ export class DashboardController {
 
     return { latestReportUpdates: updates };
   } catch (e) {
-    console.warn('[Dashboard] Failed to read realtime state:', e?.message || e);
+    logError('dashboard', 'dashboard.latest.failed', 'Latest report lookup failed', e, {}, 'warn');
     throw new AppError('Realtime metrics unavailable', 503);
   }
 }
@@ -167,7 +169,7 @@ export class DashboardController {
         const chunk = serverIds.slice(offset, offset + DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE);
         const response = await stub.fetch('http://internal/dashboard-latency-windows', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: correlationHeaders({ 'Content-Type': 'application/json' }),
           body: JSON.stringify({ serverIds: chunk, hours, points })
         });
         if (!response.ok) continue;
@@ -183,7 +185,7 @@ export class DashboardController {
 
       return latencyMap;
     } catch (e) {
-      console.warn('[Dashboard] Failed to read latency windows from DO:', e?.message || e);
+      logError('dashboard', 'dashboard.latency.failed', 'Latency window lookup failed', e, {}, 'warn');
       return empty;
     }
   }
@@ -194,12 +196,12 @@ export class DashboardController {
       const id = env.METRICS_BROADCASTER.idFromName('global');
       const stub = env.METRICS_BROADCASTER.get(id);
       const url = `http://internal/history?serverId=${encodeURIComponent(serverId)}&hours=${encodeURIComponent(hours)}&columns=${encodeURIComponent(columns)}&points=${encodeURIComponent(points)}`;
-      const response = await stub.fetch(url);
+      const response = await stub.fetch(url, { headers: correlationHeaders() });
       if (!response.ok) throw new AppError('History storage unavailable', 503);
       const json = await response.json();
       return Array.isArray(json?.data) ? json.data : null;
     } catch (e) {
-      console.warn('[Dashboard] Failed to read history from DO:', e?.message || e);
+      logError('dashboard', 'dashboard.history.failed', 'History lookup failed', e, { serverId }, 'warn');
       throw new AppError('History storage unavailable', 503);
     }
   }

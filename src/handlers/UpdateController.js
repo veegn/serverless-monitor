@@ -1,4 +1,5 @@
 import { readLimitedJson } from '../utils/requestBody.js';
+import { logEvent, logError, setLogContext, markResponseLogged, correlationHeaders } from '../utils/observability.js';
 import { getServerDetail, clearServerDetailCache, patchServerDetailCache, clearServersListCache, getAllServers } from '../utils/cache.js';
 import { NotificationService } from '../services/NotificationService.js';
 import { getNotificationMessages } from '../services/notificationMessages.js';
@@ -116,7 +117,8 @@ export class UpdateController {
 }
 
   static logUpdateBadRequest(reason, details = {}) {
-  console.warn('[Update] 400 Bad Request:', reason, details);
+  markResponseLogged();
+  logEvent('agent', 'agent.report.rejected', 'Agent report rejected', { reason, ...details, status: 400 }, 'warn');
 }
 
   static getDeclaredContentLength(request) {
@@ -423,26 +425,38 @@ export class UpdateController {
     if (!env.METRICS_BROADCASTER) throw new AppError('Metrics storage unavailable', 503);
     const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
     const body = JSON.stringify({ updates: [update], reportId, maintainState });
+    let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const response = await stub.fetch('http://internal/batch-push', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+          method: 'POST', headers: correlationHeaders({ 'Content-Type': 'application/json', 'X-CFSM-Attempt': String(attempt + 1) }), body,
           signal: AbortSignal.timeout(5000)
         });
         if (response.ok) {
           const result = await response.json();
-          if (result.ok === true && result.persisted === true) return;
+          if (result.ok === true && result.persisted === true) {
+            if (attempt) logEvent('storage', 'metrics.commit.recovered', 'Metrics commit succeeded after retry', { serverId: update.serverId, reportId, attempts: attempt + 1, persisted: true });
+            return;
+          }
           throw new Error('Metrics commit was not confirmed');
         }
         if (response.status >= 400 && response.status < 500) {
           throw new AppError('Metrics report rejected', response.status);
         }
+        throw new Error(`Metrics storage returned HTTP ${response.status}`);
       } catch (error) {
         if (error instanceof AppError && error.code < 500) throw error;
+        lastError = error;
       }
-      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+      if (attempt < 2) {
+        logError('storage', 'metrics.commit.retry', 'Metrics commit unconfirmed; retrying', lastError,
+          { serverId: update.serverId, reportId, attempt: attempt + 1, nextAttempt: attempt + 2, retryAfterMs: 100 * (attempt + 1) }, 'warn');
+        await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
+      }
     }
-    throw new AppError('Metrics storage unavailable; retry report', 503);
+    const error = new AppError('Metrics storage unavailable; retry report', 503, { attempts: 3, retryable: true });
+    error.cause = lastError;
+    throw error;
   }
 
   static checkSecretAuthorization(secret, serverDetail, settings, env) {
@@ -523,16 +537,18 @@ export class UpdateController {
     // Content-Length is an early rejection; readLimitedJson also bounds streaming bodies.
     const declaredLength = UpdateController.getDeclaredContentLength(request);
     if (declaredLength !== null && declaredLength > UPDATE_MAX_REQUEST_BYTES) {
-      console.warn('[Update] 413 Payload too large:', {
-        content_length: declaredLength,
-        limit: UPDATE_MAX_REQUEST_BYTES
-      });
+      markResponseLogged();
+      logEvent('agent', 'agent.report.too_large', 'Agent report exceeds body limit', {
+        bodyBytes: declaredLength,
+        limitBytes: UPDATE_MAX_REQUEST_BYTES, status: 413
+      }, 'warn');
       return UpdateController.createPayloadTooLargeResponse();
     }
 
     const data = await readLimitedJson(request, UPDATE_MAX_REQUEST_BYTES);
     const { id, secret } = data;
     const rawId = typeof id === 'string' ? id.trim() : '';
+    setLogContext({ transport: 'http', ...(rawId ? { serverId: rawId } : {}), reportId: data.reportId });
 
     let settings = null;
     try {
@@ -636,7 +652,7 @@ export class UpdateController {
           });
         }
       } catch (checkErr) {
-        console.warn('[AutoDiscovery] duplicate name check failed:', checkErr?.message || checkErr);
+        logError('agent', 'agent.discovery.lookup_failed', 'Existing node lookup failed', checkErr, {}, 'warn');
       }
 
       serverId = crypto.randomUUID();
@@ -658,7 +674,7 @@ export class UpdateController {
                 message: regMsg
               });
             } catch (notifyErr) {
-              console.warn('[AutoRegister] Notification error:', notifyErr?.message || notifyErr);
+              logError('notification', 'notification.registration.failed', 'Auto-registration notification failed', notifyErr, {}, 'warn');
             }
           })());
         }
@@ -731,7 +747,7 @@ export class UpdateController {
                   message: regMsg
                 });
               } catch (notifyErr) {
-                console.warn('[AutoRegister] Notification error:', notifyErr?.message || notifyErr);
+                logError('notification', 'notification.registration.failed', 'Auto-registration notification failed', notifyErr, {}, 'warn');
               }
             })());
           }
@@ -745,6 +761,7 @@ export class UpdateController {
       }
     }
 
+    setLogContext({ serverId });
     let regionCode = request.cf?.country || request.headers?.get('cf-ipcountry') || '';
     const agentVersion = UpdateController.normalizeAgentVersion(request.headers.get('X-Agent-Version'));
 
@@ -870,7 +887,7 @@ export class UpdateController {
         }
       });
     } catch (configError) {
-      console.warn('[Update] Failed to build agent configuration:', configError?.message || configError);
+      logError('agent', 'agent.config.build_failed', 'Agent configuration response could not be built', configError, {}, 'warn');
       return new Response('OK', {
         status: 200,
         headers: {
@@ -883,7 +900,11 @@ export class UpdateController {
       });
     }
   } catch (e) {
-    if (e instanceof AppError && e.code === 413) return UpdateController.createPayloadTooLargeResponse();
+    if (e instanceof AppError && e.code === 413) {
+      markResponseLogged();
+      logEvent('agent', 'agent.report.too_large', 'Agent report stream exceeds body limit', { limitBytes: UPDATE_MAX_REQUEST_BYTES, status: 413 }, 'warn');
+      return UpdateController.createPayloadTooLargeResponse();
+    }
     return createErrorResponse(e);
   }
 }
@@ -914,6 +935,8 @@ export class UpdateController {
     const realOrigin = new URL(request.url).origin;
     const headers = new Headers(request.headers);
     headers.set('X-Real-Origin', realOrigin);
+    const requestId = correlationHeaders()['X-CFSM-Request-ID'];
+    if (requestId) headers.set('X-CFSM-Request-ID', requestId);
     if (request.cf?.country && !headers.get('cf-ipcountry')) {
       headers.set('cf-ipcountry', request.cf.country);
     }
@@ -924,7 +947,7 @@ export class UpdateController {
       redirect: request.redirect
     }));
   } catch (e) {
-    console.error(`${logPrefix} DO upgrade failed:`, e);
+    logError('websocket', 'websocket.upgrade.failed', 'WebSocket upgrade failed', e, { transport: 'wss', path: internalPath });
     return new Response(JSON.stringify({ error: 'WebSocket error', code: 500 }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' }

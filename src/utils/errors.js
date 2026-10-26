@@ -1,3 +1,5 @@
+import { logError, markResponseLogged } from './observability.js';
+
 export class AppError extends Error {
   constructor(message, code = 500, details = null) {
     super(message);
@@ -7,13 +9,10 @@ export class AppError extends Error {
   }
 }
 
-export function createErrorResponse(error, logError = true) {
-  if (logError) {
-    if (error instanceof AppError) {
-      console.error(`[Error] ${error.code}: ${error.message}`, error.details || '');
-    } else {
-      console.error('[Error] Unexpected:', error.message, error.stack);
-    }
+export function createErrorResponse(error, shouldLog = true) {
+  if (shouldLog) {
+    const status = error instanceof AppError ? error.code : 500;
+    emitResponseError(error, status);
   }
 
   const code = error instanceof AppError ? error.code : 500;
@@ -28,6 +27,13 @@ export function createErrorResponse(error, logError = true) {
     status: code,
     headers: { 'Content-Type': 'application/json' }
   });
+}
+
+function emitResponseError(error, status) {
+  markResponseLogged();
+  logError('http', status < 500 ? 'http.request.rejected' : 'http.request.failed',
+    status < 500 ? error.message : 'Request failed', error,
+    { status, ...(error instanceof AppError && error.details ? { details: error.details } : {}) }, status < 500 ? 'warn' : 'error');
 }
 
 export function createSuccessResponse(data, headers = {}) {

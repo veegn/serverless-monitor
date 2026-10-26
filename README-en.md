@@ -528,6 +528,8 @@ npm run test:history-query
 npm run test:agent-config
 ```
 
+See [Observability logs](docs/observability.md) for Worker/DO log levels, request correlation, minute summaries, and troubleshooting examples.
+
 Local `.env` requires at least:
 
 ```bash

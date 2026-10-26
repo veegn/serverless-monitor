@@ -1,3 +1,4 @@
+import { logEvent, logError, correlationHeaders } from '../utils/observability.js';
 import { clearServersListCache, getAllServers } from '../utils/cache.js';
 import {
   DEFAULT_NOTIFICATION_TEMPLATE,
@@ -405,7 +406,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     try {
       const response = await stub.fetch('http://internal/evaluate-resource-alerts', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: correlationHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           rules: batch.map(({ rule, serverIds }) => ({
             ruleId: rule.id,
@@ -418,7 +419,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       });
 
       if (!response.ok) {
-        console.warn('[ResourceAlert] DO evaluate failed:', response.status);
+        logEvent('alert', 'alert.resource.lookup_failed', 'Resource alert evaluation returned an error', { status: response.status }, 'warn');
         continue;
       }
 
@@ -445,7 +446,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
         resultMap.set(ruleId, existing);
       }
     } catch (e) {
-      console.warn('[ResourceAlert] DO evaluate failed:', e?.message || e);
+      logError('alert', 'alert.resource.lookup_failed', 'Resource alert state lookup failed', e, {}, 'warn');
     }
   }
 
@@ -733,7 +734,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     ).bind(newStr, server.id, oldStr).run();
     if (meta && meta.changes > 0) hooks.patchCache?.(server.id, newStr);
   } catch (e) {
-    console.error('[traffic-alert] evaluate failed:', e);
+    logError('alert', 'alert.traffic.failed', 'Traffic alert evaluation failed', e, { serverId: server?.id });
   }
 }
 
@@ -848,6 +849,30 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
 }
 
   static async sendNotification(settings, msg, notificationContext = {}) {
+    const started = Date.now();
+    const token = String(settings?.tg_bot_token || '');
+    const channel = normalizeBooleanSetting(settings?.notification_webhook_enabled) === 'true' ? 'webhook'
+      : !token ? null : NotificationService.isSmtpNotificationTarget(token) ? 'smtp'
+      : token.startsWith('onebot:') ? 'onebot' : token.includes('feishu.cn') ? 'feishu'
+      : token.includes('dingtalk.com') ? 'dingtalk' : token.includes('api.day.app') || token.startsWith('bark:') ? 'bark'
+      : token.includes('weixin.qq.com') ? 'wechat' : token.includes('ftqq.com') || token.startsWith('server:') ? 'serverchan'
+      : token.includes('wxpusher') ? 'wxpusher' : token.includes('/message?token=') ? 'gotify' : settings?.tg_chat_id ? 'telegram' : 'unknown';
+    const fields = { channel, notificationEvent: notificationContext.event, clientCount: notificationContext.count };
+    try {
+      const result = await NotificationService.deliverNotification(settings, msg, notificationContext);
+      if (channel) {
+        if (result) logError('notification', 'notification.failed', 'Notification delivery failed', result,
+          { ...fields, durationMs: Date.now() - started }, 'warn');
+        else logEvent('notification', 'notification.sent', 'Notification delivered', { ...fields, durationMs: Date.now() - started });
+      }
+      return result;
+    } catch (error) {
+      logError('notification', 'notification.failed', 'Notification delivery failed', error, { ...fields, durationMs: Date.now() - started });
+      throw error;
+    }
+  }
+
+  static async deliverNotification(settings, msg, notificationContext = {}) {
   const context = NotificationService.buildNotificationContext(settings || {}, msg, notificationContext);
   const formattedMsg = NotificationService.formatNotificationMessage(settings || {}, msg, context);
   context.notification = formattedMsg;
@@ -1049,7 +1074,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     const latestTimestampsMap = new Map();
     for (let offset = 0; offset < allServers.length; offset += 500) {
       const response = await stub.fetch('http://internal/latest-timestamps', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: correlationHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ serverIds: allServers.slice(offset, offset + 500).map(server => server.id) })
       });
       if (!response.ok) throw new Error('Latest report timestamps unavailable');
@@ -1136,7 +1161,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       ).bind(JSON.stringify(nextState)).run();
     }
   } catch (e) {
-    console.error('Offline detection failed:', e);
+    logError('alert', 'alert.offline.failed', 'Offline detection failed; skipping this check', e);
   }
 }
 
@@ -1319,11 +1344,11 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     for (const payload of notificationPayloads) {
       const notificationError = await NotificationService.sendNotification(siteSettings, payload.msg, payload.context);
       if (notificationError) {
-        console.warn('[ResourceAlert] notification failed:', notificationError);
+        logError('notification', 'notification.resource.failed', 'Resource alert delivery failed', notificationError, {}, 'warn');
       }
     }
   } catch (e) {
-    console.error('Resource alert evaluation failed:', e);
+    logError('alert', 'alert.resource.failed', 'Resource alert evaluation failed', e);
   }
 }
 
@@ -1393,7 +1418,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
             message: renewalList
           });
         } catch (e) {
-          console.error('Failed to send auto-renewal notification:', e);
+          logError('notification', 'notification.renewal.failed', 'Auto-renewal notification failed', e);
         }
       }
     }
@@ -1411,12 +1436,12 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
           message: serverList
         });
       } catch (e) {
-        console.error('Failed to send expiration reminder notification:', e);
+        logError('notification', 'notification.expiration.failed', 'Expiration reminder delivery failed', e);
       }
     }
     return true;
   } catch (e) {
-    console.error('Expiration check failed:', e);
+    logError('alert', 'alert.expiration.failed', 'Expiration check failed', e);
     return false;
   }
 }

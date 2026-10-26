@@ -5,10 +5,12 @@ import {
 } from './config.js';
 import { normalizePct } from './traffic.js';
 import { AppError } from './errors.js';
+import { logEvent, logError, hasLogContext, withLogContext } from './observability.js';
+import { APPEARANCE_FIELDS } from './settingFields.js';
+export { APPEARANCE_FIELDS } from './settingFields.js';
 import { LONG_HISTORY_POINT_OPTIONS, DEFAULT_LONG_HISTORY_POINTS } from './historyPolicy.js';
 export { LONG_HISTORY_POINT_OPTIONS, DEFAULT_LONG_HISTORY_POINTS } from './historyPolicy.js';
 
-export const APPEARANCE_FIELDS = ['site_title', 'custom_bg', 'custom_bg_mobile', 'favicon', 'custom_head', 'custom_script', 'csp_static', 'csp_api', 'display_mode', 'preferred_theme', 'default_language', 'theme_options'];
 
 export const SITE_FIELDS = ['is_public', 'show_price', 'show_expire', 'show_tf', 'show_three_net_details', 'wss_report_enabled', 'frontend_ws_timeout_minutes', 'long_history_points', 'tg_notify', 'tg_bot_token', 'tg_chat_id', 'notification_timezone', 'notification_language', 'expire_notification_time', 'notification_webhook_enabled', 'notification_webhook_url', 'notification_webhook_method', 'notification_webhook_format', 'notification_webhook_headers', 'notification_webhook_body', 'notification_template', 'turnstile_enabled', 'turnstile_login_enabled', 'turnstile_site_key', 'turnstile_secret_key', 'jwt_secret', 'username', 'password', 'cloudflare_account_id', 'cloudflare_token', 'custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4', 'custom_ct_name', 'custom_cu_name', 'custom_cm_name', 'custom_bd_name', 'node_1_name', 'node_2_name', 'node_3_name', 'node_4_name', 'expire_reminder', 'resource_alert_rules', 'traffic_alert_threshold', 'theme_url', 'servers_optimized', 'auto_register_enabled', 'auto_register_default_group', 'auto_register_token', 'auto_register_token_expires'];
 
@@ -666,9 +668,10 @@ export async function loadSiteSettings(db, options = {}) {
     result.auto_register_enabled = normalizeBooleanSetting(result.auto_register_enabled);
     result.auto_register_default_group = String(result.auto_register_default_group || 'Default').trim().slice(0, 50) || 'Default';
   } catch (e) {
-    console.error('Failed to load site settings:', e);
     // Authentication policy must never fall back to the public defaults during an outage.
     const previous = db && lastKnownSiteSettings.get(db);
+    logError('settings', 'settings.load.failed', previous ? 'Settings read failed; using last known policy' : 'Settings unavailable; protected access remains closed',
+      e, { fallback: !!previous }, previous ? 'warn' : 'error');
     if (previous) return previous;
     throw new AppError('Site settings unavailable', 503);
   }
@@ -719,7 +722,7 @@ export async function loadAppearanceOptions(db) {
     result.preferred_theme = normalizePreferredTheme(result.preferred_theme);
     result.default_language = normalizeDefaultLanguage(result.default_language);
   } catch (e) {
-    console.error('Failed to load appearance options:', e);
+    logError('settings', 'appearance.load.failed', 'Appearance settings read failed', e);
   }
 
   cachedAppearanceOptions = result;
@@ -825,11 +828,10 @@ let isDebugEnabled = false;
 
 export function setDebug(debug) {
   isDebugEnabled = debug === 1 || debug === '1' || debug === true;
-  if(isDebugEnabled) console.log('DEBUG mode:', isDebugEnabled);
 }
 
 export function debug(...args) {
-  if (isDebugEnabled) {
-    console.debug('[DEBUG]', ...args);
-  }
+  const emit = () => logEvent('system', 'diagnostic', String(args[0] || ''), args.length > 1 ? { details: args.slice(1) } : {}, 'debug');
+  if (hasLogContext()) emit();
+  else if (isDebugEnabled) withLogContext({}, emit, { DEBUG: true });
 }

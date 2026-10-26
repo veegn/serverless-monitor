@@ -17,6 +17,7 @@ npm run build:frontend
 - `history-query.test.js`：7 天保留、跨周查询、点数上限、分批过期清理。
 - `metrics-compression.test.js`：九个时间范围、样本加权均值与峰值、字段精度、稀疏曲线、GPU、小时拆块与旧结构迁移。
 - `metrics-runtime.test.js`：真实 workerd 读写行计量、跨小时提交、去重及归档/过期清理。
+- `observability.test.js`：日志分级、并发上下文隔离、凭证脱敏、长度限制、分钟汇总和错误/慢请求语义。运行时测试另验证 Worker→DO 请求关联及 WSS 跨回调连接 ID。
 - `latest-metrics-all.test.js` / `latest-timestamps.test.js`：最新报告、超过单次 SQL 绑定上限的批量查询、持久化心跳。
 - `dashboard-latency-window.test.js`：首页 3 小时、20 个延迟窗口及空窗口保留。
 - `helpers/sql-storage.js`：使用 Node 内置 SQLite 驱动验证 SQL 与事务；运行时测试另用 workerd 的真实 Storage API。

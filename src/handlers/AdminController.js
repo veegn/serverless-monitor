@@ -1,3 +1,4 @@
+import { logEvent, logError, setLogContext } from '../utils/observability.js';
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
 import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
@@ -87,7 +88,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
 
   static async handleServerMutationError(db, error, fallbackMessage) {
   if (AdminController.isMissingColumnError(error)) {
-    console.warn('Detected missing database columns, attempting to add them...');
+    logEvent('database', 'database.schema.repair', 'Missing database columns detected; applying upgrade', {}, 'warn');
     await addServerColumns(db);
     return createBadRequestResponse('dbColumnsAdded');
   }
@@ -501,7 +502,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
         sys.password = upgradedPasswordHash;
       }
     } catch (e) {
-      console.error('Password hash upgrade failed:', e);
+      logError('auth', 'auth.password.upgrade_failed', 'Password hash upgrade failed', e);
     }
   }
 
@@ -681,7 +682,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       message: messages.testMessage
     });
     if(result) {
-      console.warn('Test notification failed:', result);
+      logError('notification', 'notification.test.failed', 'Test notification failed', result, {}, 'warn');
       // 附带具体失败原因，前端 i18n 未命中时会原样展示（不含密码等敏感信息）
       return createBadRequestResponse(`testNotificationFailed: ${result}`);
     }
@@ -732,6 +733,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
   static async handleAdminAPI(request, env, sys, loadFullSettings = null, ctx = null) {
   try {
     const data = await request.json();
+    setLogContext({ adminAction: data.action });
 
     const publicActionHandler = AdminController.PUBLIC_ADMIN_ACTION_HANDLERS[data.action];
     if (publicActionHandler) {
@@ -913,7 +915,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       try {
         await addServerColumns(env.DB);
       } catch (e) {
-        console.error('[settings-save] Failed to add missing columns after saving settings:', e);
+        logError('database', 'database.schema.upgrade_failed', 'Schema upgrade after settings save failed', e);
       }
       const shouldCloseAgentWssReports = !isWssReportEnabled({ ...sys, ...siteOptions });
       // Keep existing states on rule edits so threshold increases can emit recovery notifications.
@@ -1160,7 +1162,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       try {
         await addServerColumns(env.DB);
       } catch (e) {
-        console.error('[import_servers] Failed to add missing columns before importing servers:', e);
+        logError('database', 'database.schema.upgrade_failed', 'Schema upgrade before node import failed', e);
       }
 
       const existingServers = await env.DB.prepare('SELECT id FROM servers').all();
@@ -1282,7 +1284,6 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
     return createBadRequestResponse('unknownAction');
     
   } catch (e) {
-    console.error('Admin API error:', e);
     return createErrorResponse(e);
   }
 }

@@ -579,45 +579,27 @@ test('DO WebSocket pushes cached batchUpdate on initial connect', async () => {
   assert.equal(msg.updates[0].samples.length, 2);
 });
 
-test('Observability: logWssEvent produces structured Cloudflare logs', async () => {
-  const { logWssEvent, logAgentReport, logModeTransition, LogLevel } = await import('../src/utils/observability.js');
+test('Observability: helper events use a single indexed JSON object', async (t) => {
+  const { logAgentReport, logModeTransition, withLogContext } = await import('../src/utils/observability.js');
   const logs = [];
-  const originalInfo = console.info;
-  console.info = (summary, meta) => {
-    logs.push({ summary, meta });
-  };
-
-  try {
-    logAgentReport({
-      serverId: 'srv-obs-01',
-      mode: 'batch',
-      sampleCount: 30,
-      reportId: 'rep-1',
-      persisted: true,
-      durationMs: 15
-    });
-
+  t.mock.method(console, 'info', entry => logs.push(entry));
+  t.mock.method(console, 'debug', entry => logs.push(entry));
+  withLogContext({ requestId: 'obs-test' }, () => {
+    logAgentReport({ serverId: 'srv-obs-01', mode: 'batch', sampleCount: 30,
+      reportId: 'rep-1', persisted: true, durationMs: 15 });
     assert.equal(logs.length, 1);
-    assert.ok(logs[0].summary.includes('[WSS:Agent] REPORT'));
-    assert.equal(logs[0].meta.source, 'cfsm.wss');
-    assert.equal(logs[0].meta.serverId, 'srv-obs-01');
-    assert.equal(logs[0].meta.mode, 'batch');
-    assert.equal(logs[0].meta.sampleCount, 30);
-
-    logModeTransition({
-      isFrontendActive: true,
-      subscribers: 2,
-      hintedAgents: 5,
-      modeRevision: 3
-    });
-
+    assert.equal(logs[0].source, 'cfsm');
+    assert.equal(logs[0].event, 'agent.report');
+    assert.equal(logs[0].level, 'debug');
+    assert.equal(logs[0].serverId, 'srv-obs-01');
+    assert.ok(logs[0].message.includes('node=srv-obs-01'));
+    assert.equal(logs[0].requestId, 'obs-test');
+    logModeTransition({ isFrontendActive: true, subscribers: 2, hintedAgents: 5, modeRevision: 3 });
     assert.equal(logs.length, 2);
-    assert.ok(logs[1].summary.includes('[WSS:Mode] HINT'));
-    assert.equal(logs[1].meta.targetMode, 'REALTIME');
-    assert.equal(logs[1].meta.subscribers, 2);
-  } finally {
-    console.info = originalInfo;
-  }
+    assert.equal(logs[1].event, 'mode.hint');
+    assert.equal(logs[1].targetMode, 'REALTIME');
+    assert.equal(logs[1].subscribers, 2);
+  }, { LOG_LEVEL: 'debug' });
 });
 
 test('DatabaseService.downsampleHistorySamples downsamples, aggregates, and preserves historical data', async () => {

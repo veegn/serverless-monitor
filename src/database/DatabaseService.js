@@ -1,3 +1,4 @@
+import { logError } from '../utils/observability.js';
 import { clearAllCaches } from '../utils/cache.js';
 import { saveSiteOptions, debug } from '../utils/settings.js';
 import { isDisabledProbeMetric, DISK_IO_FIELD_TO_COLUMN, DISK_IO_METRIC_FIELDS } from '../utils/metrics.js';
@@ -307,7 +308,7 @@ export class DatabaseService {
       debug('✅ 数据库初始化完成');
       DatabaseService.dbInitialized = true;
     } catch (e) {
-      console.error('Failed to initialize database:', e);
+      logError('database', 'database.init.failed', 'D1 configuration schema initialization failed', e);
     }
   }
 
@@ -334,7 +335,7 @@ export class DatabaseService {
         message: 'databaseRebuiltSuccess'
       };
     } catch (e) {
-      console.error('Failed to clean up database:', e);
+      logError('database', 'database.clear.failed', 'Legacy D1 history cleanup failed', e);
       return {
         success: false,
         message: 'databaseRebuiltFailed',
@@ -357,7 +358,7 @@ export class DatabaseService {
         message: '维护成功'
       };
     } catch (e) {
-      console.error('[Cleanup] Table cleanup failed:', e);
+      logError('database', 'database.cleanup.failed', 'Legacy D1 table maintenance failed', e);
       return { success: false, error: e.message };
     }
   }

@@ -172,7 +172,7 @@ import { currentLang } from '../../../utils/i18n'
 import { adminApi } from '../../../utils/api'
 import { normalizeDisplayMode } from '../../../utils/displayMode'
 import { isMikusThemeEnabled } from '../../../utils/themeOptions'
-import { APPEARANCE_FIELDS } from '../../../../utils/settings'
+import { APPEARANCE_FIELDS } from '../../../../utils/settingFields.js'
 
 const props = defineProps({
   trans: { type: Object, required: true },

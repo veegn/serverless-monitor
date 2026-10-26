@@ -529,6 +529,8 @@ npm run test:history-query
 npm run test:agent-config
 ```
 
+Worker 与 DO 的日志级别、请求关联和排障示例见 [Observability 日志说明](docs/observability.md)。
+
 本地 `.env` 至少需要：
 
 ```bash

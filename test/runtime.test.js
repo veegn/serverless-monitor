@@ -16,7 +16,7 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
     name: 'cfsm-runtime',
     modules: true, script: bundle.outputFiles[0].text,
     compatibilityDate: '2024-12-01', compatibilityFlags: ['nodejs_compat'],
-    bindings: { API_SECRET: 'runtime-secret' },
+    bindings: { API_SECRET: 'runtime-secret', LOG_LEVEL: 'debug' },
     d1Databases: { DB: '11111111-1111-1111-1111-111111111111' },
     durableObjects: { METRICS_BROADCASTER: { className: 'RuntimeBroadcaster', useSQLite: true, unsafeUniqueKey: 'cfsm-runtime-metrics' } },
     resourcePersistencePath: directory
@@ -37,7 +37,17 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
     });
     const report = { id: 'visible', secret: 'node-secret', reportId: 'http-r1', batch: true,
       samples: [{ ts: now - 30 * 3600_000, metrics: { cpu: 7 } }, { ts: now - 1000, metrics: { cpu: 20, disk: { read_bps: 100 } } }] };
-    assert.equal((await post('/update', report)).status, 200);
+    await post('/test/capture-logs', {});
+    const committedResponse = await post('/update', report);
+    assert.equal(committedResponse.status, 200);
+    const traceId = committedResponse.headers.get('X-Request-ID');
+    assert.ok(traceId);
+    let logs = await (await mf.dispatchFetch('https://monitor.test/test/logs')).json();
+    const committedLog = logs.find(entry => entry.event === 'metrics.committed' && entry.reportId === 'http-r1');
+    assert.equal(committedLog.requestId, traceId, 'Worker and DO must share a correlation ID');
+    assert.equal(committedLog.transport, 'http');
+    assert.equal(committedLog.serverId, 'visible');
+    assert.equal(committedLog.attempt, 1);
     let history = await (await mf.dispatchFetch('https://monitor.test/history?serverId=visible&hours=168&points=1000')).json();
     assert.deepEqual(history.data.map(point => point.cpu), [7, 20]);
     const publicHistory = await mf.dispatchFetch('https://monitor.test/api/history/all?id=visible&hours=1');
@@ -50,6 +60,7 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
 
     await mf.dispose();
     mf = new Miniflare(options);
+    await post('/test/capture-logs', {});
     assert.equal((await post('/update', report)).status, 200);
     history = await (await mf.dispatchFetch('https://monitor.test/history?serverId=visible&hours=168&points=1000')).json();
     assert.equal(history.data.length, 2, 'retry after restart must not duplicate history');
@@ -90,6 +101,17 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
     assert.equal(negativeAck.persisted, false);
     await post('/test/restore-writes', {});
     assert.equal((await sendAgentReport(wsRetry)).accepted, true);
+    logs = await (await mf.dispatchFetch('https://monitor.test/test/logs')).json();
+    const wsCommitted = logs.find(entry => entry.event === 'metrics.committed' && entry.reportId === 'ws-r1');
+    const wsFailed = logs.find(entry => entry.event === 'metrics.commit.failed' && entry.reportId === 'ws-r2');
+    assert.equal(wsCommitted.transport, 'wss');
+    assert.ok(wsCommitted.connectionId);
+    assert.equal(wsFailed.connectionId, wsCommitted.connectionId, 'connection identity survives separate hibernation callbacks');
+    assert.notEqual(wsFailed.requestId, wsCommitted.requestId);
+    assert.equal(wsFailed.persisted, false);
+    assert.ok(wsFailed.error.message.includes('simulated storage failure'));
+    assert.equal(JSON.stringify(logs).includes('node-secret'), false);
+    assert.equal(JSON.stringify(logs).includes('runtime-secret'), false);
 
     await post('/test/legacy', { serverId: 'legacy', points: [{ timestamp: now - 120_000, cpu: 42 }] });
     const legacy = await (await mf.dispatchFetch('https://monitor.test/history?serverId=legacy&hours=1')).json();

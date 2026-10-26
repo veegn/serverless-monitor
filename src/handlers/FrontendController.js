@@ -1,3 +1,4 @@
+import { logEvent, logError } from '../utils/observability.js';
 import { loadSettings } from '../utils/settings.js';
 import {
   DEFAULT_SITE_TITLE,
@@ -56,14 +57,14 @@ static IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
           }
         }
       } catch (e) {
-        console.log('[INFO] No ASSETS binding');
+        logEvent('frontend', 'frontend.assets.missing', 'Frontend ASSETS binding is not configured', {}, 'warn');
       }
     }
 
     FrontendController.filesCache = files;
     return FrontendController.filesCache;
   } catch (e) {
-    console.error('[ERROR] Failed to load frontend files:', e);
+    logError('frontend', 'frontend.assets.failed', 'Frontend assets could not be loaded', e);
     return {};
   }
 }

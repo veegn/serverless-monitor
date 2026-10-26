@@ -1,10 +1,30 @@
 import worker from '../../src/index.js';
 import { MetricsBroadcaster as BaseBroadcaster } from '../../src/durable/MetricsBroadcaster.js';
 
+let capturedLogs = null;
+
 // Test-only fault injection stays outside the production Worker.
 export class RuntimeBroadcaster extends BaseBroadcaster {
   async fetch(request) {
     const path = new URL(request.url).pathname;
+    if (path === '/test/capture-logs') {
+      if (capturedLogs === null) {
+        capturedLogs = [];
+        for (const level of ['debug', 'info', 'warn', 'error']) {
+          const original = console[level].bind(console);
+          console[level] = (...args) => {
+            if (args[0]?.source === 'cfsm') {
+              capturedLogs.push(args[0]);
+              if (capturedLogs.length > 500) capturedLogs.shift();
+            }
+            original(...args);
+          };
+        }
+      }
+      capturedLogs.length = 0;
+      return new Response('OK');
+    }
+    if (path === '/test/logs') return Response.json(capturedLogs || []);
     if (path === '/test/store-probe') {
       this.metricsStore.init();
       if (!this.sqlMeter) {
