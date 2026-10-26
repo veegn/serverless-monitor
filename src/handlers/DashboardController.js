@@ -1,5 +1,6 @@
 import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
 import { DatabaseService } from '../database/DatabaseService.js';
+import { ServerService } from '../services/ServerService.js';
 import { getAllServers, getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from '../utils/cache.js';
 import { mergeMetricsIntoServer, coerceNumericMetricFields } from '../utils/metrics.js';
 import { normalizeLongHistoryPoints, loadSiteSettings, debug } from '../utils/settings.js';
@@ -281,104 +282,45 @@ export class DashboardController {
 }
 
   static async handleServersAPI(request, env, sys) {
-  const isLoggedIn = await checkAuth(request, env, sys);
-  
-  if (sys.is_public !== 'true' && !isLoggedIn) {
-    return simpleAuthResponse();
-  }
-  markFrontendRealtimeActive();
-  
-  const results = (await getAllServers(env.DB, isLoggedIn)).map(DashboardController.withoutPrivateServerFields);
-  const shouldIncludeLatencyHistory = sys.show_three_net_details === 'true';
-  
-  const serverIds = results.map(server => server.id).filter(Boolean);
-  const [latestMetricsMap, realtimeState, latencyHistory] = await Promise.all([
-    DatabaseService.getLatestMetricsForAllServers(env.DB).catch(() => new Map()),
-    DashboardController.getRealtimeStateForServers(env, serverIds).catch(() => ({ latestReportUpdates: [] })),
-    shouldIncludeLatencyHistory
-      ? DatabaseService.getDashboardLatencyHistory(env.DB, results).catch(() => new Map())
-      : Promise.resolve(new Map())
-  ]);
-  DashboardController.attachLatencyHistoryToServers(results, latencyHistory);
-  
-  const now = Date.now();
-  let globalOnline = 0;
-  let globalSpeedIn = 0, globalSpeedOut = 0, globalNetTx = 0, globalNetRx = 0;
-  const regionStats = {};
-  
-  for (const server of results) {
-    let latestMetrics = null;
-    if (realtimeState?.latestReportUpdates) {
-      const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === server.id);
-      if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
-        const lastSample = doReport.samples[doReport.samples.length - 1];
-        latestMetrics = {
-          timestamp: lastSample.ts || doReport.reportTs || now,
-          ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
-        };
-      }
-    }
-    if (!latestMetrics) {
-      latestMetrics = latestMetricsMap.get(server.id);
-    }
+    const isLoggedIn = await checkAuth(request, env, sys);
     
-    let isOnline = false;
-    
-    if (latestMetrics) {
-      isOnline = (now - latestMetrics.timestamp) < 300000;
-      mergeMetricsIntoServer(server, latestMetrics);
+    if (sys.is_public !== 'true' && !isLoggedIn) {
+      return simpleAuthResponse();
     }
-    DashboardController.normalizePublicIpFields(server);
-    
-    if (isOnline) {
-      globalOnline++;
-      globalSpeedIn += parseFloat(server.net_in_speed) || 0;
-      globalSpeedOut += parseFloat(server.net_out_speed) || 0;
-    }
-    
-    globalNetRx += parseFloat(server.net_rx || 0);
-    globalNetTx += parseFloat(server.net_tx || 0);
-    
-    let cCode = (server.region || '').toUpperCase();
-    if (cCode !== '') {
-      regionStats[cCode] = (regionStats[cCode] || 0) + 1;
-    }
-  }
-  
-  const globalOffline = results.length - globalOnline;
+    markFrontendRealtimeActive();
 
-  const data = {
-    servers: results,
-    latestReportUpdates: realtimeState.latestReportUpdates,
-    stats: {
-      total: results.length,
-      online: globalOnline,
-      offline: globalOffline,
-      globalSpeedIn,
-      globalSpeedOut,
-      globalNetTx,
-      globalNetRx
-    },
-    regionStats,
-    sysConfig: {
-      show_price: sys.show_price === 'true',
-      show_expire: sys.show_expire === 'true',
-      show_tf: sys.show_tf === 'true',
-      show_three_net_details: sys.show_three_net_details === 'true',
-      custom_ct_name: sys.custom_ct_name || '电信',
-      custom_cu_name: sys.custom_cu_name || '联通',
-      custom_cm_name: sys.custom_cm_name || '移动',
-      custom_bd_name: sys.custom_bd_name || 'BGP',
-      display_mode: sys.display_mode || 'bar',
-      latency_window: {
-        points: DASHBOARD_LATENCY_WINDOW_POINTS,
-        hours: DASHBOARD_LATENCY_WINDOW_HOURS
-      }
-    }
-  };
+    const shouldIncludeLatencyHistory = sys.show_three_net_details === 'true';
+    const { servers, latestReportUpdates, stats, regionStats } = await ServerService.getServersWithState(env, {
+      includeHidden: isLoggedIn,
+      maskPublicIp: true,
+      stripPrivateFields: true,
+      includeLatencyHistory: shouldIncludeLatencyHistory
+    });
 
-  return createSuccessResponse(data);
-}
+    const data = {
+      servers,
+      latestReportUpdates,
+      stats,
+      regionStats,
+      sysConfig: {
+        show_price: sys.show_price === 'true',
+        show_expire: sys.show_expire === 'true',
+        show_tf: sys.show_tf === 'true',
+        show_three_net_details: sys.show_three_net_details === 'true',
+        custom_ct_name: sys.custom_ct_name || '电信',
+        custom_cu_name: sys.custom_cu_name || '联通',
+        custom_cm_name: sys.custom_cm_name || '移动',
+        custom_bd_name: sys.custom_bd_name || 'BGP',
+        display_mode: sys.display_mode || 'bar',
+        latency_window: {
+          points: DASHBOARD_LATENCY_WINDOW_POINTS,
+          hours: DASHBOARD_LATENCY_WINDOW_HOURS
+        }
+      }
+    };
+
+    return createSuccessResponse(data);
+  }
 
   static async fetchHistoryData(env, request, id, hours, columns, sys = null) {
   if (!id) return createBadRequestResponse('Missing ID');

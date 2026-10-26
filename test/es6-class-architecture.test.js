@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { ServerlessMonitorApp } from '../src/app.js';
 import { DatabaseService } from '../src/database/DatabaseService.js';
 import { NotificationService } from '../src/services/NotificationService.js';
+import { ServerService } from '../src/services/ServerService.js';
 import { UpdateController } from '../src/handlers/UpdateController.js';
 import { DashboardController } from '../src/handlers/DashboardController.js';
 import { AdminController } from '../src/handlers/AdminController.js';
@@ -29,6 +30,7 @@ test('ES6 Class Architecture: ServerlessMonitorApp initialization and dependency
   // Verify service and controller instances
   assert.ok(app.dbService instanceof DatabaseService);
   assert.ok(app.notificationService instanceof NotificationService);
+  assert.ok(app.serverService instanceof ServerService);
   assert.ok(app.updateController instanceof UpdateController);
   assert.ok(app.dashboardController instanceof DashboardController);
   assert.ok(app.adminController instanceof AdminController);

@@ -15,6 +15,7 @@ import { scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../u
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
 import { THEME_PREVIEW_AUTH_TTL_SECONDS } from '../utils/config.js';
 import { DashboardController } from './DashboardController.js';
+import { ServerService } from '../services/ServerService.js';
 
 /**
  * AdminController
@@ -612,101 +613,19 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
 }
 
   static async handleListAction({ env }) {
-  const servers = await getAllServers(env.DB);
-  const serverIds = servers.map(server => server.id).filter(Boolean);
-  const [latestMetricsMap, realtimeState] = await Promise.all([
-    DatabaseService.getLatestMetricsForAllServers(env.DB).catch(() => new Map()),
-    DashboardController.getRealtimeStateForServers(env, serverIds, { maskPublicIp: false }).catch(() => ({ latestReportUpdates: [] }))
-  ]);
+    const { servers, stats } = await ServerService.getServersWithState(env, {
+      includeHidden: true,
+      maskPublicIp: false,
+      stripPrivateFields: false,
+      includeLatencyHistory: false
+    });
 
-  const now = Date.now();
-  const ONLINE_THRESHOLD = 300000;
-  const stats = {
-    total: servers.length,
-    online: 0,
-    offline: 0,
-    total_cpu: 0,
-    total_net_in: 0,
-    total_net_out: 0,
-    avg_cpu: 0
-  };
-
-  const serversWithStatus = servers.map(server => {
-    const rawMetrics = latestMetricsMap.get(server.id) || null;
-    let latestMetrics = null;
-    if (realtimeState?.latestReportUpdates) {
-      const doReport = realtimeState.latestReportUpdates.find(u => u.serverId === server.id);
-      if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
-        const lastSample = doReport.samples[doReport.samples.length - 1];
-        latestMetrics = {
-          timestamp: lastSample.ts || doReport.reportTs || now,
-          ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
-        };
-      }
-    }
-    if (!latestMetrics) {
-      latestMetrics = rawMetrics;
-    }
-    const item = { ...server, region_override: server.region || '' };
-    let isOnline = false;
-
-    if (latestMetrics) {
-      isOnline = (now - latestMetrics.timestamp) < ONLINE_THRESHOLD;
-      mergeMetricsIntoServer(item, latestMetrics);
-    } else {
-      item.last_updated = 0;
-      item.is_online = false;
-      item.cpu_cores = 0;
-      item.cpu_info = '';
-      item.arch = '';
-      item.os = '';
-      item.agent_version = '';
-      item.ip_v4 = '0';
-      item.ip_v6 = '0';
-      item.boot_time = '';
-    }
-
-    if (rawMetrics) {
-      if ((!item.ip_v4 || item.ip_v4 === '0' || item.ip_v4 === '1') && rawMetrics.ip_v4 && rawMetrics.ip_v4 !== '0' && rawMetrics.ip_v4 !== '1') {
-        item.ip_v4 = rawMetrics.ip_v4;
-      }
-      if ((!item.ip_v6 || item.ip_v6 === '0' || item.ip_v6 === '1') && rawMetrics.ip_v6 && rawMetrics.ip_v6 !== '0' && rawMetrics.ip_v6 !== '1') {
-        item.ip_v6 = rawMetrics.ip_v6;
-      }
-      if (!item.os && rawMetrics.os) item.os = rawMetrics.os;
-      if (!item.arch && rawMetrics.arch) item.arch = rawMetrics.arch;
-      if (!item.cpu_info && rawMetrics.cpu_info) item.cpu_info = rawMetrics.cpu_info;
-      if (!item.cpu_cores && rawMetrics.cpu_cores) item.cpu_cores = rawMetrics.cpu_cores;
-      if (!item.boot_time && rawMetrics.boot_time) item.boot_time = rawMetrics.boot_time;
-    }
-
-    item.is_online = isOnline;
-    if (!item.region) item.region = server.region || '';
-    delete item.bandwidth;
-    delete item.secret;
-
-    if (isOnline) {
-      stats.online++;
-      stats.total_cpu += parseFloat(item.cpu) || 0;
-      stats.total_net_in += parseFloat(item.net_in_speed) || 0;
-      stats.total_net_out += parseFloat(item.net_out_speed) || 0;
-    } else {
-      stats.offline++;
-    }
-
-    return item;
-  });
-
-  if (stats.online > 0) {
-    stats.avg_cpu = (stats.total_cpu / stats.online).toFixed(2);
+    return createSuccessResponse({
+      success: true,
+      servers,
+      stats
+    });
   }
-
-  return createSuccessResponse({
-    success: true,
-    servers: serversWithStatus,
-    stats
-  });
-}
 
   static async handleD1UsageAction({ data, sys }) {
   const hasCloudflareToken = Object.prototype.hasOwnProperty.call(data, 'cloudflare_token');

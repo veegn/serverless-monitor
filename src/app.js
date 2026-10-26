@@ -1,5 +1,6 @@
 import { DatabaseService } from './database/DatabaseService.js';
 import { NotificationService } from './services/NotificationService.js';
+import { ServerService } from './services/ServerService.js';
 import { UpdateController } from './handlers/UpdateController.js';
 import { DashboardController } from './handlers/DashboardController.js';
 import { AdminController } from './handlers/AdminController.js';
@@ -45,6 +46,7 @@ export class ServerlessMonitorApp {
     // 核心服务实例化 (Dependency Injection)
     this.dbService = new DatabaseService(this.db);
     this.notificationService = new NotificationService(env);
+    this.serverService = new ServerService(env);
 
     // 控制器实例化
     this.updateController = new UpdateController(env, ctx);
