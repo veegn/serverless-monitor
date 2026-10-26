@@ -2,6 +2,7 @@ import { getAllServers } from '../utils/cache.js';
 import { DatabaseService } from '../database/DatabaseService.js';
 import { DashboardController } from '../handlers/DashboardController.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
+import { DASHBOARD_LATENCY_WINDOW_HOURS, DASHBOARD_LATENCY_WINDOW_POINTS } from '../utils/config.js';
 
 /**
  * ServerService
@@ -39,13 +40,35 @@ export class ServerService {
     const rawServers = await getAllServers(env.DB, includeHidden);
     const serverIds = rawServers.map(server => server.id).filter(Boolean);
 
-    const [latestMetricsMap, realtimeState, latencyHistory] = await Promise.all([
-      DatabaseService.getLatestMetricsForAllServers(env.DB).catch(() => new Map()),
+    // 优先向 DO 获取实时状态与 3 小时三网延时窗口（纯内存，0 D1 读取）
+    const [realtimeState, durableLatencyMap] = await Promise.all([
       DashboardController.getRealtimeStateForServers(env, serverIds, { maskPublicIp }).catch(() => ({ latestReportUpdates: [] })),
       includeLatencyHistory
-        ? DatabaseService.getDashboardLatencyHistory(env.DB, rawServers).catch(() => new Map())
+        ? DashboardController.getDurableDashboardLatencyWindows(env, serverIds, {
+            hours: DASHBOARD_LATENCY_WINDOW_HOURS,
+            points: DASHBOARD_LATENCY_WINDOW_POINTS
+          }).catch(() => new Map())
         : Promise.resolve(new Map())
     ]);
+
+    // 仅在 DO 缺失部分服务器时，按需从 D1 兜底拉取延时历史
+    const latencyHistory = new Map(durableLatencyMap);
+    if (includeLatencyHistory) {
+      const missingServers = rawServers.filter(s => !latencyHistory.has(String(s.id)));
+      if (missingServers.length > 0 && (!env.METRICS_BROADCASTER || durableLatencyMap.size === 0)) {
+        const d1Latency = await DatabaseService.getDashboardLatencyHistory(env.DB, missingServers).catch(() => new Map());
+        for (const [k, v] of d1Latency.entries()) {
+          latencyHistory.set(k, v);
+        }
+      }
+    }
+
+    // 仅在 DO 无实时缓存或缺少部分服务器时，按需从 D1 兜底拉取最新规格与离线指标
+    let latestMetricsMap = new Map();
+    const hasMissingDoServers = rawServers.some(s => !realtimeState?.latestReportUpdates?.some(u => u.serverId === s.id));
+    if (hasMissingDoServers || !env.METRICS_BROADCASTER) {
+      latestMetricsMap = await DatabaseService.getLatestMetricsForAllServers(env.DB).catch(() => new Map());
+    }
 
     const now = Date.now();
     let globalOnline = 0;

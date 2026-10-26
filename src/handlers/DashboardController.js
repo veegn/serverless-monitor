@@ -152,6 +152,43 @@ export class DashboardController {
   }
 }
 
+  static async getDurableDashboardLatencyWindows(env, serverIds, options = {}) {
+    const empty = new Map();
+    if (!env?.METRICS_BROADCASTER || !Array.isArray(serverIds) || serverIds.length === 0) return empty;
+
+    const hours = options.hours || DASHBOARD_LATENCY_WINDOW_HOURS;
+    const points = options.points || DASHBOARD_LATENCY_WINDOW_POINTS;
+
+    try {
+      const id = env.METRICS_BROADCASTER.idFromName('global');
+      const stub = env.METRICS_BROADCASTER.get(id);
+      const latencyMap = new Map();
+
+      for (let offset = 0; offset < serverIds.length; offset += DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE) {
+        const chunk = serverIds.slice(offset, offset + DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE);
+        const response = await stub.fetch('http://internal/dashboard-latency-windows', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ serverIds: chunk, hours, points })
+        });
+        if (!response.ok) continue;
+        const data = await response.json();
+        if (data?.windows && typeof data.windows === 'object') {
+          for (const [sId, window] of Object.entries(data.windows)) {
+            if (window && (window.ping?.length > 0 || window.loss?.length > 0)) {
+              latencyMap.set(String(sId), window);
+            }
+          }
+        }
+      }
+
+      return latencyMap;
+    } catch (e) {
+      console.warn('[Dashboard] Failed to read latency windows from DO:', e?.message || e);
+      return empty;
+    }
+  }
+
   static async getDurableHistory(env, serverId, hours = 1, columns = '', points = 160) {
     if (!env?.METRICS_BROADCASTER || !serverId) return null;
     try {

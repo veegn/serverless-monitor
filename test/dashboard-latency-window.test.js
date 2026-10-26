@@ -47,7 +47,7 @@ function latencyRow(partitionId, timestamp, value) {
   return `(${buildHistoryId(partitionId, timestamp)}, ${timestamp}, ${value}, ${value + 1}, ${value + 2}, ${value + 3}, ${value % 10}, ${(value + 1) % 10}, ${(value + 2) % 10}, ${(value + 3) % 10})`;
 }
 
-test('dashboard latency history samples two hours from D1 into at most 20 real points', async () => {
+test('dashboard latency history samples three hours from D1 into at most 20 real points', async () => {
   const miniflare = createMiniflare();
 
   try {
@@ -57,7 +57,7 @@ test('dashboard latency history samples two hours from D1 into at most 20 real p
     const partitionId = 1;
     const start = Date.UTC(2026, 6, 29, 0, 0, 0);
     const rows = [];
-    for (let index = 0; index < 120; index++) {
+    for (let index = 0; index < 180; index++) {
       rows.push(latencyRow(partitionId, start + index * 60_000, 20 + index));
     }
 
@@ -75,7 +75,7 @@ test('dashboard latency history samples two hours from D1 into at most 20 real p
       history_partition_id: partitionId,
       timestamp: start
     }], {
-      now: start + 120 * 60_000,
+      now: start + 180 * 60_000,
       cache: false
     });
 
@@ -92,7 +92,7 @@ test('dashboard latency history samples two hours from D1 into at most 20 real p
 
 test('dashboard latency window config exposes the public contract', () => {
   assert.equal(DASHBOARD_LATENCY_WINDOW_POINTS, 20);
-  assert.equal(DASHBOARD_LATENCY_WINDOW_HOURS, 2);
+  assert.equal(DASHBOARD_LATENCY_WINDOW_HOURS, 3);
 });
 
 test('dashboard latency history preserves empty buckets inside the window', async () => {

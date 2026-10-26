@@ -387,3 +387,67 @@ test('UpdateController: toBroadcastSamples preserves ip_v4, ip_v6, os, and arch 
   assert.equal(payload.cpu_info, 'Ampere Altra');
   assert.equal(payload.cpu_cores, 4);
 });
+
+test('DO History: responds to POST /dashboard-latency-windows with 3-hour sampled latency points', async () => {
+  const storage = makeMockStorage();
+  const broadcaster = makeBroadcasterWithStorage(storage);
+  const now = Date.now();
+
+  const updates = [{
+    serverId: 'srv-latency-do-1',
+    samples: [
+      {
+        ts: now - 30 * 60 * 1000,
+        metrics: {
+          cpu: 20,
+          ping_ct: 30,
+          ping_cu: 35,
+          ping_cm: 40,
+          ping_bd: 45,
+          loss_ct: 0,
+          loss_cu: 0,
+          loss_cm: 0,
+          loss_bd: 0
+        }
+      },
+      {
+        ts: now - 10 * 60 * 1000,
+        metrics: {
+          cpu: 25,
+          ping_ct: 28,
+          ping_cu: 33,
+          ping_cm: 38,
+          ping_bd: 42,
+          loss_ct: 0,
+          loss_cu: 0,
+          loss_cm: 0,
+          loss_bd: 0
+        }
+      }
+    ]
+  }];
+
+  const pushRes = await broadcaster.fetch(new Request('http://internal/batch-push', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ updates, reportTs: now })
+  }));
+  assert.equal(pushRes.status, 200);
+
+  const queryRes = await broadcaster.fetch(new Request('http://internal/dashboard-latency-windows', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ serverIds: ['srv-latency-do-1'], hours: 3, points: 20 })
+  }));
+  assert.equal(queryRes.status, 200);
+
+  const json = await queryRes.json();
+  assert.equal(json.ok, true);
+  assert.ok(json.windows['srv-latency-do-1']);
+  const win = json.windows['srv-latency-do-1'];
+  assert.equal(win.ping.length, 20);
+  assert.equal(win.loss.length, 20);
+  const sampledPoint = win.ping.find(p => p.ct !== undefined);
+  assert.ok(sampledPoint);
+  assert.ok(sampledPoint.ct >= 28 && sampledPoint.ct <= 30);
+});

@@ -46,6 +46,8 @@ import {
   AGENT_WSS_FRONTEND_BATCH_WINDOW_MS,
   LATEST_REPORT_CACHE_MAX_SERVERS,
   LATEST_REPORT_CACHE_TTL_MS,
+  DASHBOARD_LATENCY_WINDOW_HOURS,
+  DASHBOARD_LATENCY_WINDOW_POINTS,
   UPDATE_MAX_BATCH_SAMPLES,
   UPDATE_MAX_REQUEST_BYTES
 } from '../utils/config.js';
@@ -1826,6 +1828,38 @@ export class MetricsBroadcaster {
       });
     }
 
+    if (method === 'POST' && path === '/dashboard-latency-windows') {
+      let body = null;
+      try {
+        body = await request.json();
+      } catch (_) {
+        return new Response(JSON.stringify({ error: 'invalid JSON' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      const normalizedServerIds = this._normalizeServerIds(body?.serverIds);
+      if (!normalizedServerIds.ok) {
+        return new Response(JSON.stringify({ error: 'invalid serverIds' }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      const hours = Math.max(0.5, Math.min(24, Number(body?.hours) || DASHBOARD_LATENCY_WINDOW_HOURS));
+      const points = Math.max(5, Math.min(100, Number(body?.points) || DASHBOARD_LATENCY_WINDOW_POINTS));
+
+      const windows = await this._getDashboardLatencyWindows(normalizedServerIds.ids, hours, points);
+
+      return new Response(JSON.stringify({ ok: true, windows }), {
+        headers: {
+          'Cache-Control': 'no-store',
+          'Content-Type': 'application/json'
+        }
+      });
+    }
+
     if (method === 'POST' && path === '/evaluate-resource-alerts') {
       let body = null;
       try {
@@ -2143,6 +2177,71 @@ export class MetricsBroadcaster {
       }
     }
     return updates;
+  }
+
+  async _getDashboardLatencyWindows(serverIds, hours = DASHBOARD_LATENCY_WINDOW_HOURS, points = DASHBOARD_LATENCY_WINDOW_POINTS) {
+    const windows = {};
+    const now = Date.now();
+    const queryEnd = Math.floor(now / 1000) * 1000 + 1000;
+    const queryStart = queryEnd - hours * 3600 * 1000;
+    const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
+
+    for (const serverId of serverIds) {
+      await this._ensureServerHistoryLoaded(serverId);
+      const history = this.historyWindows.get(serverId) || [];
+
+      if (!history || history.length === 0) {
+        windows[serverId] = { ping: [], loss: [] };
+        continue;
+      }
+
+      const rows = [];
+      for (let i = 0; i < points; i++) {
+        const slotStart = queryStart + i * intervalMs;
+        const slotEnd = Math.min(queryEnd, slotStart + intervalMs);
+        const matches = history.filter(h => h && Number(h.timestamp) >= slotStart && Number(h.timestamp) < slotEnd);
+
+        if (matches.length > 0) {
+          const aggregated = { timestamp: slotStart };
+          const pingSums = {};
+          const pingCounts = {};
+          const lossMax = {};
+
+          for (const m of matches) {
+            for (const field of DatabaseService.LATENCY_NODE_FIELDS) {
+              const pingVal = Number(m[`ping_${field}`]);
+              if (Number.isFinite(pingVal) && pingVal > 0) {
+                pingSums[field] = (pingSums[field] || 0) + pingVal;
+                pingCounts[field] = (pingCounts[field] || 0) + 1;
+              }
+              const lossVal = Number(m[`loss_${field}`]);
+              if (Number.isFinite(lossVal) && lossVal >= 0) {
+                if (lossMax[field] === undefined || lossVal > lossMax[field]) {
+                  lossMax[field] = lossVal;
+                }
+              }
+            }
+          }
+
+          for (const field of DatabaseService.LATENCY_NODE_FIELDS) {
+            if (pingCounts[field] > 0) {
+              aggregated[`ping_${field}`] = Math.round(pingSums[field] / pingCounts[field]);
+            }
+            if (lossMax[field] !== undefined) {
+              aggregated[`loss_${field}`] = lossMax[field];
+            }
+          }
+
+          rows.push(aggregated);
+        } else {
+          rows.push({ timestamp: slotStart });
+        }
+      }
+
+      windows[serverId] = DatabaseService.normalizeDashboardLatencyRows(rows, { includeEmpty: true });
+    }
+
+    return windows;
   }
 
   async _pushLatestUpdatesToSubscriber(ws, scope, serverIds = []) {
