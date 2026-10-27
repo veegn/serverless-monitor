@@ -17,7 +17,7 @@ export function normalizeTrafficLimitGb(value) {
 // 规范化阈值百分比：整数并夹取到 0..100
 export function normalizePct(value) {
   const n = typeof value === 'number' ? value : parseInt(value, 10);
-  return Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0;
+  return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.trunc(n))) : 0;
 }
 
 // 逐台月流量告警阈值三态规范化：
@@ -27,7 +27,7 @@ export function normalizePctOrNull(value) {
   if (value === null || value === undefined || value === '') return null;
   const n = typeof value === 'number' ? value : parseInt(value, 10);
   if (!Number.isFinite(n)) return null;
-  return Math.max(0, Math.min(100, n));
+  return Math.max(0, Math.min(100, Math.trunc(n)));
 }
 
 // 按计算类型取当月已用字节

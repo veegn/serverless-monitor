@@ -1,3 +1,4 @@
+import { makeD1 } from './helpers/d1.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { SqlMetricsStore } from '../src/durable/SqlMetricsStore.js';
@@ -17,24 +18,7 @@ const minute = 60_000;
 const update = (serverId, samples) => ({ serverId, samples: samples.map(([ts, cpu, speed = 0]) => ({ ts, data: { cpu, net_in_speed: speed } })) });
 
 function settingsDb(options = {}, servers = []) {
-  const settings = { ...Object.fromEntries(SITE_FIELDS.map(key => [key, ''])),
-    jwt_secret: 'x'.repeat(32), is_public: 'true', ...options };
-  return {
-    failed: false,
-    alertState: {},
-    prepare(sql) {
-      if (this.failed) throw new Error('D1 unavailable');
-      const db = this;
-      return {
-        bind(...args) { this.args = args; return this; },
-        async first() {
-          return sql.includes('alert_state') ? { value: JSON.stringify(db.alertState) } : { value: JSON.stringify(settings) };
-        },
-        async all() { return { results: sql.includes('FROM servers') ? servers : [] }; },
-        async run() { db.alertState = JSON.parse(this.args[0]); return { meta: { changes: 1 } }; }
-      };
-    }
-  };
+  return makeD1({ settings: { site_options: { jwt_secret: 'x'.repeat(32), is_public: 'true', ...options } }, servers });
 }
 
 test('settings failures preserve the last private policy and cold starts fail closed', async () => {

@@ -6,13 +6,14 @@ import {
 import { normalizePct } from './traffic.js';
 import { AppError } from './errors.js';
 import { logEvent, logError, hasLogContext, withLogContext } from './observability.js';
-import { APPEARANCE_FIELDS } from './settingFields.js';
+import { APPEARANCE_FIELDS, SETTINGS_GROUPS, SETTINGS_SCOPES, FIELD_SETTINGS_GROUP } from './settingFields.js';
+import { readGroupedSettings, saveGroupedSettings, ensureGroupedJwtSecret, ensureGroupedSettings } from '../database/GroupedSettings.js';
 export { APPEARANCE_FIELDS } from './settingFields.js';
 import { LONG_HISTORY_POINT_OPTIONS, DEFAULT_LONG_HISTORY_POINTS } from './historyPolicy.js';
 export { LONG_HISTORY_POINT_OPTIONS, DEFAULT_LONG_HISTORY_POINTS } from './historyPolicy.js';
 
 
-export const SITE_FIELDS = ['is_public', 'show_price', 'show_expire', 'show_tf', 'show_three_net_details', 'wss_report_enabled', 'frontend_ws_timeout_minutes', 'long_history_points', 'tg_notify', 'tg_bot_token', 'tg_chat_id', 'notification_timezone', 'notification_language', 'expire_notification_time', 'notification_webhook_enabled', 'notification_webhook_url', 'notification_webhook_method', 'notification_webhook_format', 'notification_webhook_headers', 'notification_webhook_body', 'notification_template', 'turnstile_enabled', 'turnstile_login_enabled', 'turnstile_site_key', 'turnstile_secret_key', 'jwt_secret', 'username', 'password', 'cloudflare_account_id', 'cloudflare_token', 'custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4', 'custom_ct_name', 'custom_cu_name', 'custom_cm_name', 'custom_bd_name', 'node_1_name', 'node_2_name', 'node_3_name', 'node_4_name', 'expire_reminder', 'resource_alert_rules', 'traffic_alert_threshold', 'theme_url', 'servers_optimized', 'auto_register_enabled', 'auto_register_default_group', 'auto_register_token', 'auto_register_token_expires'];
+export const SITE_FIELDS = ['is_public', 'show_price', 'show_expire', 'show_tf', 'show_three_net_details', 'wss_report_enabled', 'frontend_ws_timeout_minutes', 'long_history_points', 'tg_notify', 'tg_bot_token', 'tg_chat_id', 'notification_timezone', 'notification_language', 'expire_notification_time', 'notification_webhook_enabled', 'notification_webhook_url', 'notification_webhook_method', 'notification_webhook_format', 'notification_webhook_headers', 'notification_webhook_body', 'notification_template', 'turnstile_enabled', 'turnstile_login_enabled', 'turnstile_site_key', 'turnstile_secret_key', 'jwt_secret', 'username', 'password', 'cloudflare_account_id', 'cloudflare_token', 'custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', 'node_1', 'node_2', 'node_3', 'node_4', 'custom_ct_name', 'custom_cu_name', 'custom_cm_name', 'custom_bd_name', 'node_1_name', 'node_2_name', 'node_3_name', 'node_4_name', 'expire_reminder', 'resource_alert_rules', 'traffic_alert_threshold', 'theme_url', 'auto_register_enabled', 'auto_register_default_group', 'auto_register_token', 'auto_register_token_expires'];
 
 export const TG_NOTIFY_MINUTES_MIN = 2;
 export const TG_NOTIFY_MINUTES_MAX = 30;
@@ -66,7 +67,10 @@ let cachedSiteSettingsDb = null;
 const lastKnownSiteSettings = new WeakMap();
 let siteSettingsCacheExpiry = 0;
 let cachedAppearanceOptions = null;
+let cachedAppearanceDb = null;
 let appearanceOptionsCacheExpiry = 0;
+const scopedResults = new Map();
+const lastKnownScoped = new WeakMap();
 
 const defaults = {
   site_title: DEFAULT_SITE_TITLE,
@@ -129,7 +133,6 @@ const defaults = {
   resource_alert_rules: [],
   traffic_alert_threshold: '0',
   theme_url: '',
-  servers_optimized: 'false',
   auto_register_enabled: 'false',
   auto_register_default_group: 'Default',
   auto_register_token: '',
@@ -453,15 +456,6 @@ export function isValidJwtSecret(secret) {
   return typeof secret === 'string' && secret.length >= JWT_SECRET_MIN_LENGTH;
 }
 
-function tryParseJSON(str) {
-  if (!str) return null;
-  try {
-    return JSON.parse(str);
-  } catch (e) {
-    return null;
-  }
-}
-
 function copyFields(target, source, fields) {
   if (!source || typeof source !== 'object') return;
   for (const field of fields) {
@@ -559,60 +553,41 @@ export function isWssReportEnabled(settings = {}, now = Date.now()) {
   return getWssReportScheduleState(settings, now).active;
 }
 
-function hasMissingFields(source, fields) {
-  if (!source || typeof source !== 'object') return true;
-  return fields.some(field => source[field] === undefined);
+export async function migrateSettings(db) {
+  return readGroupedSettings(db, defaults);
 }
 
-async function loadLegacySettings(db, fields) {
-  const legacy = {};
-  const fieldSet = new Set(fields);
-  const { results } = await db.prepare('SELECT * FROM settings').all();
-  if (results && results.length > 0) {
-    results.forEach(r => {
-      if (fieldSet.has(r.key)) {
-        legacy[r.key] = r.value;
-      }
-    });
+export function ensureSettingsStorage(db) {
+  return ensureGroupedSettings(db, defaults);
+}
+
+export async function loadSettingsScope(db, scope, options = {}) {
+  const groups = SETTINGS_SCOPES[scope];
+  if (!groups) throw new AppError('Unknown settings scope', 500);
+  const forceRefresh = options === true || Boolean(options?.forceRefresh);
+  const cached = scopedResults.get(scope);
+  if (!forceRefresh && cached?.db === db && cached.expiresAt > Date.now()) return cached.value;
+  try {
+    const raw = await readGroupedSettings(db, defaults, { groups, forceRefresh });
+    const normalized = normalizeStoredSite({ ...defaults, ...raw });
+    normalized.display_mode = normalizeDisplayMode(normalized.display_mode, defaults.display_mode);
+    normalized.preferred_theme = normalizePreferredTheme(normalized.preferred_theme);
+    normalized.default_language = normalizeDefaultLanguage(normalized.default_language);
+    if (groups.includes('settings.security') && !isValidJwtSecret(normalized.jwt_secret)) {
+      normalized.jwt_secret = await ensureGroupedJwtSecret(db, generateRandomSecret(32));
+    }
+    const result = {};
+    copyFields(result, normalized, groups.flatMap(group => SETTINGS_GROUPS[group]));
+    scopedResults.set(scope, { db, value: result, expiresAt: Date.now() + SITE_SETTINGS_CACHE_TTL_MS });
+    if (!lastKnownScoped.has(db)) lastKnownScoped.set(db, new Map());
+    lastKnownScoped.get(db).set(scope, result);
+    return result;
+  } catch (error) {
+    const previous = lastKnownScoped.get(db)?.get(scope);
+    logError('settings', 'settings.scope.load_failed', 'Functional settings read failed', error, { scope, fallback: !!previous }, previous ? 'warn' : 'error');
+    if (previous) return previous;
+    throw new AppError('Site settings unavailable', 503);
   }
-  return legacy;
-}
-
-async function saveJwtSecretIfMissing(db, secret) {
-  await db.prepare(`
-    INSERT INTO settings (key, value)
-    VALUES ('site_options', json_object('jwt_secret', ?))
-    ON CONFLICT(key) DO UPDATE SET value = CASE
-      WHEN json_valid(value)
-        AND typeof(json_extract(value, '$.jwt_secret')) = 'text'
-        AND length(json_extract(value, '$.jwt_secret')) >= ?
-      THEN value
-      WHEN json_valid(value)
-      THEN json_set(value, '$.jwt_secret', ?)
-      ELSE json_object('jwt_secret', ?)
-    END
-  `).bind(secret, JWT_SECRET_MIN_LENGTH, secret, secret).run();
-
-  const siteRow = await db.prepare(
-    "SELECT value FROM settings WHERE key = 'site_options'"
-  ).first();
-  const siteOptions = siteRow && siteRow.value
-    ? tryParseJSON(siteRow.value)
-    : null;
-
-  return isValidJwtSecret(siteOptions?.jwt_secret) ? siteOptions.jwt_secret : secret;
-}
-
-async function ensurePersistedJwtSecret(db, result, siteOptions) {
-  if (isValidJwtSecret(siteOptions?.jwt_secret)) {
-    return siteOptions.jwt_secret;
-  }
-
-  const secret = isValidJwtSecret(result.jwt_secret)
-    ? result.jwt_secret
-    : generateRandomSecret(32);
-
-  return saveJwtSecretIfMissing(db, secret);
 }
 
 export async function loadSiteSettings(db, options = {}) {
@@ -628,45 +603,12 @@ export async function loadSiteSettings(db, options = {}) {
   let siteOptions = null;
 
   try {
-    const siteRow = await db.prepare(
-      "SELECT value FROM settings WHERE key = 'site_options'"
-    ).first();
-    if (siteRow) {
-      const parsed = tryParseJSON(siteRow.value);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        siteOptions = parsed;
-      } else {
-        throw new AppError('Invalid site settings', 503);
-      }
-    }
-
-    if (hasMissingFields(siteOptions, SITE_FIELDS)) {
-      copyFields(result, await loadLegacySettings(db, SITE_FIELDS), SITE_FIELDS);
-    }
+    siteOptions = await readGroupedSettings(db, defaults, { forceRefresh });
     copyFields(result, siteOptions, SITE_FIELDS);
-
-    if (!isValidJwtSecret(siteOptions?.jwt_secret) || !isValidJwtSecret(result.jwt_secret)) {
-      result.jwt_secret = await ensurePersistedJwtSecret(db, result, siteOptions);
+    if (!isValidJwtSecret(result.jwt_secret)) {
+      result.jwt_secret = await ensureGroupedJwtSecret(db, generateRandomSecret(32));
     }
-    result.tg_notify = normalizeTgNotify(result.tg_notify);
-    result.expire_reminder = normalizeExpireReminder(result.expire_reminder);
-    result.long_history_points = normalizeLongHistoryPoints(result.long_history_points);
-    result.resource_alert_rules = normalizeResourceAlertRules(result.resource_alert_rules);
-    result.show_three_net_details = normalizeBooleanSetting(result.show_three_net_details, defaults.show_three_net_details);
-    result.wss_report_enabled = normalizeBooleanSetting(result.wss_report_enabled, defaults.wss_report_enabled);
-    result.frontend_ws_timeout_minutes = normalizeFrontendWsTimeoutMinutes(result.frontend_ws_timeout_minutes);
-    result.notification_webhook_enabled = normalizeBooleanSetting(result.notification_webhook_enabled);
-    result.notification_webhook_method = normalizeNotificationWebhookMethod(result.notification_webhook_method);
-    result.notification_webhook_format = normalizeNotificationWebhookFormat(result.notification_webhook_format);
-    result.notification_webhook_headers = normalizeNotificationWebhookHeaders(result.notification_webhook_headers);
-    result.notification_webhook_body = normalizeNotificationWebhookBody(result.notification_webhook_body);
-    result.notification_template = normalizeNotificationTemplate(result.notification_template);
-    result.notification_timezone = normalizeNotificationTimezone(result.notification_timezone);
-    result.notification_language = normalizeNotificationLanguage(result.notification_language);
-    result.expire_notification_time = normalizeExpireNotificationTime(result.expire_notification_time);
-    result.traffic_alert_threshold = normalizeTrafficAlertThreshold(result.traffic_alert_threshold);
-    result.auto_register_enabled = normalizeBooleanSetting(result.auto_register_enabled);
-    result.auto_register_default_group = String(result.auto_register_default_group || 'Default').trim().slice(0, 50) || 'Default';
+    normalizeStoredSite(result);
   } catch (e) {
     // Authentication policy must never fall back to the public defaults during an outage.
     const previous = db && lastKnownSiteSettings.get(db);
@@ -687,11 +629,12 @@ export function clearSiteSettingsCache() {
   cachedSiteSettings = null;
   cachedSiteSettingsDb = null;
   siteSettingsCacheExpiry = 0;
+  scopedResults.clear();
 }
 
 export async function loadAppearanceOptions(db) {
   const now = Date.now();
-  if (cachedAppearanceOptions && now < appearanceOptionsCacheExpiry) {
+  if (cachedAppearanceDb === db && cachedAppearanceOptions && now < appearanceOptionsCacheExpiry) {
     debug('Appearance缓存命中');
     return cachedAppearanceOptions;
   }
@@ -702,21 +645,7 @@ export async function loadAppearanceOptions(db) {
   let appearanceOptions = null;
 
   try {
-    const appearanceRow = await db.prepare(
-      "SELECT value FROM settings WHERE key = 'appearance_options'"
-    ).first();
-    if (appearanceRow) {
-      const parsed = tryParseJSON(appearanceRow.value);
-      if (parsed) {
-        appearanceOptions = parsed;
-      }
-    }
-
-    const needsLegacyAppearance = hasMissingFields(appearanceOptions, APPEARANCE_FIELDS);
-    if (needsLegacyAppearance) {
-      const legacy = await loadLegacySettings(db, APPEARANCE_FIELDS);
-      copyFields(result, legacy, APPEARANCE_FIELDS);
-    }
+    appearanceOptions = await readGroupedSettings(db, defaults, { groups: SETTINGS_SCOPES.appearance });
     copyFields(result, appearanceOptions, APPEARANCE_FIELDS);
     result.display_mode = normalizeDisplayMode(result.display_mode, defaults.display_mode);
     result.preferred_theme = normalizePreferredTheme(result.preferred_theme);
@@ -726,12 +655,14 @@ export async function loadAppearanceOptions(db) {
   }
 
   cachedAppearanceOptions = result;
+  cachedAppearanceDb = db;
   appearanceOptionsCacheExpiry = now + SITE_SETTINGS_CACHE_TTL_MS;
   return result;
 }
 
 export function clearAppearanceSettingsCache() {
   cachedAppearanceOptions = null;
+  cachedAppearanceDb = null;
   appearanceOptionsCacheExpiry = 0;
 }
 
@@ -740,24 +671,8 @@ export function isValidThemeOptions(value) {
 }
 
 export async function saveThemeOptions(db, themeOptions) {
-  await db.prepare(
-    `INSERT INTO settings (key, value)
-     VALUES ('appearance_options', json_object('theme_options', json(?)))
-     ON CONFLICT(key) DO UPDATE SET value = CASE
-       WHEN json_valid(value) THEN CASE
-         WHEN json_type(value) = 'object' THEN json_set(value, '$.theme_options', json(?))
-         ELSE json_object('theme_options', json(?))
-       END
-       ELSE json_object('theme_options', json(?))
-     END`
-  ).bind(
-    JSON.stringify(themeOptions),
-    JSON.stringify(themeOptions),
-    JSON.stringify(themeOptions),
-    JSON.stringify(themeOptions)
-  ).run();
-
-  clearAppearanceSettingsCache();
+  if (!isValidThemeOptions(themeOptions)) throw new AppError('Invalid theme options', 400);
+  await saveSettings(db, { theme_options: themeOptions });
   return themeOptions;
 }
 
@@ -769,23 +684,7 @@ export async function loadSettings(db) {
   return { ...defaults, ...siteSettings, ...appearanceOptions };
 }
 
-export async function saveSiteOptions(db, updates) {
-  const siteRow = await db.prepare(
-    "SELECT value FROM settings WHERE key = 'site_options'"
-  ).first();
-  
-  const existingSiteOptions = siteRow && siteRow.value
-    ? tryParseJSON(siteRow.value) || {}
-    : {};
-  const legacySiteOptions = hasMissingFields(existingSiteOptions, SITE_FIELDS)
-    ? await loadLegacySettings(db, SITE_FIELDS)
-    : {};
-  
-  const merged = { ...legacySiteOptions, ...existingSiteOptions, ...updates };
-  const siteOptions = {};
-  for (const field of SITE_FIELDS) {
-    if (field in merged) siteOptions[field] = merged[field];
-  }
+function normalizeStoredSite(siteOptions) {
   siteOptions.tg_notify = normalizeTgNotify(siteOptions.tg_notify);
   siteOptions.expire_reminder = normalizeExpireReminder(siteOptions.expire_reminder);
   siteOptions.long_history_points = normalizeLongHistoryPoints(siteOptions.long_history_points);
@@ -805,13 +704,42 @@ export async function saveSiteOptions(db, updates) {
   siteOptions.traffic_alert_threshold = normalizeTrafficAlertThreshold(siteOptions.traffic_alert_threshold);
   siteOptions.auto_register_enabled = normalizeBooleanSetting(siteOptions.auto_register_enabled);
   siteOptions.auto_register_default_group = String(siteOptions.auto_register_default_group || 'Default').trim().slice(0, 50) || 'Default';
-  
-  await db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-  ).bind('site_options', JSON.stringify(siteOptions)).run();
-  
-  clearSiteSettingsCache();
+
   return siteOptions;
+}
+
+// The public/admin API stays flat. Only the persistence layout is grouped.
+export async function saveSettings(db, updates) {
+  const groups = [...new Set(Object.keys(updates).map(field => FIELD_SETTINGS_GROUP[field]).filter(Boolean))];
+  const existing = await readGroupedSettings(db, defaults, { groups });
+  const siteOptions = {};
+  const merged = { ...defaults, ...existing, ...updates };
+  copyFields(siteOptions, merged, SITE_FIELDS);
+  normalizeStoredSite(siteOptions);
+  const patch = {};
+  for (const field of SITE_FIELDS) if (updates[field] !== undefined) patch[field] = siteOptions[field];
+  for (const field of APPEARANCE_FIELDS) if (updates[field] !== undefined) patch[field] = updates[field];
+  if (patch.display_mode !== undefined) patch.display_mode = normalizeDisplayMode(patch.display_mode, defaults.display_mode);
+  if (patch.preferred_theme !== undefined) patch.preferred_theme = normalizePreferredTheme(patch.preferred_theme);
+  if (patch.default_language !== undefined) patch.default_language = normalizeDefaultLanguage(patch.default_language);
+  if (patch.theme_options !== undefined && !isValidThemeOptions(patch.theme_options)) throw new AppError('Invalid theme options', 400);
+  const changed = await saveGroupedSettings(db, patch, defaults);
+  for (const [scope, owned] of Object.entries(SETTINGS_SCOPES)) {
+    if (!owned.some(group => changed.includes(group))) continue;
+    if (scopedResults.get(scope)?.db === db) scopedResults.delete(scope);
+    lastKnownScoped.get(db)?.delete(scope);
+  }
+  if (Object.keys(patch).some(field => SITE_FIELDS.includes(field))) {
+    lastKnownSiteSettings.delete(db);
+    clearSiteSettingsCache();
+  }
+  clearAppearanceSettingsCache();
+  return { ...siteOptions, ...Object.fromEntries(APPEARANCE_FIELDS.filter(field => merged[field] !== undefined).map(field => [field, merged[field]])), ...patch };
+}
+
+export async function saveSiteOptions(db, updates) {
+  const patch = Object.fromEntries(SITE_FIELDS.filter(field => updates[field] !== undefined).map(field => [field, updates[field]]));
+  return saveSettings(db, patch);
 }
 
 export async function getSettingByKey(db, key, returnBoolean = false) {

@@ -1,3 +1,4 @@
+import { makeD1 } from './helpers/d1.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { UpdateController } from '../src/handlers/UpdateController.js';
@@ -36,20 +37,7 @@ test('handleUpdate rejects oversized payload before touching D1', async () => {
 });
 
 test('handleUpdate accepts a small body without Content-Length', async () => {
-  let queriedId = '';
-  const env = {
-    API_SECRET: 'secret',
-    DB: {
-      prepare() {
-        return {
-          bind(id) {
-            queriedId = id;
-            return { first: async () => null };
-          }
-        };
-      }
-    }
-  };
+  const env = { API_SECRET: 'secret', DB: makeD1() };
 
   const response = await handleUpdate(
     createRequest(JSON.stringify({ id: 'payload-limit-test-server', secret: 'secret' })),
@@ -60,7 +48,7 @@ test('handleUpdate accepts a small body without Content-Length', async () => {
   assert.equal(response.status, 404);
   assert.equal(response.headers.get('X-CFSM-Agent-Status'), 'server_not_found');
   assert.equal(response.headers.get('Retry-After'), '300');
-  assert.equal(queriedId, 'payload-limit-test-server');
+  assert.ok(env.DB.calls.some(call => call.args?.[0] === 'payload-limit-test-server' && call.sql.includes('WHERE s.id=')));
 });
 
 test('normalizeMetricSamples keeps only the latest samples before processing', () => {

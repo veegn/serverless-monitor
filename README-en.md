@@ -494,6 +494,8 @@ After upgrading from older versions to versions with GPU, disk IO, packet loss, 
 
 ## Local Development
 
+See [Configuration storage](docs/configuration-storage.md) for functional settings groups, separate Ping/notification tables, and legacy data migration.
+
 ### Requirements
 
 - Node.js 22.19+
@@ -616,7 +618,7 @@ If the image URL redirects or goes through a CDN redirect, open the browser deve
 
 ### I forgot the admin password
 
-Open the Cloudflare D1 database `server-monitor-db`, edit the `setting` table, and update the `password` field in `site_options`. The legacy MD5-compatible value `e10adc3949ba59abbe56e057f20f883e` maps to password `123456`. Log in with it and set a strong password in the admin panel.
+Open the Cloudflare D1 database `server-monitor-db`, open the `settings` table, and update the JSON `password` field in the `settings.account` row. Legacy `site_options` data migrates automatically. The legacy MD5-compatible value `e10adc3949ba59abbe56e057f20f883e` maps to password `123456`. Log in with it and set a strong password in the admin panel.
 
 
 ### Domains not hosted on Cloudflare cannot be bound

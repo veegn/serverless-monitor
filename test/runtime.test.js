@@ -58,6 +58,28 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
     assert.equal(publicRows.at(-1).disk.read_bps, 100);
     assert.equal('gpu_info' in publicRows.at(-1), false, 'missing report-level fields remain absent');
 
+    const columns = (await db.prepare('PRAGMA table_info(servers)').all()).results.map(column => column.name);
+    assert.equal(columns.includes('history_partition_id'), false);
+    assert.equal(columns.includes('ping_mode'), false);
+    assert.equal(columns.includes('traffic_alert_percent'), false);
+    const pingDefaults = await db.prepare('SELECT ping_mode FROM server_details WHERE id=?').bind('visible').first();
+    assert.equal(pingDefaults.ping_mode, 'tcp');
+    assert.equal((await db.prepare("SELECT COUNT(*) AS count FROM settings WHERE key IN ('site_options','appearance_options')").first()).count, 0);
+    const login = await (await post('/admin/api', { action: 'login', username: 'admin', password: 'runtime-secret' })).json();
+    assert.ok(login.token);
+    const settingsSave = await mf.dispatchFetch('https://monitor.test/admin/api', {
+      method: 'POST', headers: { Authorization: `Bearer ${login.token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'save_settings', settings: { site_title: 'Runtime grouped settings', password: 'new-password',
+        appearance_options: { theme_options: { nested: { keepNull: null }, enabled: false } } } })
+    });
+    assert.equal(settingsSave.status, 200);
+    const persistedTheme = JSON.parse((await db.prepare("SELECT value FROM settings WHERE key='settings.theme'").first()).value);
+    assert.deepEqual(persistedTheme.theme_options, { nested: { keepNull: null }, enabled: false });
+    assert.equal(JSON.parse((await db.prepare("SELECT value FROM settings WHERE key='settings.site'").first()).value).site_title, 'Runtime grouped settings');
+    const configRows = await db.prepare('SELECT * FROM server_details WHERE id=?').bind('visible').first();
+    assert.equal(configRows.secret, 'node-secret');
+    assert.equal(configRows.traffic_alert_percent, null);
+
     await mf.dispose();
     mf = new Miniflare(options);
     await post('/test/capture-logs', {});
@@ -141,8 +163,8 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
 
     const restoredDb = await mf.getD1Database('DB');
     await restoredDb.prepare(`WITH RECURSIVE nodes(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM nodes WHERE i < 500)
-      INSERT INTO servers (id, name, is_hidden, history_partition_id)
-      SELECT printf('node-%04d-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', i), 'Bulk node', '0', i + 2 FROM nodes`).run();
+      INSERT INTO servers (id, name, is_hidden)
+      SELECT printf('node-%04d-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', i), 'Bulk node', '0' FROM nodes`).run();
     await post('/frontend-access-changed', {});
     const largeResponse = await mf.dispatchFetch('https://monitor.test/ws?subscribe=all', { headers: { Upgrade: 'websocket' } });
     assert.equal(largeResponse.status, 101, 'large permission sets must fit through a small WebSocket attachment');

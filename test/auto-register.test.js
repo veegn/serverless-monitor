@@ -1,3 +1,4 @@
+import { makeD1 } from './helpers/d1.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { UpdateController } from '../src/handlers/UpdateController.js';
@@ -11,29 +12,9 @@ import { clearSiteSettingsCache } from '../src/utils/settings.js';
 import { clearServersListCache } from '../src/utils/cache.js';
 import { generateToken } from '../src/middleware/auth.js';
 
-function makeEnv(siteSettings, { changes = 1 } = {}) {
-  const writes = [];
-  const env = {
-    API_SECRET: 'master_secret',
-    DB: {
-      prepare(sql) {
-        return {
-          _sql: sql,
-          bind(...args) { this._args = args; return this; },
-          async first() {
-            if (sql.includes("key = 'site_options'")) return { value: JSON.stringify(siteSettings) };
-            return null;
-          },
-          async all() { return { results: [] }; },
-          async run() {
-            writes.push({ sql, args: this._args || [] });
-            return { success: true, meta: { changes } };
-          }
-        };
-      }
-    }
-  };
-  return { env, writes };
+function makeEnv(siteSettings) {
+  const db = makeD1({ settings: { site_options: siteSettings } });
+  return { env: { API_SECRET: 'master_secret', DB: db }, writes: db.writes };
 }
 
 test('checkSecretAuthorization: validates master secret, server secret, and token with 30-min expiration', () => {
@@ -156,9 +137,7 @@ test('handleAdminAPI: generate_auto_register_token creates token with 30-min val
   const diffMinutes = (data.expires_at - Date.now()) / 60000;
   assert.ok(diffMinutes > 29.5 && diffMinutes <= 30.1);
 
-  const siteOptionWrite = writes.find(w => w.args && w.args[0] === 'site_options');
-  assert.ok(siteOptionWrite);
-  const savedOptions = JSON.parse(siteOptionWrite.args[1]);
+  const savedOptions = JSON.parse(env.DB.store.get('settings.registration'));
   assert.equal(savedOptions.auto_register_token, data.token);
   assert.equal(savedOptions.auto_register_token_expires, data.expires_at);
 });
@@ -193,9 +172,7 @@ test('handleAdminAPI: save_settings preserves and returns auto_register_enabled 
   const saveData = await saveRes.json();
   assert.equal(saveData.success, true);
 
-  const siteOptionWrite = writes.find(w => w.args && w.args[0] === 'site_options');
-  assert.ok(siteOptionWrite);
-  const savedOptions = JSON.parse(siteOptionWrite.args[1]);
+  const savedOptions = JSON.parse(env.DB.store.get('settings.registration'));
   assert.equal(savedOptions.auto_register_enabled, 'true');
   assert.equal(savedOptions.auto_register_default_group, 'Hong Kong Cluster');
 });

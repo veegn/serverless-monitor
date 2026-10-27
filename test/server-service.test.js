@@ -1,3 +1,4 @@
+import { makeD1 } from './helpers/d1.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ServerService } from '../src/services/ServerService.js';
@@ -58,23 +59,7 @@ test('ServerService: admin mode retains real IPs, hidden nodes, and private note
   };
 
   const fakeEnv = {
-    DB: {
-      prepare() {
-        return {
-          bind() {
-            return {
-              async first() { return null; },
-              async all() { return { results: [publicServer, hiddenServer] }; }
-            };
-          },
-          async first() { return null; },
-          async all() { return { results: [publicServer, hiddenServer] }; }
-        };
-      },
-      async batch() {
-        return [{ results: [] }];
-      }
-    },
+    DB: makeD1({ servers: [publicServer, hiddenServer] }),
     METRICS_BROADCASTER: {
       idFromName() { return 'global'; },
       get() { return fakeBroadcaster; }
@@ -96,7 +81,7 @@ test('ServerService: admin mode retains real IPs, hidden nodes, and private note
   assert.equal(pub.ip_v4, '198.51.100.10', 'Admin must receive unmasked real IPv4');
   assert.equal(pub.ip_v6, '2001:db8::10', 'Admin must receive unmasked real IPv6');
   assert.equal(pub.note, 'Sensitive rack location note', 'Admin must retain note');
-  assert.equal(pub.auto_update, 1, 'Admin must retain auto_update');
+  assert.equal(pub.auto_update, '1', 'Admin must retain auto_update');
   assert.equal(pub.secret, undefined, 'Secret must never be exposed');
   assert.equal(pub.bandwidth, undefined, 'Deprecated bandwidth must be stripped');
 
@@ -161,23 +146,7 @@ test('ServerService: visitor mode masks public IPs, filters hidden nodes, and st
   };
 
   const fakeEnv = {
-    DB: {
-      prepare() {
-        return {
-          bind() {
-            return {
-              async first() { return null; },
-              async all() { return { results: [publicServer, hiddenServer] }; }
-            };
-          },
-          async first() { return null; },
-          async all() { return { results: [publicServer, hiddenServer] }; }
-        };
-      },
-      async batch() {
-        return [{ results: [] }];
-      }
-    },
+    DB: makeD1({ servers: [publicServer, hiddenServer] }),
     METRICS_BROADCASTER: {
       idFromName() { return 'global'; },
       get() { return fakeBroadcaster; }
@@ -206,20 +175,7 @@ test('ServerService: visitor mode masks public IPs, filters hidden nodes, and st
 test('ServerService: instance method delegates to static getServersWithState', async () => {
   clearServersListCache();
   const fakeEnv = {
-    DB: {
-      prepare() {
-        return {
-          bind() {
-            return {
-              async first() { return null; },
-              async all() { return { results: [] }; }
-            };
-          },
-          async first() { return null; },
-          async all() { return { results: [] }; }
-        };
-      }
-    },
+    DB: makeD1({ servers: [] }),
     METRICS_BROADCASTER: null
   };
 

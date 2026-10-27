@@ -1,3 +1,4 @@
+import { makeD1 } from './helpers/d1.js';
 import { SqlMetricsStore } from '../src/durable/SqlMetricsStore.js';
 import { makeSqlStorage } from './helpers/sql-storage.js';
 import test from 'node:test';
@@ -19,85 +20,13 @@ import { clearSiteSettingsCache } from '../src/utils/settings.js';
 import { clearServersListCache } from '../src/utils/cache.js';
 
 function makeMockEnv(siteSettings = {}, existingServers = []) {
-  const writes = [];
-  const servers = [...existingServers];
   const historyInserts = [];
 
   const committed = new Map();
   const metricsStore = new SqlMetricsStore(makeSqlStorage());
-  const env = {
-    API_SECRET: 'master_secret',
-    DB: {
-      batch: async (statements) => {
-        for (const s of statements) {
-          if (s._sql.includes('INSERT OR REPLACE INTO metrics_history') || s._sql.includes('INSERT INTO metrics_history')) {
-            historyInserts.push({ sql: s._sql, args: s._args });
-          }
-        }
-        return statements.map(() => ({ success: true }));
-      },
-      prepare(sql) {
-        return {
-          _sql: sql,
-          bind(...args) {
-            this._args = args;
-            return this;
-          },
-          async first() {
-            if (sql.includes("key = 'site_options'")) {
-              return { value: JSON.stringify(siteSettings) };
-            }
-            if (sql.includes('SELECT COALESCE(MAX(sort_order)')) {
-              return { max_order: 1 };
-            }
-            if (sql.includes('SELECT COALESCE(MAX(history_partition_id)')) {
-              return { max_id: 1 };
-            }
-            if (sql.includes('SELECT id FROM servers WHERE name = ?')) {
-              const nameArg = this._args[0];
-              const found = servers.find(s => s.name === nameArg);
-              return found ? { id: found.id } : null;
-            }
-            if (sql.includes('SELECT') && sql.includes('FROM servers WHERE id = ?')) {
-              const idArg = this._args[0];
-              const found = servers.find(s => s.id === idArg);
-              return found || null;
-            }
-            return null;
-          },
-          async all() {
-            if (sql.includes('SELECT') && sql.includes('FROM servers')) {
-              return { results: servers };
-            }
-            if (sql.includes('PRAGMA table_info')) {
-              return { results: [{ name: 'secret' }, { name: 'interface' }] };
-            }
-            return { results: [] };
-          },
-          async run() {
-            writes.push({ sql, args: this._args || [] });
-            if (sql.includes('INSERT INTO servers')) {
-              const [id, name, server_group, region, sort_order, history_partition_id, timestamp, secret] = this._args;
-              servers.push({
-                id,
-                name,
-                server_group,
-                region,
-                sort_order,
-                history_partition_id,
-                timestamp,
-                secret
-              });
-            }
-            if (sql.includes('INSERT OR REPLACE INTO metrics_history') || sql.includes('INSERT INTO metrics_history')) {
-              historyInserts.push({ sql, args: this._args });
-            }
-            return { success: true, meta: { changes: 1 } };
-          }
-        };
-      }
-    }
-  };
+  const db = makeD1({ settings: { site_options: siteSettings }, servers: existingServers });
+  const env = { API_SECRET: 'master_secret', DB: db };
+  const rows = () => db.sqlite.prepare('SELECT * FROM servers').all().map(row => ({ ...row }));
   env.METRICS_BROADCASTER = {
     idFromName() { return 'global'; },
     get() { return { async fetch(input, init) {
@@ -110,7 +39,8 @@ function makeMockEnv(siteSettings = {}, existingServers = []) {
     } }; }
   };
   env.committedReports = committed;
-  return { env, writes, servers, historyInserts, metricsStore };
+  const liveServers = new Proxy([], { get(_target, key) { const list = rows(); const value = Reflect.get(list, key); return typeof value === 'function' ? value.bind(list) : value; } });
+  return { env, writes: db.writes, servers: liveServers, historyInserts, metricsStore };
 }
 
 test('PROTOCOL: auto-discovery registration creates new node when id is empty', async () => {
@@ -152,7 +82,7 @@ test('PROTOCOL: auto-discovery registration creates new node when id is empty', 
   });
 
   const res = await handleUpdate(req, env, { waitUntil() {} });
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 200, await res.clone().text());
 
   // Response headers validation
   assert.equal(AGENT_AUTO_DISCOVERY_HEADER, 'x-sma-auto-discovery');

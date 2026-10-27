@@ -18,9 +18,8 @@ import { AppError } from '../utils/errors.js';
 import { DatabaseService } from '../database/DatabaseService.js';
 import { FrontendSubscriptions } from './FrontendSubscriptions.js';
 import { NotificationService } from '../services/NotificationService.js';
-import { ensureServerOptimization } from '../database/indexOptimization.js';
 import { getServerDetail, clearServerDetailCache } from '../utils/cache.js';
-import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSiteSettings } from '../utils/settings.js';
+import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSettingsScope } from '../utils/settings.js';
 import {
   AGENT_CONFIG_MD5_HEADER,
   AGENT_CONFIG_LEGACY_SCHEMA_VERSION,
@@ -667,7 +666,7 @@ export class MetricsBroadcaster {
     if (forceRefresh) {
       clearServerDetailCache();
     }
-    const server = await getServerDetail(this.env.DB, key, true);
+    const server = await getServerDetail(this.env.DB, key, true, { scope: 'agent' });
     this.agentServerDetails.set(key, { data: server, time: now });
     return server;
   }
@@ -692,8 +691,8 @@ export class MetricsBroadcaster {
       // 查询异常不等于服务器被删除：已认证会话用附件续期，绝不因为 D1 抖动踢掉健康连接。
       // 未认证会话无法续期，用 503 + 1013 让 Agent 稍后重试。
       logError('agent', 'agent.config.lookup_failed', 'Agent configuration lookup failed', e, { fallback: !!attachment.authenticated }, 'warn');
-      if (attachment.authenticated && attachment.historyPartitionId) {
-        serverDetail = { id: serverId, history_partition_id: attachment.historyPartitionId };
+      if (attachment.authenticated && attachment.serverId === serverId) {
+        serverDetail = { id: serverId };
       } else {
         this._closeWsWithError(ws, 'Service unavailable', 503, { text: 'service_unavailable' }, WS_TRY_AGAIN_LATER, 'Service unavailable');
         return null;
@@ -702,7 +701,7 @@ export class MetricsBroadcaster {
 
     let settings = null;
     try {
-      settings = await loadSiteSettings(this.env.DB);
+      settings = await loadSettingsScope(this.env.DB, 'agent');
     } catch (_) {
       settings = {};
     }
@@ -779,13 +778,14 @@ export class MetricsBroadcaster {
       kind: AGENT_REPORT_KIND,
       authenticated: true,
       serverId,
-      historyPartitionId: serverDetail.history_partition_id,
       agentVersion,
       reportIntervalMs,
       wssReportIntervalMs,
       configSchema: agentConfig.schema,
       configMd5: agentConfig.md5
     };
+    delete nextAttachment.historyPartitionId;
+    delete nextAttachment.lastD1WriteTs;
     ws.serializeAttachment(nextAttachment);
     setLogContext({ connectionId: nextAttachment.connectionId, serverId });
 
@@ -801,7 +801,6 @@ export class MetricsBroadcaster {
     return {
       attachment: nextAttachment,
       serverId,
-      historyPartitionId: serverDetail.history_partition_id,
       regionCode: attachment.region || '',
       clientIp: attachment?.clientIp || '',
       agentVersion,
@@ -815,7 +814,7 @@ export class MetricsBroadcaster {
   async _loadAgentConfigDescriptor(serverId, forceRefresh = false, schemaVersion = AGENT_CONFIG_SCHEMA_VERSION) {
     const [serverDetail, settings] = await Promise.all([
       this._getAgentServerDetail(serverId, forceRefresh),
-      loadSiteSettings(this.env.DB, { forceRefresh })
+      loadSettingsScope(this.env.DB, 'agent', { forceRefresh })
     ]);
     if (!serverDetail) return null;
     return describeAgentConfig(serverDetail, settings, schemaVersion);
@@ -965,7 +964,7 @@ export class MetricsBroadcaster {
     const moreSessions = await this.frontendSubscriptions.cleanup(this._getFrontendWebSockets());
     await this._ensureResourceAlertSnapshotLoaded();
     await this._persistResourceAlertSnapshotIfNeeded(Date.now(), true);
-    const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
+    const settings = await loadSettingsScope(this.env.DB, 'monitoring', { forceRefresh: true });
     if (!isWssReportConfigured(settings)) this._closeAgentReportWebSockets();
     if (this.state.storage?.setAlarm) {
       this.maintenanceAlarmAt = Date.now() + (more || moreSessions ? 1000 : this.resourceAlertSnapshotDirty ? 60_000 : 3600_000);
@@ -989,7 +988,7 @@ export class MetricsBroadcaster {
     }
 
     if (body?.agentReportModeChanged === true) {
-      const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
+      const settings = await loadSettingsScope(this.env.DB, 'monitoring', { forceRefresh: true });
       const configured = isWssReportConfigured(settings);
       const result = configured
         ? { matched: 0, closed: 0 }
@@ -1049,12 +1048,12 @@ export class MetricsBroadcaster {
 
     await this.env.DB.prepare(`
       UPDATE servers
-      SET rx_correction = NULL, tx_correction = NULL
+      SET rx_correction = NULL, tx_correction = NULL, updated_at = ?, revision = revision + 1
       WHERE id = ?
         AND (rx_correction IS NOT NULL OR tx_correction IS NOT NULL)
         AND ABS(COALESCE(rx_correction, 0) - ?) < 0.000001
         AND ABS(COALESCE(tx_correction, 0) - ?) < 0.000001
-    `).bind(serverId, ackRx, ackTx).run();
+    `).bind(Date.now(), serverId, ackRx, ackTx).run();
     clearServerDetailCache();
     this.agentServerDetails.delete(serverId);
     return { ok: true };
@@ -1438,7 +1437,7 @@ export class MetricsBroadcaster {
       return new Response('Forbidden', { status: 403 });
     }
 
-    const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
+    const settings = await loadSettingsScope(this.env.DB, 'monitoring', { forceRefresh: true });
     const scheduleState = getWssReportScheduleState(settings);
     if (!scheduleState.active) {
       return this._createAgentWssUnavailableResponse(scheduleState);
@@ -1453,13 +1452,11 @@ export class MetricsBroadcaster {
       connectionId: getLogContext().requestId || crypto.randomUUID(),
       authenticated: false,
       serverId: '',
-      historyPartitionId: 0,
       clientIp: request.headers.get('cf-connecting-ip') || '',
       region: request.headers.get('cf-ipcountry') || '',
       agentVersion: UpdateController.normalizeAgentVersion(request.headers.get('X-Agent-Version')),
       reportIntervalMs: AGENT_DEFAULT_HISTORY_WRITE_INTERVAL_MS,
       wssReportIntervalMs: DEFAULT_WSS_REPORT_INTERVAL * 1000,
-      lastD1WriteTs: 0,
       configSchema: normalizeConfigSchema(firstDefined(
         url.searchParams.get('config_schema'),
         url.searchParams.get('agent_config_schema'),

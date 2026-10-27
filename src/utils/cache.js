@@ -10,9 +10,10 @@
 
 import { clearAppearanceSettingsCache, clearSiteSettingsCache, debug } from './settings.js';
 import { historySampling } from './historyPolicy.js';
+import { ensureServerSchema, serverQuery } from '../database/ServerRepository.js';
 
 const SERVERS_LIST_TTL = 120 * 1000;
-let serversListCache = null;
+const serversListCaches = new Map();
 
 const metricsHistoryCache = new Map();
 
@@ -30,27 +31,30 @@ function filterServersByHidden(servers, includeHidden) {
   return servers.filter(s => s.is_hidden !== 1 && s.is_hidden !== '1');
 }
 
-export async function getAllServers(db, includeHidden = true) {
+export async function getAllServers(db, includeHidden = true, { scope = 'full' } = {}) {
   const now = Date.now();
+  const serversListCache = serversListCaches.get(scope);
   
-  if (serversListCache && now - serversListCache.time < SERVERS_LIST_TTL) {
+  if (serversListCache?.db === db && now - serversListCache.time < SERVERS_LIST_TTL) {
     debug('服务器列表缓存命中');
     return filterServersByHidden(serversListCache.data, includeHidden);
   }
 
   try {
-    const { results } = await db.prepare('SELECT * FROM servers ORDER BY sort_order ASC').all();
-    serversListCache = { data: results, time: now };
+    await ensureServerSchema(db);
+    const { results } = await db.prepare(serverQuery(scope)).all();
+    serversListCaches.set(scope, { db, data: results, time: now });
     debug('服务器列表缓存更新');
     return filterServersByHidden(results, includeHidden);
   } catch (e) {
     debug('获取服务器列表失败:', e);
-    return filterServersByHidden(serversListCache?.data, includeHidden);
+    if (serversListCache?.db !== db) throw e;
+    return filterServersByHidden(serversListCache.data, includeHidden);
   }
 }
 
 export function clearServersListCache() {
-  serversListCache = null;
+  serversListCaches.clear();
   serverDetailCache.clear();
 }
 
@@ -61,13 +65,16 @@ export function clearServerDetailCache() {
 // 按 id 就地打补丁更新已缓存的服务器详情字段（不创建条目、不清全表）
 // 用于运行时状态列（如 traffic_alert_state）写回后刷新缓存，避免 TTL 内读到旧值重复触发。
 export function patchServerDetailCache(id, fields) {
-  const entry = serverDetailCache.get(id);
-  if (entry && entry.data) Object.assign(entry.data, fields);
+  for (const entry of serverDetailCache.values()) {
+    if (entry.id === id && ['agent', 'full'].includes(entry.scope) && entry.data) Object.assign(entry.data, fields);
+  }
 }
 
-export async function getServerDetail(db, id, includeHidden = false) {
+export async function getServerDetail(db, id, includeHidden = false, { scope = 'full' } = {}) {
   const now = Date.now();
-  const cached = serverDetailCache.get(id);
+  const key = `${scope}:${id}`;
+  const entry = serverDetailCache.get(key);
+  const cached = entry?.db === db ? entry : null;
   
   if (cached) {
     if (now - cached.time < SERVERS_LIST_TTL) {
@@ -85,13 +92,14 @@ export async function getServerDetail(db, id, includeHidden = false) {
       return { ...server };
     }
     
-    serverDetailCache.delete(id);
+    serverDetailCache.delete(key);
   }
   
   let server;
   let degraded = false;
   try {
-    server = await db.prepare('SELECT * FROM servers WHERE id = ?').bind(id).first();
+    await ensureServerSchema(db);
+    server = await db.prepare(serverQuery(scope, true)).bind(id).first();
   } catch (e) {
     // 与 getAllServers 一致：D1 异常时回退上一次已知结果，不把基础设施抖动放大成业务失败。
     if (!cached) throw e;
@@ -101,7 +109,7 @@ export async function getServerDetail(db, id, includeHidden = false) {
   }
 
   if (!degraded) {
-    serverDetailCache.set(id, { data: server, time: now });
+    serverDetailCache.set(key, { db, id, scope, data: server, time: now });
     debug('服务器详情缓存更新');
   }
   

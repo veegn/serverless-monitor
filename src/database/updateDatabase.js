@@ -1,12 +1,6 @@
-import { debug } from '../utils/settings.js';
-import {
-  detectBillingCycle,
-  detectCurrencySymbol,
-  normalizeBillingCycle,
-  normalizeCurrency,
-  normalizePrice
-} from '../utils/serverBilling.js';
-import { HISTORY_UPGRADE_COLUMNS } from '../utils/historyFields.js';
+import { debug, migrateSettings } from '../utils/settings.js';
+import { ensureServerSchema } from './ServerRepository.js';
+import { ensureNotificationStateSchema } from './NotificationStateRepository.js';
 
 
 export async function updateDatabase(db) {
@@ -14,8 +8,12 @@ export async function updateDatabase(db) {
   const results = [];
   
   try {
+    await migrateSettings(db);
+    results.push({ name: '设置按功能分组', success: true });
     const serversCols = await addServerColumns(db);
     results.push({ name: 'servers 表列更新', ...serversCols });
+    await ensureNotificationStateSchema(db);
+    results.push({ name: '通知运行状态独立存储', success: true });
     
     const cleanupServers = await cleanupServerExtraColumns(db);
     results.push({ name: 'servers 表多余字段清理', ...cleanupServers });
@@ -53,103 +51,12 @@ export async function updateDatabase(db) {
 }
 
 export async function addServerColumns(db) {
-  try {
-    const { results: columns } = await db.prepare(`PRAGMA table_info(servers)`).all();
-    const existingCols = columns.map(c => c.name);
-    const shouldMigrateLegacyPrice = !existingCols.includes('billing_cycle');
-    
-    const newCols = {
-      is_hidden: "TEXT DEFAULT '0'",
-      offline_notify_disabled: "TEXT DEFAULT '0'",
-      sort_order: "INTEGER DEFAULT 0",
-      region: "TEXT DEFAULT ''",
-      tags: "TEXT DEFAULT ''",
-      note: "TEXT DEFAULT ''",
-      billing_cycle: "TEXT DEFAULT 'month'",
-      auto_renewal: "TEXT DEFAULT '0'",
-      currency: "TEXT DEFAULT '¥'",
-      reset_day: "INTEGER DEFAULT 1",
-      collect_interval: "INTEGER DEFAULT 0",
-      report_interval: "INTEGER DEFAULT 60",
-      wss_report_interval: "INTEGER DEFAULT 2",
-      connection_mode: "TEXT DEFAULT 'auto'",
-      ping_mode: "TEXT DEFAULT 'tcp'",
-      auto_update: "TEXT DEFAULT '0'",
-      custom_ct: "TEXT DEFAULT ''",
-      custom_cu: "TEXT DEFAULT ''",
-      custom_cm: "TEXT DEFAULT ''",
-      custom_bd: "TEXT DEFAULT ''",
-      node_1: "TEXT DEFAULT ''",
-      node_2: "TEXT DEFAULT ''",
-      node_3: "TEXT DEFAULT ''",
-      node_4: "TEXT DEFAULT ''",
-      rx_correction: "REAL DEFAULT NULL",
-      tx_correction: "REAL DEFAULT NULL",
-      traffic_calc_type: "TEXT DEFAULT 'total'",
-      traffic_alert_percent: "INTEGER DEFAULT NULL",
-      traffic_alert_state: "TEXT",
-      interface: "TEXT DEFAULT ''",
-      history_partition_id: "INTEGER DEFAULT 0",
-      secret: "TEXT DEFAULT NULL",
-      timestamp: "INTEGER DEFAULT 0"
-    };
-    
-    let added = 0;
-    for (const [colName, colDef] of Object.entries(newCols)) {
-      if (!existingCols.includes(colName)) {
-        const colSqlName = colName === 'interface' ? '"interface"' : colName;
-        await db.prepare(`ALTER TABLE servers ADD COLUMN ${colSqlName} ${colDef}`).run();
-        added++;
-      }
-    }
-
-    let migratedPrices = 0;
-    if (shouldMigrateLegacyPrice) {
-      const { results: servers = [] } = await db.prepare(
-        `SELECT id, price FROM servers`
-      ).all();
-
-      for (const server of servers) {
-        const normalizedPrice = normalizePrice(server.price);
-        const billingCycle = normalizeBillingCycle(detectBillingCycle(server.price));
-        const currency = normalizeCurrency(detectCurrencySymbol(server.price) || '¥');
-
-        await db.prepare(
-          `UPDATE servers SET price = ?, billing_cycle = ?, currency = ? WHERE id = ?`
-        ).bind(normalizedPrice, billingCycle, currency, server.id).run();
-        migratedPrices++;
-      }
-    }
-    
-    return { success: true, added, migratedPrices };
-  } catch (e) {
-    debug('添加 servers 表列失败:', e);
-    return { success: false, error: e.message };
-  }
+  return ensureServerSchema(db);
 }
 
 async function cleanupServerExtraColumns(db) {
-  try {
-    const { results: columns } = await db.prepare(`PRAGMA table_info(servers)`).all();
-    const existingCols = columns.map(c => c.name);
-    
-    const extraCols = ['cpu', 'ram', 'disk', 'load_avg', 'uptime', 'last_updated', 'ram_total', 'net_rx', 'net_tx', 'net_in_speed', 'net_out_speed', 'os', 'cpu_info', 'cpu_cores' , 'arch' ,'boot_time', 'ram_used', 'swap_total', 'swap_used', 'disk_total', 'disk_used', 'processes', 'tcp_conn', 'udp_conn', 'country', 'ip_v4', 'ip_v6', 'ping_ct', 'ping_cu', 'ping_cm', 'ping_bd', 'monthly_rx', 'monthly_tx', 'last_rx', 'last_tx', 'reset_month', 'bandwidth','traffic_snapshots'];
-    const colsToDrop = extraCols.filter(col => existingCols.includes(col));
-    
-    if (colsToDrop.length === 0) {
-      return { success: true, cleaned: 0, message: '无需清理（没有多余字段）' };
-    }
-    
-    for (const col of colsToDrop) {
-      await db.prepare(`ALTER TABLE servers DROP COLUMN ${col}`).run();
-      debug(`✅ 已删除 servers 表的 ${col} 字段`);
-    }
-    
-    return { success: true, cleaned: colsToDrop.length, message: `已删除 ${colsToDrop.join(', ')} 字段` };
-  } catch (e) {
-    debug('清理 servers 表多余字段失败:', e);
-    return { success: false, error: e.message };
-  }
+  const result = await ensureServerSchema(db);
+  return { ...result, cleaned: result.removedColumns.length };
 }
 
 export async function addHistoryColumns(db) {
@@ -179,6 +86,7 @@ async function dropMetricsAggregatedTable(db) {
 
 export async function cleanupStaleSettings(db) {
   debug('开始清理废弃的 settings key...');
+  await migrateSettings(db);
   try {
     const stalePrefixes = ['last_write_%'];
     const staleExact = [

@@ -12,6 +12,11 @@ npm run build:frontend
 
 ## 存储与运行时测试
 
+- `configuration-optimization.test.js`：零变更写入、稀疏配置、数据库约束、按需查询、索引、分阶段回滚/恢复、并发迁移、通知租约及冷启动账期重置。
+- `configuration-runtime.test.js`：真实 workerd/D1 的配置读写行计量、覆盖恢复、租约和索引约束。
+
+- `settings-storage.test.js`：设置按功能分组、旧 JSON 和单字段 key 迁移、并发字段合并、事务回滚、访问策略与 JWT 稳定性。
+- `server-schema.test.js`：Ping/通知独立表、旧列清理、跨表事务、稀疏默认配置、级联删除、导入导出和告警状态持久化。
 - `reliability.test.js`：权限故障策略、离线/恢复通知、失败回滚、重试、隐藏节点隔离、请求体限制。
 - `runtime.test.js`：通过 Miniflare/workerd 运行真实 Worker、D1、SQLite Durable Object 和 WebSocket，验证 HTTP/WSS 确认、存储失败后重试、跨进程重启、旧快照迁移与订阅权限。
 - `history-query.test.js`：7 天保留、跨周查询、点数上限、分批过期清理。
@@ -21,6 +26,7 @@ npm run build:frontend
 - `latest-metrics-all.test.js` / `latest-timestamps.test.js`：最新报告、超过单次 SQL 绑定上限的批量查询、持久化心跳。
 - `dashboard-latency-window.test.js`：首页 3 小时、20 个延迟窗口及空窗口保留。
 - `helpers/sql-storage.js`：使用 Node 内置 SQLite 驱动验证 SQL 与事务；运行时测试另用 workerd 的真实 Storage API。
+- `helpers/d1.js`：使用 Node 内置 SQLite 实际执行 D1 配置 SQL 与 batch 事务，避免仅靠匹配 SQL 文本的模拟数据库掩盖迁移错误。
 
 运行时测试只操作临时目录与本地资源，结束后自动清理，不连接线上数据库或部署。
 

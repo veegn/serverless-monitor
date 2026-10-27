@@ -1,3 +1,5 @@
+import { makeD1 } from './helpers/d1.js';
+import { FIELD_SETTINGS_GROUP } from '../src/utils/settingFields.js';
 import { makeSqlStorage } from './helpers/sql-storage.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -63,32 +65,25 @@ function makeBroadcaster(webSockets = [], env = { DB: {} }) {
 }
 
 function makeSettingsDb(settingsSource) {
-  const readSettings = typeof settingsSource === 'function'
-    ? settingsSource
-    : () => settingsSource;
-  return {
-    prepare() {
-      return {
-        bind() {
-          return this;
-        },
-        async first() {
-          return {
-            value: JSON.stringify({
-              jwt_secret: 'x'.repeat(32),
-              ...(readSettings() || {})
-            })
-          };
-        },
-        async all() {
-          return { results: [] };
-        },
-        async run() {
-          return { success: true };
+  const read = () => ({ jwt_secret: 'x'.repeat(32), ...(typeof settingsSource === 'function' ? settingsSource() : settingsSource || {}) });
+  let previous = JSON.stringify(read());
+  const db = makeD1({ settings: { site_options: previous } });
+  const prepare = db.prepare.bind(db);
+  db.prepare = sql => {
+    const current = read();
+    if (JSON.stringify(current) !== previous) {
+      if (db.store.has('settings.schema')) {
+        for (const [field, value] of Object.entries(current)) {
+          const group = FIELD_SETTINGS_GROUP[field];
+          if (!group) continue;
+          db.store.set(group, JSON.stringify({ ...JSON.parse(db.store.get(group) || '{}'), [field]: value }));
         }
-      };
+      } else db.store.set('site_options', JSON.stringify(current));
+      previous = JSON.stringify(current);
     }
+    return prepare(sql);
   };
+  return db;
 }
 
 function makeDescriptor(md5 = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', schemaVersion = 7) {
@@ -491,8 +486,8 @@ test('WSS agent context keeps an authenticated session when server lookup throws
   });
 
   assert.ok(context);
-  assert.equal(context.historyPartitionId, 12);
-  assert.equal(serialized.historyPartitionId, 12);
+  assert.equal(context.serverId, 'degraded-server');
+  assert.equal(serialized.authenticated, true);
   assert.equal(closed.length, 0);
 });
 
@@ -558,18 +553,7 @@ test('WSS agent context closes and clears caches when server no longer exists', 
   const sent = [];
   const closed = [];
   const broadcaster = makeBroadcaster([], {
-    DB: {
-      prepare() {
-        return {
-          bind() {
-            return this;
-          },
-          async first() {
-            return null;
-          }
-        };
-      }
-    }
+    DB: makeD1()
   });
   broadcaster.agentServerDetails.set('deleted-server-test', {
     data: { id: 'deleted-server-test' },

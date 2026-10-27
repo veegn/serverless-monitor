@@ -1,3 +1,6 @@
+import { ensureServerSchema } from '../src/database/ServerRepository.js';
+import { loadSettingsScope } from '../src/utils/settings.js';
+import { makeD1 } from './helpers/d1.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
@@ -25,30 +28,6 @@ function makeSiteSettings(overrides = {}) {
   };
 }
 
-function makeEnv(siteSettings, { changes = 1 } = {}) {
-  const writes = [];
-  const env = {
-    DB: {
-      prepare(sql) {
-        return {
-          _sql: sql,
-          bind(...args) { this._args = args; return this; },
-          async first() {
-            if (sql.includes("key = 'site_options'")) return { value: JSON.stringify(siteSettings) };
-            return null;
-          },
-          async all() { return { results: [] }; },
-          async run() {
-            writes.push({ sql, args: this._args || [] });
-            return { success: true, meta: { changes } };
-          }
-        };
-      }
-    }
-  };
-  return { env, writes };
-}
-
 function makeServer(overrides = {}) {
   return {
     id: 'srv-1',
@@ -68,15 +47,21 @@ globalThis.fetch = async () => {
   return { ok: true, async text() { return ''; }, async json() { return {}; } };
 };
 
-async function run(server, metrics, siteSettings, opts) {
+async function run(server, metrics, siteSettings, { changes = 1 } = {}) {
   clearSiteSettingsCache();
   fetchCalls = 0;
-  const { env, writes } = makeEnv(siteSettings, opts);
+  const db = makeD1({ settings: { site_options: siteSettings }, servers: [server] });
+  await ensureServerSchema(db);
+  await loadSettingsScope(db, 'notifications');
+  if (!changes) {
+    db.sqlite.prepare(`INSERT INTO server_notification_state(server_id,traffic_used_bytes,traffic_threshold,traffic_limit_gb)
+      VALUES(?,?,?,?)`).run(server.id, metrics.net_rx_monthly, Number(siteSettings.traffic_alert_threshold), Number(server.traffic_limit));
+  }
+  const start = db.writes.length;
   const patches = [];
-  await evaluateTrafficAlert(env, server, metrics, {
-    patchCache: (id, value) => patches.push({ id, value })
-  });
-  return { writes, patches, fetchCalls };
+  await evaluateTrafficAlert({ DB: db }, server, metrics, { patchCache: (id, value) => patches.push({ id, value }) });
+  const stored = db.sqlite.prepare('SELECT traffic_alert_state FROM server_details WHERE id=?').get(server.id).traffic_alert_state;
+  return { writes: db.writes.slice(start).filter(write => write.changes > 0), patches, fetchCalls, stored: stored ? JSON.parse(stored) : null };
 }
 
 // ---- pure utils ---------------------------------------------------------
@@ -89,6 +74,8 @@ test('normalizeTrafficLimitGb / normalizePct 消除格式差异', () => {
   assert.equal(normalizeTrafficLimitGb('abc'), 0);
   assert.equal(normalizePct('80'), 80);
   assert.equal(normalizePct(150), 100);
+  assert.equal(normalizePct(80.5), 80);
+  assert.equal(normalizePctOrNull(80.5), 80);
   assert.equal(normalizePct(-5), 0);
   assert.equal(normalizePct('x'), 0);
   // 三态：空值 → null（跟随全局），数字含 0 → 夹取整数
@@ -144,20 +131,16 @@ test('未达阈值：不发送、不写', async () => {
 
 test('首次跨阈值：发一条通知并写入 {u,th,lim}', async () => {
   const used = 820 * GB;
-  const { writes, patches, fetchCalls: f } = await run(
+  const { writes, patches, stored, fetchCalls: f } = await run(
     makeServer(),
     { net_rx_monthly: used, net_tx_monthly: 0 },
     makeSiteSettings({ traffic_alert_threshold: '80' })
   );
   assert.equal(f, 1, '应发送一次');
-  assert.equal(writes.length, 1);
-  assert.match(writes[0].sql, /SET traffic_alert_state = \?/);
-  const stored = JSON.parse(writes[0].args[0]);
-  assert.equal(stored.u, used);
-  assert.equal(stored.th, 80);
-  assert.equal(stored.lim, 1000);
+  assert.equal(writes.length, 2, 'claim and successful delivery each write the state row once');
+  assert.deepEqual(stored, { u: used, th: 80, lim: 1000 });
   assert.equal(patches.length, 1);
-  assert.equal(patches[0].value, writes[0].args[0]);
+  assert.deepEqual(JSON.parse(patches[0].value), stored);
 });
 
 test('同账期已发（th/lim 一致且未回落）：抑制', async () => {
@@ -203,7 +186,7 @@ test('回落 < 0.5u：持久清零写且不发送，刷新缓存为 null', async
   );
   assert.equal(f, 0, '回落不应发送');
   assert.equal(writes.length, 1);
-  assert.match(writes[0].sql, /SET traffic_alert_state = NULL/);
+  assert.match(writes[0].sql, /DELETE FROM server_notification_state/);
   assert.equal(patches.length, 1);
   assert.equal(patches[0].value, null);
 });
@@ -249,7 +232,7 @@ test('未配置通知渠道：不发也不写', async () => {
   assert.equal(writes.length, 0);
 });
 
-test('meta.changes=0（并发被抢先写）：发送后不刷新缓存', async () => {
+test('另一请求已提交通知状态：不重复发送，并修正陈旧缓存', async () => {
   const used = 820 * GB;
   const { patches, fetchCalls: f } = await run(
     makeServer(),
@@ -257,6 +240,7 @@ test('meta.changes=0（并发被抢先写）：发送后不刷新缓存', async 
     makeSiteSettings({ traffic_alert_threshold: '80' }),
     { changes: 0 }
   );
-  assert.equal(f, 1, '先通知仍会发出');
-  assert.equal(patches.length, 0, 'changes=0 不刷缓存');
+  assert.equal(f, 0, '已发送状态阻止重复通知');
+  assert.equal(patches.length, 1);
+  assert.equal(JSON.parse(patches[0].value).u, used);
 });

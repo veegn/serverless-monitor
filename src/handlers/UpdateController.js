@@ -1,6 +1,6 @@
 import { readLimitedJson } from '../utils/requestBody.js';
 import { logEvent, logError, setLogContext, markResponseLogged, correlationHeaders } from '../utils/observability.js';
-import { getServerDetail, clearServerDetailCache, patchServerDetailCache, clearServersListCache, getAllServers } from '../utils/cache.js';
+import { getServerDetail, clearServerDetailCache, patchServerDetailCache, clearServersListCache } from '../utils/cache.js';
 import { NotificationService } from '../services/NotificationService.js';
 import { getNotificationMessages } from '../services/notificationMessages.js';
 import { addServerColumns } from '../database/updateDatabase.js';
@@ -11,8 +11,8 @@ import {
   coerceNumericMetricFields
 } from '../utils/metrics.js';
 import { AppError, createErrorResponse, createUnauthorizedResponse, createBadRequestResponse } from '../utils/errors.js';
-import { ensureServerOptimization, getNextServerHistoryPartitionId, HISTORY_MAX_PARTITION_ID } from '../database/indexOptimization.js';
-import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSiteSettings, normalizeBooleanSetting } from '../utils/settings.js';
+import { writeServer } from '../database/ServerRepository.js';
+import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSettingsScope, normalizeBooleanSetting } from '../utils/settings.js';
 import { cacheLatestReportUpdate } from '../utils/latestReportCache.js';
 import { checkWebSocketAuth } from '../middleware/auth.js';
 import {
@@ -480,10 +480,7 @@ export class UpdateController {
 }
 
   static async autoRegisterServer(db, serverId, data, secret, settings, regionCode = '') {
-  const currentServers = await getAllServers(db, true);
-  if (currentServers.length >= HISTORY_MAX_PARTITION_ID) {
-    throw new Error('Maximum registered server limit reached');
-  }
+  await addServerColumns(db);
 
   const firstSample = Array.isArray(data.samples) && data.samples[0] ? data.samples[0] : null;
   const metrics = data.metrics || firstSample?.metrics || {};
@@ -497,32 +494,12 @@ export class UpdateController {
   const group = settings?.auto_register_default_group || 'Default';
   const region = regionCode || '';
 
-  const historyPartitionId = await getNextServerHistoryPartitionId(db);
   const { max_order } = await db.prepare('SELECT COALESCE(MAX(sort_order), -1) as max_order FROM servers').first();
-  const sortOrder = (max_order || 0) + 1;
-  const now = Date.now();
-
-  try {
-    await db.prepare(`
-      INSERT INTO servers
-      (id, name, server_group, region, "interface", sort_order, history_partition_id, timestamp, secret)
-      VALUES (?, ?, ?, ?, '', ?, ?, ?, ?)
-    `).bind(serverId, serverName, group, region, sortOrder, historyPartitionId, now, secret).run();
-  } catch (insertErr) {
-    if (/no column named secret|has no column/i.test(insertErr.message)) {
-      await addServerColumns(db);
-      await db.prepare(`
-        INSERT INTO servers
-        (id, name, server_group, region, "interface", sort_order, history_partition_id, timestamp, secret)
-        VALUES (?, ?, ?, ?, '', ?, ?, ?, ?)
-      `).bind(serverId, serverName, group, region, sortOrder, historyPartitionId, now, secret).run();
-    } else {
-      throw insertErr;
-    }
-  }
+  await writeServer(db, { id: serverId, name: serverName, server_group: group, region, interface: '',
+    sort_order: (max_order ?? -1) + 1, timestamp: Date.now(), secret }, { create: true });
 
   clearServersListCache();
-  const serverDetail = await getServerDetail(db, serverId, true);
+  const serverDetail = await getServerDetail(db, serverId, true, { scope: 'agent' });
   return {
     serverDetail,
     serverName,
@@ -552,7 +529,7 @@ export class UpdateController {
 
     let settings = null;
     try {
-      settings = await loadSiteSettings(env.DB);
+      settings = await loadSettingsScope(env.DB, 'agent');
     } catch (_) {
       settings = {};
     }
@@ -700,7 +677,7 @@ export class UpdateController {
       }
       serverId = rawId;
 
-      serverDetail = await getServerDetail(env.DB, serverId, true);
+      serverDetail = await getServerDetail(env.DB, serverId, true, { scope: 'agent' });
       const auth = UpdateController.checkSecretAuthorization(secret, serverDetail, settings, env);
 
       if (!serverDetail) {
@@ -777,12 +754,12 @@ export class UpdateController {
 
       await env.DB.prepare(`
         UPDATE servers
-        SET rx_correction = NULL, tx_correction = NULL
+        SET rx_correction = NULL, tx_correction = NULL, updated_at = ?, revision = revision + 1
         WHERE id = ?
           AND (rx_correction IS NOT NULL OR tx_correction IS NOT NULL)
           AND ABS(COALESCE(rx_correction, 0) - ?) < 0.000001
           AND ABS(COALESCE(tx_correction, 0) - ?) < 0.000001
-      `).bind(serverId, ackRx, ackTx).run();
+      `).bind(Date.now(), serverId, ackRx, ackTx).run();
       clearServerDetailCache();
       scheduleAgentConfigChanged(env, ctx, serverId);
 
@@ -956,7 +933,7 @@ export class UpdateController {
 }
 
   static async handleWebSocketUpgrade(request, env) {
-  const settings = await loadSiteSettings(env.DB, { forceRefresh: true });
+  const settings = await loadSettingsScope(env.DB, 'access', { forceRefresh: true });
   if (settings?.is_public !== 'true' && !await checkWebSocketAuth(request, env, settings)) {
     return new Response(JSON.stringify({ error: 'Unauthorized', code: 401 }), {
       status: 401,
@@ -969,7 +946,7 @@ export class UpdateController {
 }
 
   static async handleUpdateWebSocketUpgrade(request, env) {
-  const settings = await loadSiteSettings(env.DB);
+  const settings = await loadSettingsScope(env.DB, 'monitoring');
   if (!isWssReportConfigured(settings)) {
     return UpdateController.createAgentWssDisabledResponse();
   }

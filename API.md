@@ -101,10 +101,10 @@
 - **使用位置**：`POST /admin/api` 的 `action: login`
 - **方式**：请求体字段 `username` / `password`（后端内部组装 `Basic base64(user:pass)` 进行校验）
 - **校验顺序**：
-  1. 若 `site_options.password` 已设置为 PBKDF2 格式 → 按 `pbkdf2_sha256$iterations$salt$hash` 校验
-  2. 若 `site_options.password` 为旧版 32 位 MD5 → 按 MD5 兼容校验，成功后自动升级为 PBKDF2
-  3. 若 `site_options.password` 未设置或为空 → 与 `API_SECRET` 直接比对
-  4. 用户名：若 `site_options.username` 已设置则用之，否则回退为 `admin`
+  1. 若 `settings.account.password` 已设置为 PBKDF2 格式 → 按 `pbkdf2_sha256$iterations$salt$hash` 校验
+  2. 若 `settings.account.password` 为旧版 32 位 MD5 → 按 MD5 兼容校验，成功后自动升级为 PBKDF2
+  3. 若 `settings.account.password` 未设置或为空 → 与 `API_SECRET` 直接比对
+  4. 用户名：若 `settings.account.username` 已设置则用之，否则回退为 `admin`
 - **失败返回**：`401 { "error": "Invalid username or password", "code": 401 }`
 
 #### C. JWT Bearer（管理操作 → 后续管理请求）
@@ -113,7 +113,7 @@
 - **方式**：`Authorization: Bearer <token>` Header
 - **Token 签发**：`HS256` JWT，默认有效期 **604800 秒（7 天）**
 - **签名密钥**（优先级）：
-  1. `site_options.jwt_secret`（长度 ≥ 32）
+  1. `settings.security.jwt_secret`（长度 ≥ 32）
   2. `API_SECRET`（不够 32 字符时 `padEnd` 补 `'x'` 后取前 64 位）
   3. 回退常量：`'default_jwt_secret_for_server_monitor'`
 - **Payload 字段**：
@@ -128,7 +128,7 @@
 
 #### D. WebSocket JWT（私有站点前端实时推送）
 
-- **使用位置**：`GET /api/ws`，仅当 `site_options.is_public !== 'true'` 时强制校验
+- **使用位置**：`GET /api/ws`，仅当 `settings.site.is_public !== 'true'` 时强制校验
 - **认证来源**（任一通过即可）：
   - `Authorization: Bearer <token>`
   - `Cookie: cfsm_auth=<token>`
@@ -139,7 +139,7 @@
 
 ### 0.2 Turnstile 人机验证
 
-当 `site_options.turnstile_enabled === 'true'` 时，**所有** **`/api/*`** **与** **`/admin/api`** **公共接口**（除了下方 bypass 列表）都需要先验证 Cloudflare Turnstile Token。
+当 `settings.security.turnstile_enabled === 'true'` 时，**所有** **`/api/*`** **与** **`/admin/api`** **公共接口**（除了下方 bypass 列表）都需要先验证 Cloudflare Turnstile Token。
 
 **Bypass 列表**（无需 Turnstile）：
 
@@ -155,7 +155,7 @@
    ```
    X-Turnstile-Token: <token from cloudflare>
    ```
-4. Worker 用 `site_options.turnstile_secret_key` 调用 `https://challenges.cloudflare.com/turnstile/v0/siteverify` 验证。
+4. Worker 用 `settings.security.turnstile_secret_key` 调用 `https://challenges.cloudflare.com/turnstile/v0/siteverify` 验证。
 5. ~~**验证成功后**，Worker 通过 `X-Turnstile-Verified` 这个 **加密 Header** 给客户端发“已验证凭证”。~~ **2026-07-26 修订**：当前实现通过 `/api/config` 响应体的 `turnstile_verified` 字段返回 AES-GCM 加密凭证，有效期 **3600 秒**。代码会计算同名响应 Header 的值，但当前未实际写入 Header。
 6. 客户端也可以把 `X-Turnstile-Verified` 再次带回，Worker 会优先验证该 Header（验证有效期）。
 
@@ -479,7 +479,6 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
   | 401 | `Invalid secret` | 否 | 第一条有效上报未携带正确 `secret`；认证后显式发送错误 `secret` 也会关闭连接 |
   | 403 | `Server ID changed` | 否 | 已认证连接切换为另一个 `id` |
   | 404 | `Server not found` | 是 | `id` 格式合法，但 `servers` 表不存在该服务器 |
-  | 400 | `Missing history_partition_id` | 是 | 服务器历史分区未初始化，且自动优化后仍不可用 |
   | 400 | `Missing metrics` | 视认证状态而定 | 认证成功后没有有效 `metrics` / `samples` / `batch` |
   | 400 | `Invalid correction` | 否 | `rx_correction` / `tx_correction` 格式非法 |
 
@@ -502,7 +501,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 
 ## 2. 公开 API（前端/管理端共用）
 
-> ~~以下接口除 `/api/ws` 外，若 `site_options.is_public !== 'true'` 则必须携带 JWT。~~ **2026-07-26 修订**：`/api/servers`、`/api/server`、`/api/history/all` 在私有站点需要 JWT；`/api/config`、`/api/ws`、`/theme` 无论站点是否公开均可访问。**2026-08-19 修订**：私有站点的 `/api/ws` 也需要通过 WebSocket JWT 认证，公开站点仍可匿名连接。
+> ~~以下接口除 `/api/ws` 外，若 `settings.site.is_public !== 'true'` 则必须携带 JWT。~~ **2026-07-26 修订**：`/api/servers`、`/api/server`、`/api/history/all` 在私有站点需要 JWT；`/api/config`、`/api/ws`、`/theme` 无论站点是否公开均可访问。**2026-08-19 修订**：私有站点的 `/api/ws` 也需要通过 WebSocket JWT 认证，公开站点仍可匿名连接。
 > 命中 Turnstile 时需带 `X-Turnstile-Token` 或 `X-Turnstile-Verified`。
 
 ### 2.1 `GET /api/config` - 获取站点配置
@@ -601,7 +600,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 **行为**：
 
 - `theme_options` 必须是非数组对象；传数组、字符串、`null` 会返回 `400 invalidThemeOptionsFormat`。
-- 只更新 `settings` 表中 `appearance_options.theme_options`，保留 `appearance_options` 内其他字段，不写入或重写 `site_options`。
+- 只更新 `settings` 表中 `settings.theme` 这一行的 `theme_options` 字段，保留同组的 `theme_url`，并保留所有其他分组。
 - 读取端仍使用 `/api/config` 返回的 `theme_options`。
 
 **Response 200**
@@ -785,7 +784,7 @@ CORS_ALLOWED_ORIGINS=https://status.example.com,https://admin.example.com
 }
 ```
 
-> `last_updated` 来自最新指标；`timestamp` 是服务器配置记录的创建/导入时间字段，普通编辑不会刷新它。~~两者都表示最近上报时间。~~（2026-07-26 修订）
+> `last_updated` 来自最新指标；`created_at` 始终表示配置创建/导入时间。配置视图和导出中的 `timestamp` 是 `created_at` 的兼容别名，合并最新指标后的监控响应可能用 `timestamp` 表示采样时间。
 > `/api/server` 详情接口不返回新增的 `ping` / `loss` 窗口数组；详情页仍可使用 `ping_ct` / `ping_cu` / `ping_cm` / `ping_bd` 与 `loss_ct` / `loss_cu` / `loss_cm` / `loss_bd` 当前单点值。`latestReportUpdates` 与 `/api/servers` 同名字段形状一致，仅包含当前服务器最近一次批量上报的采样回放包；用于详情页打开时连续回放。REST 样本统一为 `{ ts, data }`，`data` 按探针采样包透传。回放状态保留约 5 分钟，Worker/DO 重启后允许为空数组。
 
 **失败返回**：
@@ -1146,7 +1145,7 @@ https://github.com/<owner>/<theme-repo>/tree/<commit-or-branch>[/theme-subdir]
 }
 ```
 
-Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或 `turnstile_login_enabled` 为 `true` 时**必填**）
+Header：`X-Turnstile-Token: <token>`（当 `settings.security.turnstile_enabled` 或 `turnstile_login_enabled` 为 `true` 时**必填**）
 
 **Response 200**
 
@@ -1244,7 +1243,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 }
 ```
 
-**前置条件**：Cloudflare Token 与 Account ID 必须通过请求体提供，或已保存在 `site_options`。请求体字段存在时优先使用，即使值为空字符串也会覆盖保存值。
+**前置条件**：Cloudflare Token 与 Account ID 必须通过请求体提供，或已保存在 `settings.cloudflare` 分组中。请求体字段存在时优先使用，即使值为空字符串也会覆盖保存值。
 
 **Response 200**
 
@@ -1363,8 +1362,8 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 
 **字段分类**：
 
-- `APPEARANCE_FIELDS`（写入 `appearance_options` JSON）：`site_title`、`custom_bg`、`custom_bg_mobile`、`favicon`、`custom_head`、`custom_script`、`csp_static`、`csp_api`、`display_mode`、`preferred_theme`、`default_language`、`theme_options`
-- `SITE_FIELDS`（写入 `site_options` JSON）：`is_public`、`show_price`、`show_expire`、`show_tf`、`wss_report_enabled`、`wss_report_hours`、`frontend_ws_timeout_minutes`、`long_history_points`、通知、Turnstile、账号、Cloudflare、Ping 节点及其显示名称（`custom_ct_name`、`custom_cu_name`、`custom_cm_name`、`custom_bd_name`）、`expire_reminder`、`notification_timezone`、`expire_notification_time`、`theme_url`、历史优化字段等站点级配置。`wss_report_hours` 是允许 Agent WSS 上报的 UTC 小时数组（`0-23`）；缺失时默认全天，空数组表示所有时段均关闭
+- 对外仍接收扁平 `settings`；主题选项继续兼容 `settings.appearance_options.theme_options`。`APPEARANCE_FIELDS`、`SITE_FIELDS` 仅用于接口字段分类。
+- D1 按功能写入 `settings.site`、`settings.appearance`、`settings.monitoring`、`settings.security`、`settings.account`、`settings.registration`、`settings.probes`、`settings.notifications`、`settings.alerts`、`settings.cloudflare`、`settings.theme` 共 11 个分组。完整映射与迁移规则见[配置存储文档](docs/configuration-storage.md)。
 - 任何未列出的字段会被忽略
 
 **特殊处理**：
@@ -1379,7 +1378,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 - `appearance_options` / `theme_options`：必须是非数组对象；`display_mode` 规范为 `bar` / `ring` / `table`；`preferred_theme` 规范为 `auto` / `dark` / `light`，默认 `auto`；`default_language` 规范为 `auto` / `zh` / `en`，默认 `auto`
 - `frontend_ws_timeout_minutes`：规范为 `0`-`1440` 的整数分钟；缺失或非法值回退为 `0`，即前端连接不超时
 - `csp_static` / `csp_api`：逗号分隔，只保留不带凭据、路径、查询或 fragment 的 HTTPS origin，非法项会被静默过滤
-- 外观设置不是字段级合并：请求中只要出现任一外观字段或 `appearance_options`，后端就会用本次提供的外观字段重写整个 `appearance_options` JSON；部分更新时应先读取并回传完整外观对象
+- 设置按本次提供的字段合并，未提供的字段和其他分组保持原值；跨分组保存使用一个事务。`theme_options` 作为完整对象替换，其内部显式 `null` 会保留
 - 第三方主题如只需更新 `theme_options`，应使用 `POST /api/theme_options` 或 `action: save_theme_options`；这些接口不会影响其他 settings
 - `jwt_secret` 不在保存阶段校验长度；只有长度至少 32 的值会用于签名，空值或短值在下一次加载设置时会被新生成并持久化的随机密钥替换
 
@@ -1389,7 +1388,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 { "success": true, "message": "updateSuccess" }
 ```
 
-> 副作用：清空 `site_options` 内存缓存，下一次请求会从 DB 重新加载。
+> 副作用：清空相关设置缓存，下一次读取会从功能分组重新加载。
 
 ***
 
@@ -1474,7 +1473,7 @@ Header：`X-Turnstile-Token: <token>`（当 `site_options.turnstile_enabled` 或
 
 - 需要携带有效 `Authorization: Bearer <jwt>`。
 - `theme_options` 必须是非数组对象；传数组、字符串、`null` 会返回 `400 invalidThemeOptionsFormat`。
-- 只更新 `settings` 表中 `appearance_options.theme_options`，保留 `appearance_options` 内其他字段，不写入或重写 `site_options`。
+- 只更新 `settings` 表中 `settings.theme` 这一行的 `theme_options` 字段，保留同组的 `theme_url`，并保留所有其他分组。
 - 推荐第三方主题直接调用 `POST /api/theme_options`；该 action 用于兼容 `/admin/api` action 路由体系。
 - 读取端仍使用 `/api/config` 返回的 `theme_options`。
 
@@ -1709,7 +1708,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 
 - `servers` 不是非空数组时返回 `400 noServersToImport`
 - UUID 非法或与现有服务器重复的记录会被跳过
-- `history_partition_id` 非法、重复或超出允许范围时会重新分配；无可用分区时跳过该记录
+- 兼容旧版扁平导出；Ping、通知设置和 Agent 密钥分别写入相应表。旧 `history_partition_id` 被忽略，不再分配历史分区
 - 仅导入服务器配置，不导入 `metrics_history`；单行插入失败也会跳过，并继续处理后续记录
 
 **Response 200**
@@ -1758,7 +1757,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 }
 ```
 
-~~升级步骤包括 `metrics_history load -> load_avg` 迁移和 `metrics_history` 写入优化。~~ **修订**：当前顺序为补齐 `servers` 列、清理 `servers` 多余列、补齐 `metrics_history` 列、清理废弃设置、删除弃用的 `metrics_aggregated` 表。历史查询已统一为结构化主键 id 范围模式，不再创建 `(server_id, timestamp)` 二级索引。
+当前升级会迁移全局功能分组、服务器独立配置表和通知运行状态，并清理弃用的 D1 指标表。`schema_migrations` 记录各阶段，失败可重试并从未完成阶段继续。结构、约束、稀疏配置和行计量见[配置存储说明](docs/configuration-storage.md)。
 
 ~~任一步骤抛错时返回 HTTP 500。~~ **2026-07-26 修订**：升级函数会捕获未被子步骤处理的错误并返回 `{ "success": false, "message": "databaseUpgradeFailed", "error": "...", "results": [...] }`；路由仍使用成功响应包装，因此通常为 HTTP `200`。各子步骤本身也会捕获错误，所以顶层 `success: true` 时 `results[]` 仍可能含 `success: false`，调用方必须同时检查两层状态。
 
@@ -1813,6 +1812,8 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 
 ### 5.1 Server 对象
 
+Ping 配置、通知配置和通知状态分别存储于独立表，由 `server_details` 视图组合；API 仍使用扁平字段，前台按需投影，不读取通知状态或认证密钥；完整配置导出使用兼容视图。`servers` 主表不再存储历史分区编号及旧指标快照，实时指标来自 DO。详见[字段核对与迁移说明](docs/configuration-storage.md)。
+
 | 字段                                            | 类型                 | 说明                        |
 | --------------------------------------------- | ------------------ | ------------------------- |
 | `id`                                          | string (UUID)      | 主键                        |
@@ -1838,8 +1839,9 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 | `offline_notify_disabled`                     | string `"0"`/`"1"` | 是否禁用该服务器的离线通知 |
 | `is_hidden`                                   | string `"0"`/`"1"` | 是否在前台隐藏                   |
 | `sort_order`                                  | number             | 排序值（越小越靠前）                |
-| `history_partition_id`                        | number             | 历史记录 ID 分区编号，由服务端分配 |
-| `timestamp`                                   | number             | `servers` 配置记录的创建/导入时间戳（毫秒），不是最新指标时间 |
+| `created_at` | number | 配置创建/导入时间（毫秒） |
+| `updated_at` / `revision` | number | 主表配置最近变更时间与版本；重复保存不更新 |
+| `timestamp` | number | 配置导出中为 `created_at` 的兼容别名；合并监控指标后可能是采样时间 |
 | `cpu`                                         | number             | 最新 CPU%（来自最新指标）           |
 | `load_avg`                                    | string             | `"x x x"`                 |
 | `net_in_speed`                                | number             | B/s                       |
@@ -1888,7 +1890,7 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 
 ### 5.4 Settings 对象
 
-> ~~`get_settings` 直接返回 `site_options` 的全部字段，包括 `jwt_secret`。~~ **2026-07-26 修订**：返回前会明确删除 `jwt_secret`，但 `cloudflare_token`、密码哈希、Turnstile Secret 等其他敏感字段仍可能返回，请只通过 HTTPS 调用并严格保护管理 JWT。
+> `get_settings` 将功能分组合并为原有扁平设置对象，删除 `password` 与 `jwt_secret`，用 `password_configured` 表示是否已配置密码。Cloudflare Token、Turnstile Secret 等管理设置仍可能返回，请保护管理 JWT。存储结构见[配置存储文档](docs/configuration-storage.md)。
 
 ```ts
 {
@@ -1927,7 +1929,6 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
   expire_reminder: string, // '0'-'365'; 0 disables expiration reminders
   notification_timezone: string, // IANA timezone；默认 UTC
   expire_notification_time: string, // '0'-'23'；默认 12
-  servers_optimized: 'true' | 'false'
 }
 ```
 

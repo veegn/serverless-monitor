@@ -1,3 +1,4 @@
+import { readNotificationRuntimeState, saveNotificationRuntimeState, clearNotificationRuntimeState, claimTrafficNotification, finishTrafficNotification, releaseTrafficNotification, resetTrafficNotification, readTrafficNotification } from '../database/NotificationStateRepository.js';
 import { logEvent, logError, correlationHeaders } from '../utils/observability.js';
 import { clearServersListCache, getAllServers } from '../utils/cache.js';
 import {
@@ -6,7 +7,7 @@ import {
   getResourceAlertConfig,
   getResourceAlertRuleThresholds,
   getTgNotifyMinutes,
-  loadSiteSettings,
+  loadSettingsScope,
   normalizeExpireNotificationTime,
   normalizeBooleanSetting,
   normalizeNotificationTemplate,
@@ -204,18 +205,14 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
 
   static async clearResourceAlertState(db) {
   if (!db) return false;
-  const result = await db.prepare(
-    `DELETE FROM settings WHERE key = ?`
-  ).bind(NotificationService.RESOURCE_ALERT_STATE_KEY).run();
+  const result = await clearNotificationRuntimeState(db, NotificationService.RESOURCE_ALERT_STATE_KEY);
   NotificationService.resourceAlertStateKnownEmpty = true;
   return NotificationService.getD1Changes(result) > 0;
 }
 
   static async saveResourceAlertState(db, configSignature, alertState, hadStoredState) {
   if (NotificationService.hasResourceAlertStateEntries(alertState)) {
-    await db.prepare(
-      `INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-    ).bind(NotificationService.RESOURCE_ALERT_STATE_KEY, JSON.stringify({ signature: configSignature, servers: alertState })).run();
+    await saveNotificationRuntimeState(db, NotificationService.RESOURCE_ALERT_STATE_KEY, { signature: configSignature, servers: alertState });
     NotificationService.resourceAlertStateKnownEmpty = false;
     return;
   }
@@ -674,7 +671,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     const limit = normalizeTrafficLimitGb(server.traffic_limit);
     if (limit <= 0) return; // 未设限额：不监控
 
-    const settings = await loadSiteSettings(env.DB);
+    const settings = await loadSettingsScope(env.DB, 'notifications');
     const globalPct = normalizePct(settings?.traffic_alert_threshold);
     // 逐台阈值三态：null/未设置 → 跟随全局；数字（含 0）→ 覆盖，0 = 显式关闭该服务器告警
     const pctServer = normalizePctOrNull(server.traffic_alert_percent);
@@ -690,16 +687,20 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     const limitBytes = limit * GB;
     const percent = (used / limitBytes) * 100;
 
+    // Agent configuration reads omit runtime state. Load it lazily only for
+    // nodes with active traffic alerts, so a cold start still detects a reset.
+    if (server[NotificationService.TRAFFIC_ALERT_STATE_KEY] === undefined) {
+      const persisted = await readTrafficNotification(env.DB, server.id);
+      server[NotificationService.TRAFFIC_ALERT_STATE_KEY] = persisted ? JSON.stringify(persisted) : null;
+      hooks.patchCache?.(server.id, server[NotificationService.TRAFFIC_ALERT_STATE_KEY]);
+    }
     const oldStr = server[NotificationService.TRAFFIC_ALERT_STATE_KEY] == null ? '' : String(server[NotificationService.TRAFFIC_ALERT_STATE_KEY]);
     const state = NotificationService.parseTrafficAlertState(server[NotificationService.TRAFFIC_ALERT_STATE_KEY]);
 
     if (state) {
       // ① 回落=新账期/重装/大校正 → 持久清零（不可只在内存即时重算）
       if (used < state.u * NotificationService.TRAFFIC_ALERT_RESET_FACTOR) {
-        const { meta } = await env.DB.prepare(
-          `UPDATE servers SET traffic_alert_state = NULL WHERE id = ? AND COALESCE(traffic_alert_state,'') = ?`
-        ).bind(server.id, oldStr).run();
-        if (meta && meta.changes > 0) hooks.patchCache?.(server.id, null);
+        if (await resetTrafficNotification(env.DB, server.id, oldStr)) hooks.patchCache?.(server.id, null);
         return;
       }
       // ② 规则签名一致且未回落 → 同账期已发，抑制
@@ -709,30 +710,39 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
 
     if (percent < effectivePct) return; // 未达阈值
 
-    // 先发后写
-    const serverName = server.name || server.id;
-    const messages = getNotificationMessages(settings);
-    const usage = messages.trafficUsed({
-      usedGb: (used / GB).toFixed(1),
-      limitGb: limit,
-      percent: percent.toFixed(1),
-      threshold: effectivePct
-    });
-    const msg = `${serverName}  ${usage}`;
-    const err = await NotificationService.sendNotification(settings, msg, {
-      event: messages.events.trafficAlert,
-      emoji: '📈',
-      clients: [serverName],
-      count: 1,
-      message: msg
-    });
-    if (err) return; // 失败：不写，下次上报重试
+    const claim = await claimTrafficNotification(env.DB, server.id, { used, threshold: effectivePct, limit,
+      resetFactor: NotificationService.TRAFFIC_ALERT_RESET_FACTOR });
+    if (!claim.token) {
+      if (claim.state) hooks.patchCache?.(server.id, JSON.stringify(claim.state));
+      return;
+    }
+    let committed = false;
+    try {
+      const serverName = server.name || server.id;
+      const messages = getNotificationMessages(settings);
+      const usage = messages.trafficUsed({
+        usedGb: (used / GB).toFixed(1),
+        limitGb: limit,
+        percent: percent.toFixed(1),
+        threshold: effectivePct
+      });
+      const msg = `${serverName}  ${usage}`;
+      const err = await NotificationService.sendNotification(settings, msg, {
+        event: messages.events.trafficAlert,
+        emoji: '📈',
+        clients: [serverName],
+        count: 1,
+        message: msg
+      });
+      if (err) return; // 不记录发送成功；finally 释放租约，下次上报重试。
 
-    const newStr = JSON.stringify({ u: used, th: effectivePct, lim: limit });
-    const { meta } = await env.DB.prepare(
-      `UPDATE servers SET traffic_alert_state = ? WHERE id = ? AND COALESCE(traffic_alert_state,'') = ?`
-    ).bind(newStr, server.id, oldStr).run();
-    if (meta && meta.changes > 0) hooks.patchCache?.(server.id, newStr);
+      const newState = { u: used, th: effectivePct, lim: limit };
+      committed = await finishTrafficNotification(env.DB, server.id, claim.token, newState);
+      if (committed) hooks.patchCache?.(server.id, JSON.stringify(newState));
+    } finally {
+      if (!committed) await releaseTrafficNotification(env.DB, server.id, claim.token);
+    }
+
   } catch (e) {
     logError('alert', 'alert.traffic.failed', 'Traffic alert evaluation failed', e, { serverId: server?.id });
   }
@@ -1061,13 +1071,13 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
 }
 
   static async checkOfflineNodes(db, env) {
-  const siteSettings = await loadSiteSettings(db);
+  const siteSettings = await loadSettingsScope(db, 'notifications');
   const tgNotifyMinutes = getTgNotifyMinutes(siteSettings.tg_notify);
 
   if (tgNotifyMinutes === 0 || !NotificationService.hasNotificationTarget(siteSettings)) return;
 
   try {
-    const allServers = await getAllServers(db);
+    const allServers = await getAllServers(db, true, { scope: 'offline' });
     
     if (!env?.METRICS_BROADCASTER) return;
     const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
@@ -1084,9 +1094,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     }
 
     let alertState = {};
-    const stateRes = await db.prepare(
-      "SELECT value FROM settings WHERE key = 'alert_state'"
-    ).first();
+    const stateRes = await readNotificationRuntimeState(db, 'alert_state');
     
     if (stateRes) {
       try {
@@ -1156,9 +1164,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       if (!error) for (const node of recoveredNodes) delete nextState[node.id];
     }
     if (JSON.stringify(nextState) !== JSON.stringify(previousState)) {
-      await db.prepare(
-        'INSERT INTO settings (key, value) VALUES ("alert_state", ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-      ).bind(JSON.stringify(nextState)).run();
+      await saveNotificationRuntimeState(db, 'alert_state', nextState);
     }
   } catch (e) {
     logError('alert', 'alert.offline.failed', 'Offline detection failed; skipping this check', e);
@@ -1172,7 +1178,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   const minute = Number.isFinite(options?.minute) ? options.minute : new Date().getUTCMinutes();
   // 每 2 分钟强制刷新一次设置，其余分钟复用缓存（TTL 120s），降低每分钟的 CPU 开销
   const forceRefresh = minute % 2 === 0;
-  const siteSettings = await loadSiteSettings(db, { forceRefresh });
+  const siteSettings = await loadSettingsScope(db, 'notifications', { forceRefresh });
   if (!NotificationService.hasNotificationTarget(siteSettings)) return;
 
   const resourceConfig = getResourceAlertConfig(siteSettings);
@@ -1185,7 +1191,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   }
 
   try {
-    const allServers = await getAllServers(db);
+    const allServers = await getAllServers(db, true, { scope: 'resource' });
     if (allServers.length === 0) {
       await NotificationService.clearResourceAlertState(db);
       return;
@@ -1251,9 +1257,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       }
     }
 
-    const stateRow = await db.prepare(
-      `SELECT value FROM settings WHERE key = ?`
-    ).bind(NotificationService.RESOURCE_ALERT_STATE_KEY).first();
+    const stateRow = await readNotificationRuntimeState(db, NotificationService.RESOURCE_ALERT_STATE_KEY);
     const hadStoredState = !!stateRow;
     const parsedState = NotificationService.parseResourceAlertState(stateRow);
     let alertState = parsedState.servers || {};
@@ -1353,7 +1357,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
 }
 
   static async checkExpiringServers(db, options = {}) {
-  const siteSettings = await loadSiteSettings(db);
+  const siteSettings = await loadSettingsScope(db, 'notifications');
   const now = Number(options?.now || Date.now());
 
   if (options?.scheduled && !NotificationService.isExpireNotificationTimeDue(siteSettings, now)) {
@@ -1361,7 +1365,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   }
 
   try {
-    const allServers = await getAllServers(db);
+    const allServers = await getAllServers(db, true, { scope: 'expiry' });
     const expiringServers = [];
     const reminderDays = getExpireReminderDays(siteSettings.expire_reminder);
     const shouldNotify = reminderDays > 0 && NotificationService.hasNotificationTarget(siteSettings);
@@ -1376,8 +1380,8 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       const renewal = renewExpireDateIfNeeded(s.expire_date, billingCycle, s.auto_renewal, now, Math.min(reminderDays, 5));
       if (renewal.renewed) {
         await db.prepare(
-          'UPDATE servers SET expire_date = ?, billing_cycle = ? WHERE id = ?'
-        ).bind(renewal.expire_date, billingCycle, s.id).run();
+          'UPDATE servers SET expire_date = ?, billing_cycle = ?, updated_at = ?, revision = revision + 1 WHERE id = ?'
+        ).bind(renewal.expire_date, billingCycle, Date.now(), s.id).run();
         s.expire_date = renewal.expire_date;
         s.billing_cycle = billingCycle;
         renewedServers.push({ name: s.name, expire_date: renewal.expire_date });

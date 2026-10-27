@@ -1,7 +1,7 @@
 import { logEvent, logError, setLogContext } from '../utils/observability.js';
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
-import { clearAppearanceSettingsCache, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
+import { isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, saveSettings, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { normalizePctOrNull } from '../utils/traffic.js';
 import { verifyTurnstileToken, hashPassword } from '../utils/common.js';
@@ -9,7 +9,7 @@ import { AppError, createSuccessResponse, createBadRequestResponse, createUnauth
 import { addServerColumns } from '../database/updateDatabase.js';
 import { NotificationService } from '../services/NotificationService.js';
 import { getNotificationMessages } from '../services/notificationMessages.js';
-import { getNextServerHistoryPartitionId, HISTORY_MAX_PARTITION_ID } from '../database/indexOptimization.js';
+import { writeServer, deleteServer as deleteServerRecord } from '../database/ServerRepository.js';
 import { isValidTrafficCorrection, normalizeConnectionMode, normalizePingMode, normalizeWssReportInterval, validateAgentConfigInput, validatePingNode, validateNetworkInterfaces } from '../utils/agentConfig.js';
 import { notifyFrontendAccessChanged, scheduleAgentConfigChanged, scheduleAgentReportModeChanged } from '../utils/agentConfigNotify.js';
 import { detectBillingCycle, detectCurrencySymbol, normalizeBillingCycle, normalizeCurrency, normalizePrice, renewExpireDateIfNeeded } from '../utils/serverBilling.js';
@@ -137,7 +137,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
 }
 
   static normalizeImportedPingNodeValue(value) {
-  return value === null || value === undefined ? '' : value;
+  return value === 0 ? '0' : value === undefined ? '' : value;
 }
 
   static normalizeNetworkInterfaceField(value) {
@@ -248,11 +248,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
 }
 
   static async deleteServer(db, id) {
-    try {
-      await db.prepare('DELETE FROM servers WHERE id = ?').bind(id).run();
-    } catch (err) {
-      throw err;
-    }
+    await deleteServerRecord(db, id);
   }
 
   static getUtcTodayRange() {
@@ -846,10 +842,6 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
             }
           }
         }
-        await env.DB.prepare(
-          'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'
-        ).bind('appearance_options', JSON.stringify(appearanceOptions)).run();
-        clearAppearanceSettingsCache();
       }
 
       const siteOptions = {};
@@ -908,10 +900,9 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
           }
         }
       }
-      await saveSiteOptions(env.DB, siteOptions);
+      await saveSettings(env.DB, { ...appearanceOptions, ...siteOptions });
       await notifyFrontendAccessChanged(env);
-      // 保存设置后非致命补列：确保 servers 表的告警相关列存在，避免启用月流量阈值后
-      // 告警状态因缺列无法持久化而重复发送通知。设置已保存成功，补列失败不回滚、不报错。
+      // 确保独立的服务器配置、通知状态表已迁移，便于随后启用告警。
       try {
         await addServerColumns(env.DB);
       } catch (e) {
@@ -947,16 +938,12 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       const region = AdminController.normalizeServerRegion(data.region);
 
       try {
+        await addServerColumns(env.DB);
         const { max_order } = await env.DB.prepare('SELECT COALESCE(MAX(sort_order), -1) as max_order FROM servers').first();
-        const sortOrder = (max_order || 0) + 1;
+        const sortOrder = (max_order ?? -1) + 1;
 
-        const historyPartitionId = await getNextServerHistoryPartitionId(env.DB);
-
-        await env.DB.prepare(`
-          INSERT INTO servers
-          (id, name, server_group, region, "interface", sort_order, history_partition_id, timestamp)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `).bind(id, name, group, region, networkInterfaces.value, sortOrder, historyPartitionId, Date.now()).run();
+        await writeServer(env.DB, { id, name, server_group: group, region, interface: networkInterfaces.value,
+          sort_order: sortOrder, timestamp: Date.now() }, { create: true });
       } catch (e) {
         return AdminController.handleServerMutationError(env.DB, e, 'serverAddFailed');
       }
@@ -996,7 +983,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
         if (!AdminController.isValidUUID(orders[i])) {
           return createBadRequestResponse('invalidSortId');
         }
-        await env.DB.prepare('UPDATE servers SET sort_order = ? WHERE id = ?').bind(i, orders[i]).run();
+        await env.DB.prepare('UPDATE servers SET sort_order=?1,updated_at=?2,revision=revision+1 WHERE id=?3 AND sort_order IS NOT ?1').bind(i, Date.now(), orders[i]).run();
       }
       
       clearServersListCache();
@@ -1061,46 +1048,16 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
       });
       
       try {
-        await env.DB.prepare(`
-          UPDATE servers
-          SET name = ?, server_group = ?, region = ?, tags = ?, note = ?, price = ?, billing_cycle = ?, auto_renewal = ?, currency = ?, expire_date = ?, traffic_limit = ?, traffic_calc_type = ?, "interface" = ?, reset_day = ?, collect_interval = ?, report_interval = ?, wss_report_interval = ?, connection_mode = ?, ping_mode = ?, auto_update = ?, custom_ct = ?, custom_cu = ?, custom_cm = ?, custom_bd = ?, node_1 = ?, node_2 = ?, node_3 = ?, node_4 = ?, rx_correction = ?, tx_correction = ?, offline_notify_disabled = ?, is_hidden = ?, traffic_alert_percent = ?
-          WHERE id = ?
-        `).bind(
-          name || '',
-          server_group || 'Default',
-          AdminController.normalizeServerRegion(region),
-          safeTags,
-          safeNote,
-          billingData.price,
-          billingData.billing_cycle,
-          billingData.auto_renewal,
-          billingData.currency,
-          billingData.expire_date,
-          traffic_limit || '',
-          traffic_calc_type || 'total',
-          networkInterfaces.value,
-          normalizedAgentConfig.reset_day,
-          normalizedAgentConfig.collect_interval,
-          normalizedAgentConfig.report_interval,
-          normalizedAgentConfig.wss_report_interval,
-          normalizedAgentConfig.connection_mode,
-          normalizedAgentConfig.ping_mode,
-          AdminController.normalizeBooleanFlag(auto_update),
-          pingNodes.values.custom_ct ?? null,
-          pingNodes.values.custom_cu ?? null,
-          pingNodes.values.custom_cm ?? null,
-          pingNodes.values.custom_bd ?? null,
-          pingNodes.values.node_1 ?? null,
-          pingNodes.values.node_2 ?? null,
-          pingNodes.values.node_3 ?? null,
-          pingNodes.values.node_4 ?? null,
-          safeRx,
-          safeTx,
-          AdminController.normalizeBooleanFlag(offline_notify_disabled),
-          AdminController.normalizeBooleanFlag(is_hidden),
-          normalizePctOrNull(traffic_alert_percent),
-          id
-        ).run();
+        await writeServer(env.DB, {
+          id, name: name || '', server_group: server_group || 'Default', region: AdminController.normalizeServerRegion(region),
+          tags: safeTags, note: safeNote, ...billingData, traffic_limit: traffic_limit || '', traffic_calc_type: traffic_calc_type || 'total',
+          interface: networkInterfaces.value, ...normalizedAgentConfig,
+          auto_update: AdminController.normalizeBooleanFlag(auto_update),
+          ...Object.fromEntries(AdminController.PING_NODE_FIELDS.map(field => [field, pingNodes.values[field] ?? null])),
+          rx_correction: safeRx, tx_correction: safeTx,
+          offline_notify_disabled: AdminController.normalizeBooleanFlag(offline_notify_disabled),
+          is_hidden: AdminController.normalizeBooleanFlag(is_hidden), traffic_alert_percent: normalizePctOrNull(traffic_alert_percent)
+        });
       } catch (e) {
         return AdminController.handleServerMutationError(env.DB, e, 'serverUpdateFailed');
       }
@@ -1141,7 +1098,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
     
     else if (data.action === 'export_servers') {
       try {
-        const servers = await env.DB.prepare('SELECT * FROM servers ORDER BY sort_order ASC').all();
+        const servers = { results: await getAllServers(env.DB, true) };
         return createSuccessResponse({
           success: true,
           servers: servers.results || [],
@@ -1157,21 +1114,16 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
         return createBadRequestResponse('noServersToImport');
       }
 
-      // 导入前先补列：INSERT 显式写入 traffic_alert_percent，缺列会导致每条导入全部跳过
-      // 且不自动补列，与单个新增/编辑的行为不一致。此处先确保列存在（非致命，失败仍继续导入）。
+      // 导入旧版扁平 JSON 前先确保主表及独立配置表就绪。
       try {
         await addServerColumns(env.DB);
       } catch (e) {
         logError('database', 'database.schema.upgrade_failed', 'Schema upgrade before node import failed', e);
+        return createErrorResponse(e);
       }
 
       const existingServers = await env.DB.prepare('SELECT id FROM servers').all();
       const existingIds = new Set((existingServers.results || []).map(s => s.id));
-
-      const existingPartitionIds = await env.DB.prepare('SELECT history_partition_id FROM servers').all();
-      const usedPartitionIds = new Set(
-        (existingPartitionIds.results || []).map(s => s.history_partition_id).filter(id => id > 0)
-      );
 
       let imported = 0;
       let skipped = 0;
@@ -1190,25 +1142,6 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
           continue;
         }
 
-        let partitionId = Number(server.history_partition_id) || 0;
-        if (partitionId <= 0 || partitionId > HISTORY_MAX_PARTITION_ID || usedPartitionIds.has(partitionId)) {
-          partitionId = 0;
-          for (let id = 1; id <= HISTORY_MAX_PARTITION_ID; id++) {
-            if (!usedPartitionIds.has(id)) {
-              partitionId = id;
-              break;
-            }
-          }
-          if (partitionId === 0) {
-            skipped++;
-            skippedIds.push(server.id);
-            continue;
-          }
-        }
-
-        usedPartitionIds.add(partitionId);
-        existingIds.add(server.id);
-
         const billingData = AdminController.normalizeServerBillingData(server);
         const networkInterfaces = AdminController.normalizeNetworkInterfaceField(server.interface);
         if (!networkInterfaces.valid) {
@@ -1218,50 +1151,22 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
         }
 
         try {
-          await env.DB.prepare(`
-            INSERT INTO servers (id, name, server_group, region, tags, note, price, billing_cycle, auto_renewal,
-              currency, expire_date,
-              traffic_limit, traffic_calc_type, "interface", reset_day, collect_interval, report_interval, wss_report_interval, connection_mode, ping_mode,
-              auto_update, custom_ct, custom_cu, custom_cm, custom_bd, node_1, node_2, node_3, node_4, rx_correction, tx_correction,
-              offline_notify_disabled, is_hidden, sort_order, history_partition_id, timestamp, traffic_alert_percent)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `).bind(
-            server.id,
-            server.name || '',
-            server.server_group || 'Default',
-            AdminController.normalizeServerRegion(server.region),
-            server.tags || '',
-            server.note || '',
-            billingData.price,
-            billingData.billing_cycle,
-            billingData.auto_renewal,
-            billingData.currency,
-            billingData.expire_date,
-            server.traffic_limit || '',
-            server.traffic_calc_type || 'total',
-            networkInterfaces.value,
-            server.reset_day ?? 1,
-            server.collect_interval ?? 0,
-            server.report_interval ?? 60,
-            normalizeWssReportInterval(server.wss_report_interval),
-            normalizeConnectionMode(server.connection_mode) || 'auto',
-            normalizePingMode(server.ping_mode) || 'tcp',
-            AdminController.normalizeBooleanFlag(server.auto_update),
-            AdminController.normalizeImportedPingNodeValue(server.custom_ct),
-            AdminController.normalizeImportedPingNodeValue(server.custom_cu),
-            AdminController.normalizeImportedPingNodeValue(server.custom_cm),
-            AdminController.normalizeImportedPingNodeValue(server.custom_bd),
-            AdminController.normalizeImportedPingNodeValue(server.node_1), AdminController.normalizeImportedPingNodeValue(server.node_2),
-            AdminController.normalizeImportedPingNodeValue(server.node_3), AdminController.normalizeImportedPingNodeValue(server.node_4),
-            server.rx_correction ?? null,
-            server.tx_correction ?? null,
-            AdminController.normalizeBooleanFlag(server.offline_notify_disabled),
-            AdminController.normalizeBooleanFlag(server.is_hidden),
-            server.sort_order ?? 0,
-            partitionId,
-            server.timestamp || Date.now(),
-            normalizePctOrNull(server.traffic_alert_percent)
-          ).run();
+          await writeServer(env.DB, {
+            id: server.id, name: server.name || '', server_group: server.server_group || 'Default',
+            region: AdminController.normalizeServerRegion(server.region), tags: server.tags || '', note: server.note || '',
+            ...billingData, traffic_limit: server.traffic_limit || '', traffic_calc_type: server.traffic_calc_type || 'total',
+            interface: networkInterfaces.value, reset_day: server.reset_day ?? 1, collect_interval: server.collect_interval ?? 0,
+            report_interval: server.report_interval ?? 60, wss_report_interval: normalizeWssReportInterval(server.wss_report_interval),
+            connection_mode: normalizeConnectionMode(server.connection_mode) || 'auto', ping_mode: normalizePingMode(server.ping_mode) || 'tcp',
+            auto_update: AdminController.normalizeBooleanFlag(server.auto_update),
+            ...Object.fromEntries(AdminController.PING_NODE_FIELDS.map(field => [field, AdminController.normalizeImportedPingNodeValue(server[field])])),
+            rx_correction: server.rx_correction ?? null, tx_correction: server.tx_correction ?? null,
+            offline_notify_disabled: AdminController.normalizeBooleanFlag(server.offline_notify_disabled),
+            is_hidden: AdminController.normalizeBooleanFlag(server.is_hidden), sort_order: server.sort_order ?? 0,
+            created_at: server.created_at ?? server.timestamp ?? Date.now(), updated_at: server.updated_at, revision: server.revision, traffic_alert_percent: normalizePctOrNull(server.traffic_alert_percent),
+            traffic_alert_state: server.traffic_alert_state ?? null, secret: server.secret ?? null
+          }, { create: true });
+          existingIds.add(server.id);
           imported++;
         } catch (e) {
           skipped++;

@@ -1,3 +1,5 @@
+import { makeD1 } from './helpers/d1.js';
+import { ensureServerSchema } from '../src/database/ServerRepository.js';
 import { makeSqlStorage } from './helpers/sql-storage.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -6,7 +8,7 @@ import { DashboardController } from '../src/handlers/DashboardController.js';
 import { AdminController } from '../src/handlers/AdminController.js';
 import { UpdateController } from '../src/handlers/UpdateController.js';
 import { clearServersListCache } from '../src/utils/cache.js';
-import { clearSiteSettingsCache } from '../src/utils/settings.js';
+import { clearSiteSettingsCache, loadSiteSettings } from '../src/utils/settings.js';
 
 if (!globalThis.WebSocketRequestResponsePair) {
   globalThis.WebSocketRequestResponsePair = class WebSocketRequestResponsePair {};
@@ -105,25 +107,16 @@ test('HTTP Update: D1 quota error is gracefully caught and does not block broadc
   clearSiteSettingsCache();
   clearServersListCache();
 
-  const failingDb = {
-    prepare() {
-      return {
-        bind() {
-          return {
-            async run() { throw new Error('D1_ERROR: storage limit exceeded'); },
-            async first() { return { id: 'srv-fail-01', history_partition_id: 1, secret: 'sec123' }; },
-            async all() { return { results: [] }; }
-          };
-        },
-        async first() { return { id: 'srv-fail-01', history_partition_id: 1, secret: 'sec123' }; },
-        async all() { return { results: [] }; },
-        async run() { throw new Error('D1_ERROR: storage limit exceeded'); }
-      };
-    },
-    async batch() {
-      throw new Error('D1_ERROR: storage limit exceeded');
-    }
+  const failingDb = makeD1({ settings: { site_options: { jwt_secret: 'x'.repeat(32) } },
+    servers: [{ id: 'srv-fail-01', secret: 'sec123' }] });
+  await ensureServerSchema(failingDb);
+  await loadSiteSettings(failingDb);
+  const prepare = failingDb.prepare.bind(failingDb);
+  failingDb.prepare = sql => {
+    if (/^\s*(INSERT|UPDATE|DELETE)/i.test(sql)) throw new Error('D1_ERROR: storage limit exceeded');
+    return prepare(sql);
   };
+  failingDb.batch = async () => { throw new Error('D1_ERROR: storage limit exceeded'); };
 
   const req = new Request('https://example.com/update', {
     method: 'POST',
@@ -166,20 +159,7 @@ test('DashboardController: handleHistory returns DO history directly when availa
 
   const server = { id: 'srv-test-do', name: 'test-do', history_partition_id: 1 };
   const fakeEnv = {
-    DB: {
-      prepare() {
-        return {
-          bind() {
-            return {
-              async first() { return server; },
-              async all() { return { results: [server] }; }
-            };
-          },
-          async first() { return server; },
-          async all() { return { results: [server] }; }
-        };
-      }
-    },
+    DB: makeD1({ servers: [server] }),
     METRICS_BROADCASTER: {
       idFromName() { return 'global'; },
       get() { return fakeBroadcaster; }
@@ -233,23 +213,7 @@ test('AdminController: handleListAction reads latest metrics from DO and sets is
   };
 
   const fakeEnv = {
-    DB: {
-      prepare(sql) {
-        return {
-          bind() {
-            return {
-              async first() { return null; },
-              async all() { return { results: [server] }; }
-            };
-          },
-          async first() { return null; },
-          async all() { return { results: [server] }; }
-        };
-      },
-      async batch() {
-        return [{ results: [] }];
-      }
-    },
+    DB: makeD1({ servers: [server] }),
     METRICS_BROADCASTER: {
       idFromName() { return 'global'; },
       get() { return fakeBroadcaster; }
@@ -318,15 +282,7 @@ test('DashboardController: handleServersAPI returns public servers without refer
   };
 
   const fakeEnv = {
-    DB: {
-      prepare(query) {
-        return {
-          bind() { return this; },
-          async first() { return null; },
-          async all() { return { results: [server, hiddenServer] }; }
-        };
-      }
-    },
+    DB: makeD1({ servers: [server, hiddenServer] }),
     METRICS_BROADCASTER: null
   };
 

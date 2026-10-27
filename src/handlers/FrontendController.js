@@ -1,5 +1,5 @@
 import { logEvent, logError } from '../utils/observability.js';
-import { loadSettings } from '../utils/settings.js';
+import { loadSettingsScope } from '../utils/settings.js';
 import {
   DEFAULT_SITE_TITLE,
   THEME_ASSET_CACHE_TTL_SECONDS,
@@ -488,7 +488,7 @@ static IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
   const path = url.pathname;
 
   if (!settings) {
-    settings = await loadSettings(env.DB);
+    settings = await loadSettingsScope(env.DB, 'frontend');
   }
 
   if (request.method === 'GET' && path.startsWith('/assets/')) {

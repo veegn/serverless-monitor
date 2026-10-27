@@ -495,6 +495,8 @@ Rust 探针和旧 Shell / PowerShell 版本卸载脚本只清理各自安装的�
 
 ## 本地开发
 
+配置表结构、按功能分组、Ping/通知独立表与旧数据迁移见[配置存储说明](docs/configuration-storage.md)。
+
 ### 环境要求
 
 - Node.js 22.19+
@@ -618,7 +620,7 @@ D1 只保存配置和告警状态；指标与历史查询使用 DO SQLite。上�
 
 ### 忘记后台密码
 
-进入 Cloudflare D1 数据库 `server-monitor-db`，打开 `setting` 表，编辑 `site_options` 的 `password` 字段。旧版 MD5 兼容值 `e10adc3949ba59abbe56e057f20f883e` 对应密码 `123456`，保存后可用该密码登录，再到后台重新设置强密码。
+进入 Cloudflare D1 数据库 `server-monitor-db`，打开 `settings` 表，编辑 `settings.account` 这一行 JSON 的 `password` 字段（旧版数据会从 `site_options` 自动迁移）。旧版 MD5 兼容值 `e10adc3949ba59abbe56e057f20f883e` 对应密码 `123456`，保存后可用该密码登录，再到后台重新设置强密码。
 
 ### 未托管在CF的域名不能绑定
 

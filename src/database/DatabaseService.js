@@ -1,8 +1,9 @@
+import { ensureNotificationStateSchema } from './NotificationStateRepository.js';
 import { logError } from '../utils/observability.js';
 import { clearAllCaches } from '../utils/cache.js';
-import { saveSiteOptions, debug } from '../utils/settings.js';
+import { ensureSettingsStorage, debug } from '../utils/settings.js';
 import { isDisabledProbeMetric, DISK_IO_FIELD_TO_COLUMN, DISK_IO_METRIC_FIELDS } from '../utils/metrics.js';
-import { ensureServerOptimization } from './indexOptimization.js';
+import { ensureServerSchema } from './ServerRepository.js';
 import {
   HISTORY_MAX_BATCH_BUCKETS, HISTORY_BATCH_BUCKET_INTERVAL_MS,
   HISTORY_AGGREGATION_MAX_FIELDS, HISTORY_AGGREGATION_AVG_FIELDS
@@ -13,7 +14,6 @@ import {
  * 负责 D1 配置表初始化、维护及共用指标格式化；指标存储与查询由 DO SQLite 负责
  */
 export class DatabaseService {
-  static dbInitialized = false;
   static LATENCY_NODE_FIELDS = ['ct', 'cu', 'cm', 'bd', 'node_1', 'node_2', 'node_3', 'node_4'];
   static DISK_IO_COLUMN_TO_FIELD = Object.freeze(Object.fromEntries(
     DISK_IO_METRIC_FIELDS.map(field => [DISK_IO_FIELD_TO_COLUMN[field], field])
@@ -233,82 +233,13 @@ export class DatabaseService {
   // --- 实例方法 ---
 
   async init() {
-    if (DatabaseService.dbInitialized) return;
-
-    debug('初始化数据库');
-
     try {
-      const SettingTableExists = await this.db.prepare(`
-        SELECT name FROM sqlite_master WHERE type='table' AND name='settings'
-      `).first();
-      if (!SettingTableExists) {
-        await this.db.prepare(`
-          CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY, 
-            value TEXT
-          )
-        `).run();
-        await saveSiteOptions(this.db, { servers_optimized: 'true' });
-      }
-
-      // 判断servers表是否存在
-      const ServerTableExists = await this.db.prepare(`
-        SELECT name FROM sqlite_master WHERE type='table' AND name='servers'
-      `).first();
-      if (!ServerTableExists) {
-        await this.db.prepare(`
-          CREATE TABLE IF NOT EXISTS servers (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            server_group TEXT DEFAULT 'Default',
-            region TEXT DEFAULT '',
-            tags TEXT DEFAULT '',
-            note TEXT DEFAULT '',
-            price TEXT DEFAULT '',
-            billing_cycle TEXT DEFAULT 'month',
-            auto_renewal TEXT DEFAULT '0',
-            currency TEXT DEFAULT '¥',
-            expire_date TEXT DEFAULT '',
-            traffic_limit TEXT DEFAULT '',
-            traffic_calc_type TEXT DEFAULT 'total',
-            traffic_alert_percent INTEGER DEFAULT NULL,
-            traffic_alert_state TEXT,
-            "interface" TEXT DEFAULT '',
-            reset_day INTEGER DEFAULT 1,
-            collect_interval INTEGER DEFAULT 0,
-            report_interval INTEGER DEFAULT 60,
-            wss_report_interval INTEGER DEFAULT 2,
-            connection_mode TEXT DEFAULT 'auto',
-            ping_mode TEXT DEFAULT 'tcp',
-            auto_update TEXT DEFAULT '0',
-            custom_ct TEXT DEFAULT '',
-            custom_cu TEXT DEFAULT '',
-            custom_cm TEXT DEFAULT '',
-            custom_bd TEXT DEFAULT '',
-            node_1 TEXT DEFAULT '',
-            node_2 TEXT DEFAULT '',
-            node_3 TEXT DEFAULT '',
-            node_4 TEXT DEFAULT '',
-            rx_correction REAL DEFAULT NULL,
-            tx_correction REAL DEFAULT NULL,
-            offline_notify_disabled TEXT DEFAULT '0',
-            is_hidden TEXT DEFAULT '0',
-            sort_order INTEGER DEFAULT 0,
-            history_partition_id INTEGER DEFAULT 0,
-            secret TEXT DEFAULT NULL,
-            timestamp INTEGER DEFAULT 0
-          )
-        `).run();
-      } else {
-        debug('检查servers表优化状态');
-        await ensureServerOptimization(this.db);
-      }
-
-      // metrics 数据已完全移至 Durable Objects（DO），D1 中不再创建或维护 metrics_history 表
-      debug('✅ 数据库初始化完成');
-      DatabaseService.dbInitialized = true;
-    } catch (e) {
-      logError('database', 'database.init.failed', 'D1 configuration schema initialization failed', e);
+      await ensureServerSchema(this.db);
+      await ensureSettingsStorage(this.db);
+      await ensureNotificationStateSchema(this.db);
+    } catch (error) {
+      logError('database', 'database.init.failed', 'Configuration database initialization failed', error);
+      throw error;
     }
   }
 
@@ -322,7 +253,6 @@ export class DatabaseService {
       await this.db.prepare(`DROP TABLE IF EXISTS metrics_history_old`).run();
       debug('✅ 已删除 metrics_history_old 表');
 
-      DatabaseService.dbInitialized = false;
 
       await this.init();
 

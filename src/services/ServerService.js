@@ -36,7 +36,7 @@ export class ServerService {
       includeLatencyHistory = false
     } = options;
 
-    const rawServers = await getAllServers(env.DB, includeHidden);
+    const rawServers = await getAllServers(env.DB, includeHidden, { scope: stripPrivateFields ? 'public' : 'admin' });
     const serverIds = rawServers.map(server => server.id).filter(Boolean);
 
     // 优先向 DO 获取实时状态与 3 小时三网延时窗口（指标不读取 D1）

@@ -1,3 +1,4 @@
+import { makeD1 } from './helpers/d1.js';
 import assert from 'node:assert/strict';
 import { AdminController } from '../src/handlers/AdminController.js';
 const {
@@ -9,48 +10,6 @@ import {
   isValidThemeOptions,
   saveThemeOptions
 } from '../src/utils/settings.js';
-
-function makeSettingsDb(initialRows = {}) {
-  const store = new Map(Object.entries(initialRows));
-  const calls = [];
-  return {
-    store,
-    calls,
-    prepare(sql) {
-      calls.push({ type: 'prepare', sql });
-      const statement = {
-        params: [],
-        bind(...params) {
-          statement.params = params;
-          return statement;
-        },
-        async first() {
-          calls.push({ type: 'first', sql, params: statement.params });
-          throw new Error('saveThemeOptions should not read appearance_options before writing');
-        },
-        async run() {
-          calls.push({ type: 'run', sql, params: statement.params });
-          if (/INSERT INTO settings/.test(sql) && /json_set/.test(sql)) {
-            const themeOptions = JSON.parse(statement.params[0]);
-            let existing = {};
-            try {
-              const parsed = JSON.parse(store.get('appearance_options') || '{}');
-              existing = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-            } catch (_) {
-              existing = {};
-            }
-            store.set('appearance_options', JSON.stringify({
-              ...existing,
-              theme_options: themeOptions
-            }));
-          }
-          return { success: true };
-        }
-      };
-      return statement;
-    }
-  };
-}
 
 assert.equal(estimateDurableObjectsBillableRequests(0), 0);
 assert.equal(estimateDurableObjectsBillableRequests(1), 1);
@@ -100,7 +59,7 @@ assert.equal(Object.hasOwn(safeAdminSettings, 'jwt_secret'), false);
 assert.equal(safeAdminSettings.password_configured, true);
 assert.equal(sanitizeAdminSettings({ password: '' }).password_configured, false);
 
-const themeOptionsDb = makeSettingsDb({
+const themeOptionsDb = makeD1({ settings: {
   appearance_options: JSON.stringify({
     site_title: 'Keep Title',
     csp_api: 'https://api.example.com',
@@ -110,7 +69,7 @@ const themeOptionsDb = makeSettingsDb({
     is_public: 'false',
     theme_url: 'https://github.com/example/theme/tree/main'
   })
-});
+} });
 
 const savedAppearanceOptions = await saveThemeOptions(themeOptionsDb, {
   layout: 'compact',
@@ -121,19 +80,14 @@ assert.deepEqual(savedAppearanceOptions, {
   layout: 'compact',
   color: 'green'
 });
-assert.deepEqual(JSON.parse(themeOptionsDb.store.get('appearance_options')), {
-  site_title: 'Keep Title',
-  csp_api: 'https://api.example.com',
-  theme_options: {
-    layout: 'compact',
-    color: 'green'
-  }
+assert.deepEqual(JSON.parse(themeOptionsDb.store.get('settings.theme')), {
+  theme_url: 'https://github.com/example/theme/tree/main',
+  theme_options: { layout: 'compact', color: 'green' }
 });
-assert.deepEqual(JSON.parse(themeOptionsDb.store.get('site_options')), {
-  is_public: 'false',
-  theme_url: 'https://github.com/example/theme/tree/main'
-});
-assert.equal(themeOptionsDb.calls.some(call => call.type === 'first'), false);
-assert.equal(themeOptionsDb.calls.some(call => call.type === 'run' && /\$\.theme_options/.test(call.sql)), true);
+assert.equal(JSON.parse(themeOptionsDb.store.get('settings.appearance')).csp_api, 'https://api.example.com');
+assert.equal(JSON.parse(themeOptionsDb.store.get('settings.site')).site_title, 'Keep Title');
+assert.equal(JSON.parse(themeOptionsDb.store.get('settings.site')).is_public, 'false');
+assert.equal(themeOptionsDb.store.has('appearance_options'), false);
+assert.equal(themeOptionsDb.store.has('site_options'), false);
 
 console.log('admin usage tests passed');

@@ -220,8 +220,8 @@ const mikusThemeDescription = computed(() => props.trans.mikusThemeDescription)
 
 // Derive the appearance payload from the shared APPEARANCE_FIELDS constant so it
 // always stays in sync with the backend. The theme store re-sends appearance on
-// every apply/switch/Mikus toggle, and the backend overwrites the whole
-// appearance_options row — any omitted field would be wiped (e.g. custom_bg_mobile).
+// every apply/switch/Mikus toggle; the backend merges supplied fields into their
+// functional settings groups.
 // NOTE: this relies on props.settings carrying the current value for every field in
 // APPEARANCE_FIELDS. If a field is added to APPEARANCE_FIELDS later, make sure it is
 // also populated in the get_settings mapping in views/admin/index.vue, otherwise it

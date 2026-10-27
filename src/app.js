@@ -9,7 +9,7 @@ import { ThemeController } from './handlers/ThemeController.js';
 import { updateDatabase } from './database/updateDatabase.js';
 import {
   loadSettings,
-  loadSiteSettings,
+  loadSettingsScope,
   loadAppearanceOptions,
   normalizeFrontendWsTimeoutMinutes,
   normalizeLongHistoryPoints,
@@ -62,7 +62,7 @@ export class ServerlessMonitorApp {
 
   async ensureSiteSettings() {
     if (!this._sys) {
-      this._sys = await loadSiteSettings(this.db);
+      this._sys = await loadSettingsScope(this.db, 'public');
     }
     return this._sys;
   }
@@ -258,7 +258,7 @@ export class ServerlessMonitorApp {
 
     if (method === 'GET' && path.startsWith('/assets/')) {
       try {
-        const themeAssetResponse = await this.frontendController.serve(request, await loadSettings(this.db));
+        const themeAssetResponse = await this.frontendController.serve(request, await loadSettingsScope(this.db, 'frontend'));
         if (themeAssetResponse.headers.get('X-CFSM-Theme-Asset') === '1') {
           return applyCors(this.cleanThemeAssetResponse(themeAssetResponse), request, corsAllowedOrigins);
         }
@@ -339,7 +339,7 @@ export class ServerlessMonitorApp {
         return this.dashboardController.handleServer(request, sys);
       }},
       { method: 'GET', path: '/api/servers', handler: async () => {
-        const sys = await this.ensureFullSettings();
+        const sys = await loadSettingsScope(this.db, 'frontend');
         return this.dashboardController.handleServers(request, sys);
       }},
       { method: 'GET', path: '/api/ws', handler: () => this.updateController.handleFrontendWebSocket(request) },
@@ -351,7 +351,7 @@ export class ServerlessMonitorApp {
         return this.dashboardController.handleHistory(request, id, hours, allColumns, sys);
       }},
       { method: 'POST', path: '/admin/api', handler: async () => {
-        const sys = await this.ensureSiteSettings();
+        const sys = await this.ensureFullSettings();
         return this.adminController.handle(request, sys, () => this.ensureFullSettings());
       }},
       { method: 'POST', path: '/updateDatabase', handler: async () => {

@@ -1,6 +1,7 @@
-import { loadSiteSettings } from '../utils/settings.js';
+import { loadSettingsScope } from '../utils/settings.js';
 import { getWebSocketIdentity } from '../middleware/auth.js';
 import { AppError } from '../utils/errors.js';
+import { ensureServerSchema } from '../database/ServerRepository.js';
 
 // The browser's subscription is a filter, never an authorization grant.
 export class FrontendSubscriptions {
@@ -68,7 +69,8 @@ export class FrontendSubscriptions {
     if (this.loading) return this.loading;
     const revision = this.revision;
     this.loading = (async () => {
-      const settings = await loadSiteSettings(this.env.DB, { forceRefresh: true });
+      const settings = await loadSettingsScope(this.env.DB, 'access', { forceRefresh: true });
+      await ensureServerSchema(this.env.DB);
       const { results } = await this.env.DB.prepare('SELECT id, is_hidden FROM servers').all();
       return { settings, servers: results, expiresAt: Date.now() + 60_000, revision };
     })();

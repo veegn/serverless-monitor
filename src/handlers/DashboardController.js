@@ -3,7 +3,7 @@ import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
 import { ServerService } from '../services/ServerService.js';
 import { getAllServers, getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from '../utils/cache.js';
 import { mergeMetricsIntoServer, coerceNumericMetricFields } from '../utils/metrics.js';
-import { normalizeLongHistoryPoints, loadSiteSettings, debug } from '../utils/settings.js';
+import { normalizeLongHistoryPoints, loadSettingsScope, debug } from '../utils/settings.js';
 import { HISTORY_RANGES, historySampling } from '../utils/historyPolicy.js';
 import { AppError, createSuccessResponse, createBadRequestResponse, createNotFoundResponse, createUnauthorizedResponse } from '../utils/errors.js';
 import {
@@ -275,7 +275,7 @@ export class DashboardController {
 
   if (!id) return createBadRequestResponse('Missing ID');
 
-  const server = await getServerDetail(env.DB, id, isLoggedIn);
+  const server = await getServerDetail(env.DB, id, isLoggedIn, { scope: 'public' });
   if (!server) return createNotFoundResponse('Server not found');
 
   const realtimeState = await DashboardController.getRealtimeStateForServers(env, [id]);
@@ -362,7 +362,7 @@ export class DashboardController {
   }
 
   if (!sys) {
-    sys = await loadSiteSettings(env.DB);
+    sys = await loadSettingsScope(env.DB, 'public');
   }
   const isLoggedIn = await checkAuth(request, env, sys);
 
@@ -374,7 +374,7 @@ export class DashboardController {
     return createUnauthorizedResponse();
   }
 
-  const server = await getServerDetail(env.DB, id, isLoggedIn);
+  const server = await getServerDetail(env.DB, id, isLoggedIn, { scope: 'identity' });
   if (!server) return createNotFoundResponse();
 
   // 最多查询7天数据

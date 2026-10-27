@@ -1,3 +1,5 @@
+import { makeD1 } from './helpers/d1.js';
+import { ensureServerSchema } from '../src/database/ServerRepository.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { NotificationService } from '../src/services/NotificationService.js';
@@ -39,18 +41,8 @@ test('monthly traffic alert sends a Spanish Telegram message', async () => {
     traffic_alert_threshold: '80',
     notification_language: 'es'
   };
-  const db = {
-    prepare(sql) {
-      return {
-        bind() { return this; },
-        async first() {
-          return sql.includes("key = 'site_options'") ? { value: JSON.stringify(siteSettings) } : null;
-        },
-        async all() { return { results: [] }; },
-        async run() { return { success: true, meta: { changes: 1 } }; }
-      };
-    }
-  };
+  const db = makeD1({ settings: { site_options: siteSettings }, servers: [{ id: 'srv-1', name: 'Box' }] });
+  await ensureServerSchema(db);
   const requests = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, options) => {

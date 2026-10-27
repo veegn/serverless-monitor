@@ -260,7 +260,7 @@
             <div class="checkbox-item" style="padding-top: 4px;">
               <input type="checkbox" id="cfg_auto_register_enabled" v-model="settings.auto_register_enabled">
               <label for="cfg_auto_register_enabled"><b>{{ trans.enableAutoRegister || '启用探针自动注册' }}</b></label>
-              <HelpTooltip :text="trans.autoRegisterTip || '开启后，探针使用有效授权 Key 上报未录入的节点时，将自动入库上线并分配监控分区。'" />
+              <HelpTooltip :text="trans.autoRegisterTip || '开启后，探针使用有效授权 Key 上报未录入的节点时，将自动入库上线并初始化节点配置。'" />
             </div>
           </div>
           <div class="form-group flex-1">
