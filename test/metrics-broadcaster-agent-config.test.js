@@ -904,8 +904,8 @@ test('Agent WSS batches all-scope subscribers while single-server subscribers st
   }], 20_000, { batchFrontend: true });
 
   assert.equal(allMessages.length, 0);
-  assert.equal(singleMessages.length, 2);
-  assert.deepEqual(singleMessages.map(message => message.updates[0].samples[0].data.cpu), [20, 10]);
+  assert.equal(singleMessages.length, 1);
+  assert.deepEqual(singleMessages.map(message => message.updates[0].samples[0].data.cpu), [20]);
   assert.equal(singleMessages.every(message => message.updates.length === 1), true);
   assert.notEqual(broadcaster.frontendBroadcastTimer, null);
 
@@ -915,10 +915,10 @@ test('Agent WSS batches all-scope subscribers while single-server subscribers st
   assert.equal(allMessages[0].type, 'batchUpdate');
   assert.equal(allMessages[0].ts, 20_000);
   assert.deepEqual(allMessages[0].updates.map(update => update.serverId), ['server-1', 'server-2']);
-  assert.deepEqual(allMessages[0].updates[0].samples.map(sample => sample.ts), [1_000, 2_000]);
-  assert.deepEqual(allMessages[0].updates[0].samples.map(sample => sample.data.cpu), [10, 20]);
+  assert.deepEqual(allMessages[0].updates[0].samples.map(sample => sample.ts), [2_000]);
+  assert.deepEqual(allMessages[0].updates[0].samples.map(sample => sample.data.cpu), [20]);
 
-  assert.equal(singleMessages.length, 2);
+  assert.equal(singleMessages.length, 1);
   assert.equal(broadcaster.pendingFrontendBroadcasts.size, 0);
   assert.equal(broadcaster.frontendBroadcastTimer, null);
 });
@@ -1173,6 +1173,7 @@ test('reportId batch idempotency and conflict rejection', async () => {
     }
   };
 
+  const sampleTs = Date.now() - 4000;
   const batchPayload = {
     id: 'server-1',
     secret: 'test-secret',
@@ -1180,8 +1181,8 @@ test('reportId batch idempotency and conflict rejection', async () => {
     batch: true,
     metrics: { cpu: '10' },
     samples: [
-      { ts: 1729800002000, metrics: { cpu: '10' } },
-      { ts: 1729800004000, metrics: { cpu: '15' } }
+      { ts: sampleTs, metrics: { cpu: '10' } },
+      { ts: sampleTs + 2000, metrics: { cpu: '15' } }
     ]
   };
 
@@ -1212,7 +1213,7 @@ test('reportId batch idempotency and conflict rejection', async () => {
   const conflictingPayload = {
     ...batchPayload,
     samples: [
-      { ts: 1729800002000, metrics: { cpu: '99' } }
+      { ts: sampleTs, metrics: { cpu: '99' } }
     ]
   };
   await broadcaster._handleAgentReportMessage(ws, JSON.stringify(conflictingPayload));
@@ -1264,6 +1265,7 @@ test('Batch persistence succeeds with DO storage regardless of D1 state', async 
     close() {}
   };
 
+  const sampleTs = Date.now() - 4000;
   const batchPayload = {
     id: 'server-1',
     secret: 'test-secret',
@@ -1271,8 +1273,8 @@ test('Batch persistence succeeds with DO storage regardless of D1 state', async 
     batch: true,
     metrics: { cpu: '10' },
     samples: [
-      { ts: 1729800002000, metrics: { cpu: '10' } },
-      { ts: 1729800004000, metrics: { cpu: '15' } }
+      { ts: sampleTs, metrics: { cpu: '10' } },
+      { ts: sampleTs + 2000, metrics: { cpu: '15' } }
     ]
   };
 

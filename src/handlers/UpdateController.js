@@ -14,6 +14,7 @@ import { AppError, createErrorResponse, createUnauthorizedResponse, createBadReq
 import { writeServer } from '../database/ServerRepository.js';
 import { getResourceAlertConfig, getWssReportScheduleState, isWssReportConfigured, loadSettingsScope, normalizeBooleanSetting } from '../utils/settings.js';
 import { cacheLatestReportUpdate } from '../utils/latestReportCache.js';
+import { reportFingerprint } from '../utils/reportFingerprint.js';
 import { checkWebSocketAuth } from '../middleware/auth.js';
 import {
   AGENT_CONFIG_MD5_HEADER,
@@ -175,6 +176,23 @@ export class UpdateController {
     ? data.samples
     : (Array.isArray(data.batch) ? data.batch : []);
 
+  if (data.batch === true) {
+    if (!Array.isArray(data.samples) || rawSamples.length === 0 || rawSamples.length > UPDATE_MAX_BATCH_SAMPLES) {
+      throw new AppError(`Batch must contain 1-${UPDATE_MAX_BATCH_SAMPLES} samples`, 400);
+    }
+    let previousTs = 0;
+    for (const sample of rawSamples) {
+      const metrics = sample?.metrics || sample?.data || sample?.payload || sample;
+      const ts = UpdateController.normalizeTimestamp(sample?.ts ?? sample?.timestamp ?? metrics?.timestamp, 0);
+      if (!UpdateController.isPlainMetricObject(sample) || !UpdateController.isPlainMetricObject(metrics) || ts <= previousTs) {
+        throw new AppError('Batch samples require valid, strictly increasing timestamps and metrics', 400);
+      }
+      previousTs = ts;
+    }
+  } else if (data.batch === false && rawSamples.length > 0) {
+    throw new AppError('Snapshot reports cannot contain history samples', 400);
+  }
+
   // Agent 按时间顺序追加样本；确认递增时才预截断，避免超大数组在服务端做全量 map/sort。
   // 乱序输入不预截断，交给末尾的 sort + slice 兜底，避免丢掉最新样本。
   const sampleTs = item => Number(item?.ts ?? item?.timestamp ?? item?.metrics?.timestamp);
@@ -192,9 +210,9 @@ export class UpdateController {
     return { ts, metrics };
   }).filter(Boolean);
 
-  if (samples.length === 0 && data.metrics && typeof data.metrics === 'object') {
+  if (samples.length === 0 && UpdateController.isPlainMetricObject(data.metrics)) {
     samples.push({
-      ts: UpdateController.normalizeTimestamp(data.metrics.timestamp, now),
+      ts: UpdateController.getReportTimestamp(data),
       metrics: data.metrics
     });
   }
@@ -205,12 +223,39 @@ export class UpdateController {
 
   static getReportMetrics(data, latestSample) {
   const reportMetrics = data?.metrics && typeof data.metrics === 'object' ? data.metrics : null;
-  if (!reportMetrics) return latestSample?.metrics || {};
+  if (!reportMetrics) return { ...(latestSample?.metrics || {}) };
+  if (data.batch === true) return { ...(latestSample?.metrics || {}), ...reportMetrics };
   return {
     ...reportMetrics,
     ...(latestSample?.metrics || {})
   };
 }
+
+  static getReportTimestamp(data, latestSample = null) {
+    const time = data?.time;
+    const accurate = UpdateController.normalizeTimestamp(time?.accurate_ts, 0);
+    if (accurate) return accurate;
+    const local = UpdateController.normalizeTimestamp(time?.local_ts, 0);
+    if (local) {
+      const offset = Number(time?.offset_ms);
+      return time?.calibrated === true && Number.isFinite(offset) && local + offset > 0 ? local + offset : local;
+    }
+    return UpdateController.normalizeTimestamp(data?.metrics?.timestamp, latestSample?.ts || Date.now());
+  }
+
+  static buildReportCommit(serverId, data, samples, latestMetrics, regionCode, agentVersion) {
+    const persistHistory = data.batch === true || (data.batch !== false &&
+      (Array.isArray(data.samples) || Array.isArray(data.batch)));
+    const latestSample = samples[samples.length - 1];
+    const ts = UpdateController.getReportTimestamp(data, latestSample);
+    const latestUpdates = [{ serverId, samples: UpdateController.toBroadcastSamples(
+      serverId, [{ ts, metrics: latestMetrics }], regionCode, agentVersion
+    ) }];
+    const update = persistHistory
+      ? { serverId, samples: UpdateController.toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics) }
+      : latestUpdates[0];
+    return { update, options: { latestUpdates, persistHistory, strictSamples: data.batch === true } };
+  }
 
   static hasOwnMetric(source, field) {
   return !!source && Object.prototype.hasOwnProperty.call(source, field);
@@ -421,10 +466,10 @@ export class UpdateController {
   });
 }
 
-  static async commitReport(env, update, reportId = null, maintainState = false) {
+  static async commitReport(env, update, reportId = null, maintainState = false, options = {}) {
     if (!env.METRICS_BROADCASTER) throw new AppError('Metrics storage unavailable', 503);
     const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
-    const body = JSON.stringify({ updates: [update], reportId, maintainState });
+    const body = JSON.stringify({ updates: [update], reportId, maintainState, ...options });
     let lastError;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -436,7 +481,7 @@ export class UpdateController {
           const result = await response.json();
           if (result.ok === true && result.persisted === true) {
             if (attempt) logEvent('storage', 'metrics.commit.recovered', 'Metrics commit succeeded after retry', { serverId: update.serverId, reportId, attempts: attempt + 1, persisted: true });
-            return;
+            return result;
           }
           throw new Error('Metrics commit was not confirmed');
         }
@@ -804,12 +849,13 @@ export class UpdateController {
     }
 
     // 交给 DO SQLite 事务保存；未确认写入时由 Agent 重试。
-    const broadcastSamples = UpdateController.toBroadcastSamples(serverId, samples, regionCode, agentVersion, latestMetrics);
+    const { update, options } = UpdateController.buildReportCommit(serverId, data, samples, latestMetrics, regionCode, agentVersion);
+    options.fingerprint = await reportFingerprint(data);
 
     const maintainAlertState = NotificationService.hasNotificationTarget(settings) && getResourceAlertConfig(settings).enabled;
-    await UpdateController.commitReport(env, { serverId, samples: broadcastSamples }, data.reportId ?? null, maintainAlertState);
-    cacheLatestReportUpdate(serverId, broadcastSamples, Date.now());
-    if (ctx?.waitUntil) {
+    const commit = await UpdateController.commitReport(env, update, data.reportId ?? null, maintainAlertState, options);
+    if (commit.latestAccepted !== false) cacheLatestReportUpdate(serverId, options.latestUpdates[0].samples, Date.now());
+    if (commit.latestAccepted !== false && ctx?.waitUntil) {
       ctx.waitUntil(NotificationService.evaluateTrafficAlert(env, serverDetail, latestMetrics, {
         patchCache: (sid, value) => patchServerDetailCache(sid, { traffic_alert_state: value })
       }));

@@ -135,6 +135,39 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
     assert.equal(JSON.stringify(logs).includes('node-secret'), false);
     assert.equal(JSON.stringify(logs).includes('runtime-secret'), false);
 
+    // Independent live/history slots must behave the same in workerd as in Node.
+    const readHistory = async () => (await (await mf.dispatchFetch('https://monitor.test/history?serverId=visible&hours=1&points=1000')).json()).data;
+    const beforeLive = await readHistory();
+    const liveReport = { id: 'visible', secret: 'node-secret', reportId: 'adaptive-live', batch: false,
+      time: { local_ts: now + 2000 }, metrics: { cpu: 77 } };
+    const liveAck = await sendAgentReport(liveReport);
+    assert.equal(liveAck.accepted, true);
+    assert.equal(liveAck.persisted, undefined);
+    assert.equal(liveAck.acceptedSamples, undefined);
+    assert.deepEqual(await readHistory(), beforeLive, 'live frames cannot append a history point');
+    const latestState = async () => (await (await post('/latest-report-updates', { serverIds: ['visible'] })).json()).updates[0];
+    assert.equal((await latestState()).samples[0].data.cpu, 77);
+    const adaptiveBatch = { ...liveReport, reportId: 'adaptive-batch', batch: true,
+      time: { accurate_ts: now + 3000, local_ts: now - 5000 }, metrics: { cpu: 88 },
+      samples: [{ ts: now - 120_000, metrics: { cpu: 12 } }] };
+    const batchAck = await sendAgentReport(adaptiveBatch);
+    assert.equal(batchAck.persisted, true);
+    assert.equal(batchAck.acceptedSamples, 1);
+    assert.equal((await latestState()).samples[0].data.cpu, 88);
+    assert.equal((await sendAgentReport({ ...adaptiveBatch, reportId: 'late-batch', time: { local_ts: now - 1000 } })).persisted, true);
+    assert.equal((await latestState()).samples[0].data.cpu, 88, 'late batches cannot roll latest state back');
+    const beforeInvalid = await readHistory();
+    const invalidBatch = { ...adaptiveBatch, reportId: 'invalid-batch', samples: [
+      { ts: now - 90_000, metrics: { cpu: 66 } }, { ts: now + 120_000, metrics: { cpu: 99 } }
+    ] };
+    const rejected = await sendAgentReport(invalidBatch);
+    assert.equal(rejected.accepted, false);
+    assert.equal(rejected.persisted, false);
+    assert.equal(rejected.acceptedSamples, 0);
+    assert.deepEqual(await readHistory(), beforeInvalid, 'rejected batches cannot partially commit');
+    assert.equal((await post('/update', invalidBatch)).status, 400);
+    assert.equal((await sendAgentReport(adaptiveBatch)).acceptedSamples, 1, 'failed reports leave the socket usable');
+
     await post('/test/legacy', { serverId: 'legacy', points: [{ timestamp: now - 120_000, cpu: 42 }] });
     const legacy = await (await mf.dispatchFetch('https://monitor.test/history?serverId=legacy&hours=1')).json();
     assert.equal(legacy.data[0].cpu, 42);

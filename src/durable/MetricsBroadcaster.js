@@ -13,6 +13,8 @@
 
 import { SqlMetricsStore } from './SqlMetricsStore.js';
 import { ReportReplayCache } from '../utils/ReportReplayCache.js';
+import { getLatestReportSampleTimestamp } from '../utils/latestReportCache.js';
+import { reportFingerprint } from '../utils/reportFingerprint.js';
 import { isDisabledProbeMetric } from '../utils/metrics.js';
 import { AppError } from '../utils/errors.js';
 import { DatabaseService } from '../database/DatabaseService.js';
@@ -129,14 +131,6 @@ function firstDefined(...values) {
     if (value !== undefined && value !== null && value !== '') return value;
   }
   return undefined;
-}
-
-function canonicalReportValue(value) {
-  if (Array.isArray(value)) return value.map(canonicalReportValue);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalReportValue(value[key])]));
-  }
-  return value;
 }
 
 function maskPublicIpFields(data) {
@@ -1060,12 +1054,13 @@ export class MetricsBroadcaster {
   }
 
   async _ingestRealtimeUpdates(normalizedUpdates, reportTs = Date.now(), options = {}) {
-    if (!Array.isArray(normalizedUpdates) || normalizedUpdates.length === 0) return;
+    if (!Array.isArray(normalizedUpdates)) return;
     if (this._shouldCacheResourceAlertSamples(reportTs)) {
       await this._ensureResourceAlertSnapshotLoaded();
-      await this._cacheResourceAlertSamples(normalizedUpdates, reportTs);
+      await this._cacheResourceAlertSamples(options.alertUpdates || normalizedUpdates, reportTs);
     }
-    this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
+    normalizedUpdates = this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
+    if (normalizedUpdates.length === 0) return;
     if (options.batchFrontend === true) {
       await this._broadcastBatch(normalizedUpdates, reportTs, 'single');
       this._queueFrontendBroadcastBatch(normalizedUpdates, reportTs);
@@ -1265,11 +1260,13 @@ export class MetricsBroadcaster {
     this.state.waitUntil?.(promise);
   }
 
-  async _persistUpdates(updates, reportId = null) {
-    updates = this._normalizeBatchUpdates(updates);
+  async _persistUpdates(updates, reportId = null, options = {}) {
+    updates = this._normalizeBatchUpdates(updates, options.strictSamples === true);
     if (!updates.length) throw new AppError('Missing metrics', 400);
-    const fingerprintBytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify(canonicalReportValue(updates))));
-    const fingerprint = Array.from(new Uint8Array(fingerprintBytes), byte => byte.toString(16).padStart(2, '0')).join('');
+    const latestUpdates = options.latestUpdates ? this._normalizeBatchUpdates(options.latestUpdates) : updates;
+    const serverIds = new Set(updates.map(update => update.serverId));
+    if (latestUpdates.some(update => !serverIds.has(update.serverId))) throw new AppError('Invalid latest report server', 400);
+    const fingerprint = options.fingerprint || await reportFingerprint(updates);
     if (reportId !== null && (typeof reportId !== 'string' || reportId.length === 0 || reportId.length > 128)) {
       throw new AppError('Invalid reportId', 400);
     }
@@ -1280,7 +1277,8 @@ export class MetricsBroadcaster {
     setLogContext({ serverId: metadata.serverId, reportId });
     let result;
     try {
-      result = await this.metricsStore.ingest(updates, { reportKey, fingerprint });
+      result = await this.metricsStore.ingest(updates, { reportKey, fingerprint, latestUpdates,
+        persistHistory: options.persistHistory !== false, strictSamples: options.strictSamples === true });
       await this._ensureMaintenanceAlarm();
       const durationMs = Date.now() - started;
       this.reportLogs.record({ serverIds: updates.map(update => update.serverId), sampleCount: metadata.sampleCount,
@@ -1306,6 +1304,18 @@ export class MetricsBroadcaster {
     const existing = await this.state.storage.getAlarm();
     this.maintenanceAlarmAt = existing && existing <= desired ? existing : desired;
     if (this.maintenanceAlarmAt !== existing) await this.state.storage.setAlarm(this.maintenanceAlarmAt);
+  }
+
+  _rejectAgentReport(ws, data, error) {
+    if (error instanceof AppError && error.code === 409) {
+      this._closeWsWithError(ws, error.message, error.code);
+      return;
+    }
+    const retryable = !(error instanceof AppError) || error.code >= 500;
+    this._sendWsJson(ws, { type: 'ack', ackFor: 'report', ts: Date.now(), accepted: false,
+      ...(data.batch === true ? { persisted: false, acceptedSamples: 0 } : {}),
+      ...(retryable ? { retryAfterMs: 1000 } : { error: error.message, code: error.code }),
+      ...(data.reportId ? { reportId: data.reportId } : {}) });
   }
 
   async _handleAgentReportMessage(ws, rawMessage, attachment = {}) {
@@ -1354,9 +1364,12 @@ export class MetricsBroadcaster {
       return;
     }
 
-    const samples = UpdateController.normalizeMetricSamples(data);
-    if (samples.length === 0) {
-      this._closeWsWithError(ws, 'Missing metrics', 400);
+    let samples;
+    try {
+      samples = UpdateController.normalizeMetricSamples(data);
+      if (samples.length === 0) throw new AppError('Missing metrics', 400);
+    } catch (error) {
+      this._rejectAgentReport(ws, data, error);
       return;
     }
 
@@ -1377,39 +1390,29 @@ export class MetricsBroadcaster {
     }
 
     const reportId = data.reportId ?? null;
-    const broadcastSamples = UpdateController.toBroadcastSamples(
-      context.serverId,
-      samples,
-      context.regionCode,
-      context.agentVersion,
-      latestMetrics
-    );
+    const { update, options } = UpdateController.buildReportCommit(
+      context.serverId, data, samples, latestMetrics, context.regionCode, context.agentVersion);
+    options.fingerprint = await reportFingerprint(data);
     const reportTs = Date.now();
-    const normalizedUpdates = [{
-      serverId: context.serverId,
-      samples: broadcastSamples
-    }];
+    const normalizedUpdates = [update];
     let persistence;
     try {
-      persistence = await this._persistUpdates(normalizedUpdates, reportId);
+      persistence = await this._persistUpdates(normalizedUpdates, reportId, options);
     } catch (error) {
-      if (error instanceof AppError && error.code < 500) {
-        this._closeWsWithError(ws, error.message, error.code);
-      } else {
-        this._sendWsJson(ws, { type: 'ack', ackFor: 'report', ts: Date.now(),
-          accepted: false, persisted: false, retryAfterMs: 1000, ...(reportId ? { reportId } : {}) });
-      }
+      this._rejectAgentReport(ws, data, error);
       return;
     }
     if (!persistence.duplicate) {
       if (context.resourceAlertEnabled) this._activateResourceAlertCache(reportTs);
       const realtimeState = this._getAgentRealtimeState(reportTs);
       if (realtimeState.realtimeActive) {
-        await this._ingestRealtimeUpdates(normalizedUpdates, reportTs, { batchFrontend: true });
+        await this._ingestRealtimeUpdates(persistence.latestUpdates, reportTs, {
+          batchFrontend: true, alertUpdates: options.persistHistory ? normalizedUpdates : persistence.latestUpdates
+        });
       } else {
-        this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
+        this._cacheLatestReportUpdates(persistence.latestUpdates, reportTs);
       }
-      this._evaluateAgentTrafficAlertIfDue(context, latestMetrics);
+      if (persistence.latestUpdates.length) this._evaluateAgentTrafficAlertIfDue(context, latestMetrics);
     }
     const configAck = await this._buildAgentConfigAck(context);
     this._sendWsJson(ws, {
@@ -1417,8 +1420,7 @@ export class MetricsBroadcaster {
       ackFor: 'report',
       ts: Date.now(),
       accepted: true,
-      persisted: true,
-      ...(data.batch === true ? { acceptedSamples: samples.length } : {}),
+      ...(data.batch === true ? { persisted: true, acceptedSamples: samples.length } : {}),
       nextD1WriteAfterMs: 0,
       ...(reportId ? { reportId } : {}),
       ...(configAck || {})
@@ -1707,28 +1709,24 @@ export class MetricsBroadcaster {
         });
       }
 
-      const normalizedUpdates = this._normalizeBatchUpdates(updates);
-      if (normalizedUpdates.length === 0) {
-        return new Response(JSON.stringify({ error: 'missing valid updates' }), {
-          status: 400,
-          headers: { 'Content-Type': 'application/json' }
-        });
-      }
-
       const maintainState = body?.maintainState === true;
-      const latestReportOnly = body?.latestReportOnly === true;
       const subscribers = this._getFrontendSubscriberCount();
       const reportTs = Date.now();
+      const options = { latestUpdates: body.latestUpdates, persistHistory: body.persistHistory,
+        strictSamples: body.strictSamples, fingerprint: body.fingerprint };
 
       if (maintainState) this._activateResourceAlertCache(reportTs);
+      let persistence;
       try {
-        const persistence = await this._persistUpdates(normalizedUpdates, body.reportId ?? null);
-        if (persistence.duplicate) return Response.json({ ok: true, persisted: true, duplicate: true });
+        persistence = await this._persistUpdates(updates, body.reportId ?? null, options);
+        if (persistence.duplicate) return Response.json({ ok: true, persisted: true, duplicate: true, latestAccepted: false });
       } catch (error) {
         return Response.json({ error: error.message, persisted: false }, {
           status: error instanceof AppError ? error.code : 503
         });
       }
+      const normalizedUpdates = persistence.latestUpdates;
+      const latestAccepted = normalizedUpdates.length > 0;
 
       if (!maintainState && !this._shouldCacheResourceAlertSamples(reportTs) && subscribers === 0) {
         this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
@@ -1737,15 +1735,18 @@ export class MetricsBroadcaster {
           count: normalizedUpdates.length,
           subscribers: 0,
           latestReportOnly: true,
+          latestAccepted,
           persisted: true
         }), {
           headers: { 'Content-Type': 'application/json' }
         });
       }
 
-      await this._ingestRealtimeUpdates(normalizedUpdates, reportTs);
+      await this._ingestRealtimeUpdates(normalizedUpdates, reportTs, {
+        alertUpdates: options.persistHistory === false ? normalizedUpdates : this._normalizeBatchUpdates(updates)
+      });
 
-      return new Response(JSON.stringify({ ok: true, persisted: true, count: normalizedUpdates.length, subscribers }), {
+      return new Response(JSON.stringify({ ok: true, persisted: true, count: normalizedUpdates.length, subscribers, latestAccepted }), {
         headers: { 'Content-Type': 'application/json' }
       });
     }
@@ -1885,10 +1886,13 @@ export class MetricsBroadcaster {
 
   _cacheLatestReportUpdates(updates, reportTs = Date.now()) {
     this._pruneLatestReportUpdates(reportTs);
+    const accepted = [];
 
     for (const update of updates) {
       if (!update || !update.serverId || !Array.isArray(update.samples) || update.samples.length === 0) continue;
       const serverId = String(update.serverId);
+      const existing = this.latestReportUpdates.get(serverId);
+      if (existing && getLatestReportSampleTimestamp(existing) >= getLatestReportSampleTimestamp(update)) continue;
       // delete + set 让 Map 的插入顺序同时代表最近更新时间，便于限制内存上限。
       this.latestReportUpdates.delete(serverId);
       this.latestReportUpdates.set(serverId, {
@@ -1896,6 +1900,7 @@ export class MetricsBroadcaster {
         reportTs: update.reportTs ?? reportTs,
         samples: update.samples
       });
+      accepted.push(update);
     }
 
     while (this.latestReportUpdates.size > LATEST_REPORT_CACHE_MAX_SERVERS) {
@@ -1904,6 +1909,7 @@ export class MetricsBroadcaster {
       this.latestReportUpdates.delete(oldestServerId);
     }
 
+    return accepted;
   }
 
   async _handleHistoryQuery(request, url) {
@@ -2294,9 +2300,23 @@ export class MetricsBroadcaster {
   }
 
   // WebSocket 收到消息（ping 已被自动响应拦截，不会到达此处）
-  _normalizeBatchUpdates(updates) {
+  _normalizeBatchUpdates(updates, strictSamples = false) {
     const now = Date.now();
     return updates.map(item => {
+      if (strictSamples) {
+        if (!item?.serverId || !Array.isArray(item.samples) || !item.samples.length || item.samples.length > UPDATE_MAX_BATCH_SAMPLES) {
+          throw new AppError('Invalid metrics batch', 400);
+        }
+        let previousTs = 0;
+        for (const sample of item.samples) {
+          const ts = Number(sample?.ts ?? sample?.timestamp);
+          const data = sample?.data || sample?.payload || sample?.metrics;
+          if (!Number.isFinite(ts) || ts <= previousTs || !UpdateController.isPlainMetricObject(data)) {
+            throw new AppError('Invalid metrics batch sample', 400);
+          }
+          previousTs = ts;
+        }
+      }
       if (!item || !item.serverId) return null;
       const serverId = String(item.serverId);
       const rawSamples = Array.isArray(item.samples)

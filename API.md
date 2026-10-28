@@ -77,8 +77,10 @@
 - D1 保存服务器配置、站点设置和告警状态；实时指标与历史保存在 DO SQLite。
 - 最近 1 小时保留 10 秒聚合，7 天保留分钟统计；历史、最新报告与去重记录按小时压缩存储。查询合并区间内全部统计并限制点数；跨批次保留 sum/count/max/last，重叠时间戳不会重复计数。
 - HTTP `/update` 仅在事务提交成功后返回 200/204，存储不可用返回 503，`reportId` 内容冲突返回 409。512KB 上限同样适用于没有 Content-Length 的流式请求。
-- WSS 报告 ACK 的 `accepted:true, persisted:true` 表示 SQLite 已提交。失败返回 `accepted:false, persisted:false, retryAfterMs:1000`，Agent 应保留原报告并重试。`nextD1WriteAfterMs` 为兼容旧 Agent 保留，固定返回 0。
+- `batch:false`（或仅带 `metrics` 的缺省帧）只持久化最新快照并实时广播，不追加历史点；报告 ACK 返回 `accepted:true`，不携带 `persisted` 或 `acceptedSamples`。`batch:true` 的顶级 `metrics` 更新最新快照，只有 `samples` 写历史；两者在同一 SQLite 事务内提交。旧版数组形式的 `batch` / 未标明模式的 `samples` 仍按历史批次处理。
+- WSS 批量报告 ACK 的 `accepted:true, persisted:true, acceptedSamples:N` 表示全部 N 条样本已提交。失败返回 `accepted:false, persisted:false, acceptedSamples:0`；存储故障另带 `retryAfterMs:1000`，Agent 应保留原报告。批次须包含 1–300 条时间严格递增的有效样本，时间范围为接收时刻前 7 天至后 60 秒；任一条无效均拒绝整批（HTTP 400），不截断或部分提交。`nextD1WriteAfterMs` 为兼容旧 Agent 保留，固定返回 0。
 - `reportId` 最长 128 字符；相同 ID 与内容在持久化的 10 分钟去重窗口内可安全重试（包括 Worker/DO 重启后）；相同时间戳样本也不会重复聚合。
+- 幂等指纹基于原始报告内容，排除服务端生成的接收时间和连接 IP。最新状态按观测时间比较，依次使用 `time.accurate_ts`、`time.local_ts`（已校准时加 `offset_ms`）、`metrics.timestamp`；旧协议缺省时回退到最后样本时间或接收时间。迟到批次可以补写历史，但不会回退持久化快照、内存缓存或实时广播。
 - WebSocket 的首次回放、实时广播和订阅变更均限制在服务端授权节点集合内；隐藏节点仅管理员可见。权限变更会关闭现有订阅，前端重新连接获取新权限。
 - 离线检测使用持久化的报告接收时间，不受前端 5 分钟回放缓存失效影响；读取失败跳过当次检测。冷启动且配置读取失败时，受保护接口返回 503。
 - 旧 DO 快照按节点首次访问自动迁移；已被旧版本删除的历史无法恢复。

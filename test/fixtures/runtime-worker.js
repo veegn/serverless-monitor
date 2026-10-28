@@ -90,7 +90,7 @@ export class RuntimeBroadcaster extends BaseBroadcaster {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path.startsWith('/test/') || ['/history', '/batch-push', '/ws', '/frontend-access-changed'].includes(path)) {
+    if (path.startsWith('/test/') || ['/history', '/batch-push', '/latest-report-updates', '/ws', '/frontend-access-changed'].includes(path)) {
       const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
       return stub.fetch(request);
     }

@@ -166,8 +166,10 @@ export class SqlMetricsStore {
     try { await promise; } catch (error) { this.migrations.delete(serverId); throw error; }
   }
 
-  async ingest(updates, { now = Date.now(), reportKey = null, fingerprint = '' } = {}) {
-    for (const update of updates) await this.migrateServer(update.serverId, now);
+  async ingest(updates, { now = Date.now(), reportKey = null, fingerprint = '',
+    persistHistory = true, latestUpdates = updates, strictSamples = false } = {}) {
+    const serverIds = [...new Set([...updates, ...latestUpdates].map(update => update.serverId))];
+    for (const serverId of serverIds) await this.migrateServer(serverId, now);
     return this.storage.transactionSync(() => {
       const entries = new Map();
       const get = (id, hour) => {
@@ -176,12 +178,12 @@ export class SqlMetricsStore {
         return entries.get(key);
       };
       const currentHour = hourOf(now);
-      for (const update of updates) {
-        const active = get(update.serverId, currentHour);
+      for (const serverId of serverIds) {
+        const active = get(serverId, currentHour);
         if (!active.receivedAt) {
-          const row = this.latestRow(update.serverId);
+          const row = this.latestRow(serverId);
           if (row && row.bucket !== currentHour) {
-            const previous = get(update.serverId, row.bucket);
+            const previous = get(serverId, row.bucket);
             active.block.l = previous.block.l;
             active.sampleTs = previous.sampleTs;
             active.block.r = previous.block.r.filter(report => report[2] > now);
@@ -195,16 +197,28 @@ export class SqlMetricsStore {
             .map(row => [row.report_key, row.fingerprint, row.expires_at])[0];
         if (previous) {
           if (previous[1] !== fingerprint) throw new AppError('Conflicting reportId with different content', 409);
-          return { persisted: true, duplicate: true };
+          return { persisted: true, duplicate: true, latestUpdates: [] };
+        }
+      }
+      // Validate the whole batch before changing history, latest state or its journal.
+      // Legacy callers retain their skip-outside-retention behavior.
+      if (persistHistory && strictSamples) {
+        for (const update of updates) {
+          let previousTs = 0;
+          for (const sample of update.samples) {
+            const ts = Number(sample.ts);
+            if (!Number.isFinite(ts) || ts <= previousTs || ts < now - HISTORY_RETENTION_MS || ts > now + MINUTE) {
+              throw new AppError('Batch sample timestamp is invalid or outside the history retention window', 400);
+            }
+            previousTs = ts;
+          }
         }
       }
       const dirty = new Set();
-      for (const update of updates) {
-        let latestSampleTs = 0;
+      for (const update of persistHistory ? updates : []) {
         for (const sample of update.samples) {
           const ts = Number(sample.ts);
           if (!Number.isFinite(ts)) continue;
-          latestSampleTs = Math.max(latestSampleTs, ts);
           if (ts < now - HISTORY_RETENTION_MS || ts > now + MINUTE) continue;
           const entry = get(update.serverId, hourOf(ts));
           const offset = Math.floor((ts - entry.hour) / MINUTE) * MINUTE;
@@ -218,18 +232,26 @@ export class SqlMetricsStore {
           }
           dirty.add(entry);
         }
+      }
+      const acceptedLatest = [];
+      for (const update of latestUpdates) {
         const active = get(update.serverId, currentHour);
-        if (!active.block.l || latestSampleTs >= active.sampleTs) {
+        const latestSampleTs = Math.max(...update.samples.map(sample => Number(sample.ts) || 0));
+        if (!active.block.l || latestSampleTs > active.sampleTs) {
           active.block.l = { ...update, reportTs: now };
           active.sampleTs = latestSampleTs || now;
+          acceptedLatest.push(update);
         }
+      }
+      for (const serverId of serverIds) {
+        const active = get(serverId, currentHour);
         active.receivedAt = now;
         active.block.r = active.block.r.filter(report => report[2] > now);
         dirty.add(active);
       }
       if (reportKey && updates.length) get(updates[0].serverId, currentHour).block.r.push([reportKey, fingerprint, now + REPORT_RETENTION_MS]);
       for (const entry of dirty) this.writeBlock(entry, now);
-      return { persisted: true, duplicate: false };
+      return { persisted: true, duplicate: false, latestUpdates: acceptedLatest };
     });
   }
 
@@ -240,7 +262,7 @@ export class SqlMetricsStore {
       const row = this.latestRow(serverId);
       if (!row || row.received_at < since) continue;
       const { block } = this.readBlock(serverId, row.bucket);
-      if (block.l) results.push({ ...block.l, reportTs: row.received_at });
+      if (block.l) results.push({ ...block.l, reportTs: block.l.reportTs ?? row.received_at });
     }
     return results;
   }

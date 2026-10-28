@@ -24,7 +24,8 @@ test('a delayed backfill cannot replace a newer current sample', async () => {
   await store.ingest([{ serverId: 'a', samples: [{ ts: now - 120000, data: { cpu: 10 } }] }], { now: now + 1000 });
   const [report] = await store.latest(['a']);
   assert.equal(report.samples[0].data.cpu, 90);
-  assert.equal(report.reportTs, now + 1000);
+  assert.equal(report.reportTs, now, 'late backfill must not refresh the replay timestamp of an older snapshot');
+  assert.equal((await store.timestamps(['a'])).a, now + 1000, 'online detection uses the latest receipt');
 });
 
 test('missing nodes and empty latest lookups return an empty result', async () => {
