@@ -55,7 +55,7 @@
           </div>
         </div>
 
-        <div class="stats-grid" id="stats-panel">
+        <div v-show="activeTab === 'servers'" class="stats-grid" id="stats-panel">
           <div class="stat-card">
             <div class="stat-main-value" id="stat-total">{{ stats.total }}</div>
             <div class="stat-label">{{ trans.totalServers }}</div>
@@ -87,11 +87,6 @@
             :class="{ active: activeTab === 'settings' }"
             @click="activeTab = 'settings'"
           >{{ trans.settings }}</button>
-          <button
-            class="tab-btn"
-            :class="{ active: activeTab === 'themeStore' }"
-            @click="activeTab = 'themeStore'"
-          >{{ trans.themeStore }}</button>
         </div>
 
         <ServerTable
@@ -135,7 +130,6 @@
           :saving="saving"
           :change-admin-password="changeAdminPassword"
           :test-notification-loading="testNotificationLoading"
-          :generating-auto-register-token="generatingAutoRegisterToken"
           :db-loading="dbLoading"
           :selected-api-index="selectedApiIndex"
           @toggle-password="togglePassword"
@@ -145,20 +139,10 @@
           @upload-bg-mobile="uploadBgMobile"
           @upload-favicon="uploadFavicon"
           @send-test-notification="sendTestNotification"
-          @generate-auto-register-token="handleGenerateAutoRegisterToken"
           @open-auto-discovery="openAutoDiscoveryModal"
-          @open-db-modal="openDbModal"
-          @alert-message="alertMessage = $event"
-        />
-
-        <ThemeStorePanel
-          :trans="trans"
-          :active-tab="activeTab"
-          :selected-api-index="selectedApiIndex"
-          :current-theme-url="settings.theme_url"
-          :settings="settings"
           @theme-applied="settings.theme_url = $event"
           @theme-options-applied="handleThemeOptionsApplied"
+          @open-db-modal="openDbModal"
           @alert-message="alertMessage = $event"
         />
       </div>
@@ -248,7 +232,7 @@
       <AutoDiscoveryModal
         :show="showAutoDiscoveryModal"
         :trans="trans"
-        :settings="settings"
+        :settings="registrationSettings"
         :selected-api-base="selectedApiBase"
         :generating-token="generatingAutoRegisterToken"
         @close="showAutoDiscoveryModal = false"
@@ -261,7 +245,7 @@
       <div id="dbModal" class="modal-overlay" :class="{ active: showDbModal }">
         <div class="modal-dialog">
           <div class="modal-header">
-            <div class="modal-title">$ {{ dbOperation === 'clearHistory' ? 'CLEAR HISTORY' : 'ALTER DATABASE' }}</div>
+            <div class="modal-title">$ {{ dbOperation === 'clearHistory' ? trans.clearHistory : dbOperation === 'rotateKey' ? trans.rotateLoginKey : trans.databaseRepairTools }}</div>
             <button class="modal-close" @click="closeDbModal" :disabled="dbLoading">✕</button>
           </div>
 
@@ -281,9 +265,11 @@
               <span style="color: var(--accent-yellow); font-weight: 600;">{{ trans.upgradeDatabase }}</span>
             </div>
             <p class="text-secondary text-sm line-height-1-6">
-              {{ trans.upgradeDesc }}
+              {{ trans.databaseRepairHint }}
             </p>
           </div>
+
+          <p v-if="dbOperation === 'rotateKey'" class="text-secondary text-sm line-height-1-6">{{ trans.rotateLoginKeyConfirm }}</p>
 
           <div v-if="dbResult" :class="dbResult.success ? 'warning-box' : 'danger-box'" class="mb-4">
             <div class="flex-center-gap-sm">
@@ -299,11 +285,11 @@
           <div v-if="!(dbResult && dbResult.success)" class="modal-footer flex-justify-between">
             <button
               v-if="!dbResult"
-              @click="dbOperation === 'clearHistory' ? handleClearHistory() : handleUpgradeDatabase()"
+              @click="runMaintenanceOperation"
               class="btn btn-red"
               :disabled="dbLoading"
             >
-              {{ dbLoading ? (dbOperation === 'clearHistory' ? trans.clearing : trans.upgrading) : (dbOperation === 'clearHistory' ? trans.confirmClear : trans.upgradeDatabase) }}
+              {{ dbLoading ? trans.loading : dbOperation === 'clearHistory' ? trans.confirmClear : dbOperation === 'rotateKey' ? trans.rotateLoginKey : trans.runDatabaseRepair }}
             </button>
             <button @click="closeDbModal" class="btn" :disabled="dbLoading">{{ trans.cancel }}</button>
           </div>
@@ -393,7 +379,6 @@ import HelpTooltip from '../../components/HelpTooltip.vue'
 import AdminLogin from './components/AdminLogin.vue'
 import ServerTable from './components/ServerTable.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
-import ThemeStorePanel from './components/ThemeStorePanel.vue'
 import EditServerModal from './components/EditServerModal.vue'
 import BatchEditServersModal from './components/BatchEditServersModal.vue'
 import DeleteServerModal from './components/DeleteServerModal.vue'
@@ -719,9 +704,6 @@ const settings = ref({
   turnstile_login_enabled: false,
   turnstile_site_key: '',
   turnstile_secret_key: '',
-  cloudflare_account_id: '',
-  cloudflare_token: '',
-  jwt_secret: '',
   username: '',
   password_configured: false,
   password: '',
@@ -738,10 +720,9 @@ const settings = ref({
   csp_static: '',
   csp_api: '',
   auto_register_enabled: false,
-  auto_register_default_group: 'Default',
-  auto_register_token: '',
-  auto_register_token_expires: 0
+  auto_register_default_group: 'Default'
 })
+const registrationSettings = ref({ auto_register_enabled: false, auto_register_default_group: 'Default', auto_register_token: '', auto_register_token_expires: 0 })
 const apiSecret = ref('')
 const changeAdminPassword = ref(false)
 
@@ -764,7 +745,7 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword', 'autoRegisterToken'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'password', 'confirmPassword'
 ])
 
 const {
@@ -1140,9 +1121,6 @@ const loadSettings = async () => {
         turnstile_login_enabled: settingsData.turnstile_login_enabled === 'true',
         turnstile_site_key: settingsData.turnstile_site_key || '',
         turnstile_secret_key: settingsData.turnstile_secret_key || '',
-        cloudflare_account_id: settingsData.cloudflare_account_id || '',
-        cloudflare_token: settingsData.cloudflare_token || '',
-        jwt_secret: '',
         username: settingsData.username || '',
         password_configured: settingsData.password_configured === true,
         password: '',
@@ -1161,7 +1139,11 @@ const loadSettings = async () => {
         csp_static: settingsData.csp_static || '',
         csp_api: settingsData.csp_api || '',
         auto_register_enabled: settingsData.auto_register_enabled === 'true' || settingsData.auto_register_enabled === true,
-        auto_register_default_group: settingsData.auto_register_default_group || 'Default',
+        auto_register_default_group: settingsData.auto_register_default_group || 'Default'
+      }
+      registrationSettings.value = {
+        auto_register_enabled: settings.value.auto_register_enabled,
+        auto_register_default_group: settings.value.auto_register_default_group,
         auto_register_token: settingsData.auto_register_token || '',
         auto_register_token_expires: Number(settingsData.auto_register_token_expires) || 0
       }
@@ -1192,17 +1174,6 @@ const saveSettings = async () => {
   if (saving.value) return
 
   validationError.value = null
-
-  const jwtSecret = settings.value.jwt_secret
-  if (jwtSecret && jwtSecret.length > 0 && jwtSecret.length < 32) {
-    validationError.value = trans.value.jwtSecretMinLength
-    return
-  }
-
-  if (jwtSecret && /\s/.test(jwtSecret)) {
-    validationError.value = trans.value.jwtSecretNoWhitespace
-    return
-  }
 
   if (!settings.value.username || settings.value.username.trim().length === 0) {
     validationError.value = trans.value.usernameRequired
@@ -1279,6 +1250,7 @@ const saveSettings = async () => {
 
   const themeOptionsResult = parseThemeOptions(settings.value.theme_options)
   if (!themeOptionsResult.valid) {
+    settingsPanelRef.value?.revealAppearanceAdvanced()
     validationError.value = trans.value.invalidThemeOptionsFormat
     return
   }
@@ -1307,9 +1279,6 @@ const saveSettings = async () => {
       favicon: settings.value.favicon,
       custom_head: settings.value.custom_head,
       custom_script: settings.value.custom_script,
-      display_mode: 'ring',
-      preferred_theme: 'auto',
-      default_language: 'auto',
       appearance_options: {
         theme_options: themeOptionsResult.value
       },
@@ -1341,8 +1310,6 @@ const saveSettings = async () => {
       turnstile_login_enabled: settings.value.turnstile_login_enabled ? 'true' : 'false',
       turnstile_site_key: settings.value.turnstile_site_key,
       turnstile_secret_key: settings.value.turnstile_secret_key,
-      cloudflare_account_id: settings.value.cloudflare_account_id,
-      cloudflare_token: settings.value.cloudflare_token,
       username: settings.value.username,
       custom_ct: pingNodeValidation.values.custom_ct,
       custom_cu: pingNodeValidation.values.custom_cu,
@@ -1358,17 +1325,11 @@ const saveSettings = async () => {
       csp_api: settings.value.csp_api || '',
       auto_register_enabled: settings.value.auto_register_enabled ? 'true' : 'false',
       auto_register_default_group: String(settings.value.auto_register_default_group || 'Default').trim(),
-      auto_register_token: String(settings.value.auto_register_token || '').trim(),
-      auto_register_token_expires: Number(settings.value.auto_register_token_expires) || 0
     }
   }
 
   if (shouldChangePassword && settings.value.password.length > 0) {
     data.settings.password = settings.value.password
-  }
-
-  if (jwtSecret && jwtSecret.length > 0) {
-    data.settings.jwt_secret = jwtSecret
   }
 
   try {
@@ -1378,7 +1339,6 @@ const saveSettings = async () => {
       applyMikusThemeOptions(themeOptionsResult.value)
       clearAdminPasswordInputs()
       changeAdminPassword.value = false
-      settings.value.jwt_secret = ''
       loadSettings()
     } else {
       saveResult.value = { success: false, error: getMessage(result.error) || 'fail' }
@@ -2068,6 +2028,30 @@ const handleClearHistory = async () => {
   }
 }
 
+const handleRotateLoginKey = async () => {
+  dbLoading.value = true
+  dbResult.value = null
+  try {
+    const result = await adminApiForSite({ action: 'rotate_jwt_secret' })
+    if (result.error || !result.data?.token) throw new Error(result.error || trans.value.operationFailed)
+    localStorage.setItem(STORAGE.JWT_TOKEN, result.data.token)
+    localStorage.removeItem(STORAGE.TURNSTILE_VERIFIED)
+    localStorage.removeItem(STORAGE.TURNSTILE_TOKEN)
+    dbResult.value = { success: true, message: 'loginKeyRotated' }
+  } catch (error) {
+    dbResult.value = { success: false, error: error.message }
+  } finally {
+    dbLoading.value = false
+  }
+}
+
+const runMaintenanceOperation = () => {
+  if (dbLoading.value) return
+  if (dbOperation.value === 'rotateKey') return handleRotateLoginKey()
+  if (dbOperation.value === 'clearHistory') return handleClearHistory()
+  return handleUpgradeDatabase()
+}
+
 const openDbModal = (operation) => {
   dbOperation.value = operation
   dbResult.value = null
@@ -2126,8 +2110,8 @@ const handleGenerateAutoRegisterToken = async (silent = false) => {
       action: 'generate_auto_register_token'
     })
     if (!result.error && result.data?.success) {
-      settings.value.auto_register_token = result.data.token
-      settings.value.auto_register_token_expires = result.data.expires_at
+      registrationSettings.value.auto_register_token = result.data.token
+      registrationSettings.value.auto_register_token_expires = result.data.expires_at
       if (!silent) {
         alertMessage.value = trans.value.tokenGenerated || '授权 Key 已生成，有效期 30 分钟'
       }
@@ -2148,8 +2132,8 @@ const showAutoDiscoveryModal = ref(false)
 
 const openAutoDiscoveryModal = async () => {
   showAutoDiscoveryModal.value = true
-  const token = settings.value.auto_register_token
-  const expires = Number(settings.value.auto_register_token_expires) || 0
+  const token = registrationSettings.value.auto_register_token
+  const expires = Number(registrationSettings.value.auto_register_token_expires) || 0
   if (!token || expires <= Date.now()) {
     await handleGenerateAutoRegisterToken(true)
   }
@@ -2157,17 +2141,16 @@ const openAutoDiscoveryModal = async () => {
 
 const handleEnableAutoRegister = async () => {
   try {
-    settings.value.auto_register_enabled = true
     const result = await adminApiForSite({
       action: 'save_settings',
       settings: {
         auto_register_enabled: 'true',
-        auto_register_default_group: String(settings.value.auto_register_default_group || 'Default').trim(),
-        auto_register_token: String(settings.value.auto_register_token || '').trim(),
-        auto_register_token_expires: Number(settings.value.auto_register_token_expires) || 0
+        auto_register_default_group: registrationSettings.value.auto_register_default_group
       }
     })
     if (!result.error) {
+      registrationSettings.value.auto_register_enabled = true
+      settings.value.auto_register_enabled = true
       alertMessage.value = trans.value.settingsSaved || '自动注册已开启'
     } else {
       alertMessage.value = getMessage(result.error) || trans.value.operationFailed
@@ -2180,6 +2163,7 @@ const handleEnableAutoRegister = async () => {
 const goToAutoRegisterSettings = () => {
   showAutoDiscoveryModal.value = false
   activeTab.value = 'settings'
+  nextTick(() => settingsPanelRef.value?.showRegistrationSettings())
 }
 
 watch(() => route.query.apiIndex, async (value) => {

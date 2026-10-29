@@ -2376,6 +2376,81 @@ body::before {
     gap: 20px;
 }
 
+.settings-view-nav,
+.settings-action-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 16px;
+}
+
+.settings-view-nav .btn,
+.settings-action-row .btn {
+    margin: 0;
+}
+
+.settings-grid > *,
+.settings-section .form-group {
+    min-width: 0;
+}
+
+.settings-advanced {
+    margin-top: 16px;
+    border-top: 1px solid var(--border-color);
+    padding-top: 12px;
+}
+
+.settings-advanced > summary {
+    padding: 8px 0;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.settings-advanced[open] > summary {
+    margin-bottom: 12px;
+    color: var(--text-primary);
+}
+
+.settings-save-bar {
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 20px;
+    padding: 12px 0;
+    background: var(--bg-primary);
+    border-top: 1px solid var(--border-color);
+}
+
+.settings-usage-table {
+    overflow-x: auto;
+}
+
+.settings-usage-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.settings-usage-table caption {
+    text-align: left;
+    padding: 12px 0;
+}
+
+.settings-usage-table th,
+.settings-usage-table td {
+    padding: 10px 8px;
+    border-bottom: 1px solid var(--border-color);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.settings-usage-table th:first-child {
+    text-align: left;
+}
+
 .settings-section {
     background: var(--bg-card);
     border: 1px solid var(--border-color);

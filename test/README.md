@@ -12,6 +12,7 @@ npm run build:frontend
 
 ## 存储与运行时测试
 
+- `admin-maintenance.test.js`：密钥轮换鉴权、当前会话续签、旧会话失效、跨实例旧缓存刷新、写入失败和局部保存保留隐藏配置。
 - `configuration-optimization.test.js`：零变更写入、稀疏配置、数据库约束、按需查询、索引、分阶段回滚/恢复、并发迁移、通知租约及冷启动账期重置。
 - `configuration-runtime.test.js`：真实 workerd/D1 的配置读写行计量、覆盖恢复、租约和索引约束。
 

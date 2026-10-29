@@ -55,6 +55,7 @@
   - [3.12](#312-action-send_test_notification---发送测试通知) [`action: send_test_notification`](#312-action-send_test_notification---发送测试通知) [- 发送测试通知](#312-action-send_test_notification---发送测试通知)
   - [3.13](#313-action-export_servers---导出服务器) [`action: export_servers`](#313-action-export_servers---导出服务器) [- 导出服务器](#313-action-export_servers---导出服务器)
   - [3.14](#314-action-import_servers---导入服务器) [`action: import_servers`](#314-action-import_servers---导入服务器) [- 导入服务器](#314-action-import_servers---导入服务器)
+  - [3.15 `action: rotate_jwt_secret` - 轮换登录密钥](#315-action-rotate_jwt_secret---轮换登录密钥)
 - [4. 系统维护端点](#4-系统维护端点)
   - [4.1](#41-post-updatedatabase---数据库迁移) [`POST /updateDatabase`](#41-post-updatedatabase---数据库迁移) [- 数据库迁移](#41-post-updatedatabase---数据库迁移)
   - [4.2](#42-post-clearhistory---清空历史数据) [`POST /clearHistory`](#42-post-clearhistory---清空历史数据) [- 清空历史数据](#42-post-clearhistory---清空历史数据)
@@ -1123,7 +1124,7 @@ https://github.com/<owner>/<theme-repo>/tree/<commit-or-branch>[/theme-subdir]
   ```
 - Body（JSON）：
   ```json
-  { "action": "<one of: login|clear_theme_preview_auth|get_settings|start_theme_preview|list|d1_usage|send_test_notification|save_settings|save_theme_options|add|delete|save_order|edit|batch_delete|export_servers|import_servers>", ...payload }
+  { "action": "<one of: login|clear_theme_preview_auth|get_settings|start_theme_preview|rotate_jwt_secret|list|d1_usage|send_test_notification|save_settings|save_theme_options|add|delete|save_order|edit|batch_delete|export_servers|import_servers>", ...payload }
   ```
 
 **Turnstile**：
@@ -1729,13 +1730,37 @@ UUID 缺失或格式非法时返回 `400 { "error": "invalidServerId", "code": 4
 
 ***
 
+### 3.15 `action: rotate_jwt_secret` - 轮换登录密钥
+
+请求需已登录管理员凭证：
+
+```json
+{ "action": "rotate_jwt_secret" }
+```
+
+成功返回 `200`：
+
+```json
+{
+  "success": true,
+  "token": "<replacement-jwt>",
+  "message": "loginKeyRotated"
+}
+```
+
+系统生成并持久化新的 32 字节随机签名密钥，不返回密钥原文。响应同时更新当前 `cfsm_auth` Cookie、清除旧主题预览授权；使用 Bearer 的客户端应保存返回的新 Token。其他设置保持原值；持久化失败返回错误，旧会话继续有效。
+
+配置缓存有效期为 120 秒，旧会话在各实例成功刷新配置后失效。新 Token 到达旧缓存实例时，HTTP / WebSocket 认证会重新加载密钥并重试验证。
+
+***
+
 ## 4. 系统维护端点
 
 > 以下端点需 JWT 鉴权（`Authorization: Bearer <token>`），不参与 Turnstile。
 
 ### 4.1 `POST /updateDatabase` - 数据库迁移
 
-> 用于老版本升级时补齐 `metrics_history` 与 `servers` 表的字段、并清理废弃 settings。
+> 常规配置迁移已自动执行。本端点用于主动检查迁移，并清理旧版本遗留表与设置；不删除当前 DO 指标历史。
 
 **Request**
 
@@ -1934,7 +1959,7 @@ Ping 配置、通知配置和通知状态分别存储于独立表，由 `server_
 }
 ```
 
-`jwt_secret` 可通过 `save_settings` 写入，但不会由 `get_settings` 返回；只有长度至少 32 的值有效，空值或短值会在后续加载时被随机密钥替换。
+后台使用 `rotate_jwt_secret` 独立轮换登录密钥。为兼容旧客户端，`jwt_secret` 仍可通过 `save_settings` 写入，但不会由 `get_settings` 返回；只有长度至少 32 的值有效，空值或短值会在后续加载时被随机密钥替换。
 
 ### 5.5 WebSocket 消息
 

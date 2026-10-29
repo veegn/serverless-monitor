@@ -1,127 +1,143 @@
 <template>
   <div id="tab-settings" class="tab-content" :class="{ active: activeTab === 'settings' }">
-    <div class="settings-grid">
+    <div class="settings-view-nav" role="group" :aria-label="trans.settings">
+      <button type="button" class="btn" :class="{ 'btn-primary': settingsView === 'configuration' }" :aria-pressed="settingsView === 'configuration'" @click="settingsView = 'configuration'">{{ trans.configurationSettings }}</button>
+      <button type="button" class="btn" :class="{ 'btn-primary': settingsView === 'maintenance' }" :aria-pressed="settingsView === 'maintenance'" @click="settingsView = 'maintenance'">{{ trans.systemMaintenance }}</button>
+    </div>
+    <div v-show="settingsView === 'configuration'" class="settings-grid">
       <!-- 1. 站点与外观设置 (Appearance & Site Identity) -->
-      <div class="settings-section" v-if="currentOrigin === selectedApiBase">
+      <div class="settings-section full-width">
         <div class="section-title">
           <AppIcon name="globe" :size="16" />
-          <span>{{ trans.appearance }}</span>
+          <span>{{ trans.siteAppearance }}</span>
         </div>
 
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.siteTitle }}</label>
-            <input type="text" v-model="settings.site_title" class="form-input" :placeholder="'Serverless Monitor'">
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.publicAccess }}</label>
-            <div class="checkbox-item" style="padding-top: 4px;">
-              <input type="checkbox" id="cfg_is_public" v-model="settings.is_public">
-              <label for="cfg_is_public"><b>{{ trans.publicAccess }}</b></label>
+        <template v-if="currentOrigin === selectedApiBase">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.siteTitle }}</label>
+              <input type="text" v-model="settings.site_title" class="form-input" :placeholder="'Serverless Monitor'">
             </div>
           </div>
-        </div>
 
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.bgImage }}
-              <HelpTooltip :text="trans.remoteImageTip" />
-            </label>
-            <div class="flex" style="gap:8px;">
-              <input type="text" v-model="settings.custom_bg" class="form-input flex-1" placeholder="https://...">
-              <div class="upload-btn-wrapper">
-                <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
-                  <AppIcon name="upload" :size="14" /> {{ trans.upload }}
-                </button>
-                <input type="file" accept="image/*" @change="$emit('upload-bg', $event)">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">
+                {{ trans.bgImage }}
+                <HelpTooltip :text="trans.remoteImageTip" />
+              </label>
+              <div class="flex" style="gap:8px;">
+                <input type="text" v-model="settings.custom_bg" class="form-input flex-1" placeholder="https://...">
+                <div class="upload-btn-wrapper">
+                  <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
+                    <AppIcon name="upload" :size="14" /> {{ trans.upload }}
+                  </button>
+                  <input type="file" accept="image/*" @change="$emit('upload-bg', $event)">
+                </div>
+              </div>
+              <img v-if="settings.custom_bg" :src="settings.custom_bg" class="bg-preview">
+            </div>
+
+            <div class="form-group flex-1">
+              <label class="form-label">
+                {{ trans.mobileBgImage }}
+                <HelpTooltip :text="trans.remoteImageTip" />
+              </label>
+              <div class="flex" style="gap:8px;">
+                <input type="text" v-model="settings.custom_bg_mobile" class="form-input flex-1" placeholder="https://...">
+                <div class="upload-btn-wrapper">
+                  <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
+                    <AppIcon name="upload" :size="14" /> {{ trans.upload }}
+                  </button>
+                  <input type="file" accept="image/*" @change="$emit('upload-bg-mobile', $event)">
+                </div>
+              </div>
+              <img v-if="settings.custom_bg_mobile" :src="settings.custom_bg_mobile" class="bg-preview">
+            </div>
+
+            <div class="form-group flex-1">
+              <label class="form-label">
+                {{ trans.favicon }}
+                <HelpTooltip :text="trans.remoteImageTip" />
+              </label>
+              <div class="flex" style="gap:8px;">
+                <input type="text" v-model="settings.favicon" class="form-input flex-1" placeholder="https://...">
+                <div class="upload-btn-wrapper">
+                  <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
+                    <AppIcon name="upload" :size="14" /> {{ trans.upload }}
+                  </button>
+                  <input type="file" accept="image/*,.ico" @change="$emit('upload-favicon', $event)">
+                </div>
+              </div>
+              <img v-if="settings.favicon" :src="settings.favicon" class="bg-preview">
+            </div>
+          </div>
+
+          <details ref="appearanceAdvanced" class="settings-advanced">
+            <summary>{{ trans.advancedAppearance }}</summary>
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label class="form-label">
+                  {{ trans.cspStatic }}
+                  <HelpTooltip :text="trans.cspStaticTip" />
+                </label>
+                <input type="text" v-model="settings.csp_static" class="form-input" placeholder="https://unpkg.com,https://cdn.jsdelivr.net" @blur="validateCspField('csp_static')">
+                <p v-if="cspErrors.csp_static" class="text-danger text-sm">{{ cspErrors.csp_static }}</p>
+              </div>
+
+              <div class="form-group flex-1">
+                <label class="form-label">
+                  {{ trans.cspApi }}
+                  <HelpTooltip :text="trans.cspApiTip" />
+                </label>
+                <input type="text" v-model="settings.csp_api" class="form-input" placeholder="https://api.example.com" @blur="validateCspField('csp_api')">
+                <p v-if="cspErrors.csp_api" class="text-danger text-sm">{{ cspErrors.csp_api }}</p>
               </div>
             </div>
-            <img v-if="settings.custom_bg" :src="settings.custom_bg" class="bg-preview">
-          </div>
 
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.mobileBgImage }}
-              <HelpTooltip :text="trans.remoteImageTip" />
-            </label>
-            <div class="flex" style="gap:8px;">
-              <input type="text" v-model="settings.custom_bg_mobile" class="form-input flex-1" placeholder="https://...">
-              <div class="upload-btn-wrapper">
-                <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
-                  <AppIcon name="upload" :size="14" /> {{ trans.upload }}
-                </button>
-                <input type="file" accept="image/*" @change="$emit('upload-bg-mobile', $event)">
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label class="form-label">
+                  {{ trans.customHead }}
+                  <HelpTooltip :text="trans.cspWarning" />
+                </label>
+                <textarea v-model="settings.custom_head" class="form-textarea" rows="3" placeholder="<link rel='stylesheet' href='...'">
+                </textarea>
+              </div>
+
+              <div class="form-group flex-1">
+                <label class="form-label">{{ trans.customScript }}</label>
+                <textarea v-model="settings.custom_script" class="form-textarea" rows="3" placeholder="console.log('Hello');">
+                </textarea>
               </div>
             </div>
-            <img v-if="settings.custom_bg_mobile" :src="settings.custom_bg_mobile" class="bg-preview">
-          </div>
 
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.favicon }}
-              <HelpTooltip :text="trans.remoteImageTip" />
-            </label>
-            <div class="flex" style="gap:8px;">
-              <input type="text" v-model="settings.favicon" class="form-input flex-1" placeholder="https://...">
-              <div class="upload-btn-wrapper">
-                <button class="btn btn-margin-0" type="button" style="display: inline-flex; align-items: center; gap: 4px;">
-                  <AppIcon name="upload" :size="14" /> {{ trans.upload }}
-                </button>
-                <input type="file" accept="image/*,.ico" @change="$emit('upload-favicon', $event)">
+            <div class="form-row">
+              <div class="form-group flex-1">
+                <label class="form-label">
+                  {{ trans.themeOptions }}
+                  <HelpTooltip :text="trans.themeOptionsTip" />
+                </label>
+                <textarea v-model="settings.theme_options" class="form-textarea" rows="3" placeholder='{"mikus":1}'></textarea>
               </div>
             </div>
-            <img v-if="settings.favicon" :src="settings.favicon" class="bg-preview">
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.cspStatic }}
-              <HelpTooltip :text="trans.cspStaticTip" />
-            </label>
-            <input type="text" v-model="settings.csp_static" class="form-input" placeholder="https://unpkg.com,https://cdn.jsdelivr.net" @blur="validateCspField('csp_static')">
-            <p v-if="cspErrors.csp_static" class="text-danger text-sm">{{ cspErrors.csp_static }}</p>
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.cspApi }}
-              <HelpTooltip :text="trans.cspApiTip" />
-            </label>
-            <input type="text" v-model="settings.csp_api" class="form-input" placeholder="https://api.example.com" @blur="validateCspField('csp_api')">
-            <p v-if="cspErrors.csp_api" class="text-danger text-sm">{{ cspErrors.csp_api }}</p>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.customHead }}
-              <HelpTooltip :text="trans.cspWarning" />
-            </label>
-            <textarea v-model="settings.custom_head" class="form-textarea" rows="3" placeholder="<link rel='stylesheet' href='...'">
-            </textarea>
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.customScript }}</label>
-            <textarea v-model="settings.custom_script" class="form-textarea" rows="3" placeholder="console.log('Hello');">
-            </textarea>
-          </div>
-        </div>
-
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.themeOptions }}
-              <HelpTooltip :text="trans.themeOptionsTip" />
-            </label>
-            <textarea v-model="settings.theme_options" class="form-textarea" rows="3" placeholder='{"mikus":1}'></textarea>
-          </div>
-        </div>
+          </details>
+        </template>
+        <details class="settings-advanced" @toggle="themeStoreOpen = $event.target.open">
+          <summary>{{ trans.themeStore }}</summary>
+          <p class="text-muted text-sm">{{ trans.themeActionsImmediate }}</p>
+          <ThemeStorePanel
+            v-if="themeStoreOpen"
+            :key="selectedApiIndex"
+            :trans="trans"
+            :selected-api-index="selectedApiIndex"
+            :current-theme-url="settings.theme_url"
+            :settings="settings"
+            @theme-applied="$emit('theme-applied', $event)"
+            @theme-options-applied="$emit('theme-options-applied', $event)"
+            @alert-message="$emit('alert-message', $event)"
+          />
+        </details>
       </div>
 
       <!-- 2. 监控与展示配置 (Display & Monitoring Options) -->
@@ -179,16 +195,16 @@
             >
           </div>
 
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.longHistoryPoints }}
-              <HelpTooltip :text="trans.longHistoryPointsTip" />
-            </label>
-            <select v-model="settings.long_history_points" class="form-select">
-              <option v-for="option in longHistoryPointOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-            </select>
-          </div>
         </div>
+        <details class="settings-advanced">
+          <summary>{{ trans.advancedMonitoring }} · {{ settings.long_history_points === 'auto' ? trans.historySamplingAuto : settings.long_history_points }}</summary>
+          <p class="text-muted text-sm">{{ trans.historyAutoRecommended }}</p>
+          <label class="form-label" for="history-points">{{ trans.longHistoryPoints }}</label>
+          <select id="history-points" v-model="settings.long_history_points" class="form-select">
+            <option v-for="option in longHistoryPointOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+          <p class="text-muted text-sm">{{ trans.longHistoryPointsTip }}</p>
+        </details>
       </div>
 
       <!-- 3. 安全防护设置 (Security Settings) -->
@@ -198,23 +214,20 @@
           <span>{{ trans.securitySettings }}</span>
         </div>
 
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <div class="checkbox-item">
-              <input type="checkbox" id="cfg_turnstile_enabled" v-model="settings.turnstile_enabled">
-              <label for="cfg_turnstile_enabled"><b>{{ trans.enableTurnstile }}</b></label>
-            </div>
-          </div>
-          <div class="form-group flex-1">
-            <div class="checkbox-item">
-              <input type="checkbox" id="cfg_turnstile_login_enabled" v-model="settings.turnstile_login_enabled">
-              <label for="cfg_turnstile_login_enabled">{{ trans.enableTurnstileLogin }}</label>
-              <HelpTooltip :text="trans.turnstileLoginTip" />
-            </div>
-          </div>
+        <div class="checkbox-item mb-3">
+          <input type="checkbox" id="cfg_is_public" v-model="settings.is_public">
+          <label for="cfg_is_public">{{ trans.publicAccess }}</label>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="turnstile-scope">{{ trans.turnstileScope }}</label>
+          <select id="turnstile-scope" v-model="turnstileScope" class="form-select">
+            <option value="off">{{ trans.disabled }}</option>
+            <option value="login">{{ trans.turnstileScopeLogin }}</option>
+            <option value="site">{{ trans.turnstileScopeSite }}</option>
+          </select>
         </div>
 
-        <div class="form-row">
+        <div v-if="turnstileScope !== 'off'" class="form-row">
           <div class="form-group flex-1">
             <label class="form-label">
               {{ trans.turnstileSiteKey }}
@@ -234,22 +247,10 @@
           </div>
         </div>
 
-        <div class="form-group mt-3">
-          <label class="form-label">
-            {{ trans.jwtSecret }}
-            <HelpTooltip :text="trans.jwtSecretTip" />
-          </label>
-          <div class="password-input-wrapper">
-            <input type="text" name="jwt_secret" autocomplete="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" data-form-type="other" v-model="settings.jwt_secret" :class="['form-input', { 'secret-input-masked': !passwordVisible.jwtSecret }]" placeholder="••••••••••••••••••••••••••••••••">
-            <button type="button" class="password-toggle" @click="$emit('toggle-password', 'jwtSecret')">
-              <AppIcon :name="passwordVisible.jwtSecret ? 'eye-off' : 'eye'" :size="15" />
-            </button>
-          </div>
-        </div>
       </div>
 
       <!-- 4. 探针自动注册 (Auto Register Settings) -->
-      <div class="settings-section">
+      <div id="auto-register-settings" class="settings-section">
         <div class="section-title">
           <AppIcon name="radio" :size="16" />
           <span>{{ trans.autoRegisterSettings || '自动注册设置' }}</span>
@@ -269,79 +270,10 @@
           </div>
         </div>
 
-        <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">
-              {{ trans.autoRegisterToken || '授权 Key (有效期 30 分钟)' }}
-              <HelpTooltip :text="trans.autoRegisterTokenTip || '用于探针自动注册时的身份验证，有效期 30 分钟。过期后新节点将无法注册，需点击重新生成。'" />
-            </label>
-            <div class="password-input-wrapper">
-              <input
-                type="text"
-                readonly
-                :value="settings.auto_register_token || ''"
-                :class="['form-input', { 'secret-input-masked': !passwordVisible.autoRegisterToken }]"
-                :placeholder="trans.autoRegisterTokenNotGenerated || '未生成授权 Key'"
-              >
-              <button
-                type="button"
-                class="password-toggle"
-                @click="$emit('toggle-password', 'autoRegisterToken')"
-              >
-                <AppIcon :name="passwordVisible.autoRegisterToken ? 'eye-off' : 'eye'" :size="15" />
-              </button>
-            </div>
-          </div>
-
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.autoRegisterTokenExpires || '授权状态' }}</label>
-            <div class="flex" style="gap: 8px; align-items: center; min-height: 38px;">
-              <div class="flex-1">
-                <span v-if="tokenStatus.isExpired" class="config-badge is-disabled" style="font-size: 12px; padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px;">
-                  <AppIcon name="alert-triangle" :size="13" /> {{ trans.autoRegisterTokenExpired || '已过期（需重新生成）' }}
-                </span>
-                <span v-else-if="tokenStatus.isValid" class="config-badge is-enabled" style="font-size: 12px; padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px;">
-                  <AppIcon name="check-circle" :size="13" /> {{ trans.autoRegisterTokenValid || '有效至' }}: {{ tokenStatus.formattedExpires }} ({{ tokenStatus.remainingMinutes }})
-                </span>
-                <span v-else class="config-badge" style="background: var(--bg-hover); color: var(--text-muted); border: 1px solid var(--border-color); font-size: 12px; padding: 4px 8px; display: inline-flex; align-items: center; gap: 4px;">
-                  <AppIcon name="circle" :size="13" /> {{ trans.autoRegisterTokenNotGenerated || '未生成' }}
-                </span>
-              </div>
-              <button
-                type="button"
-                class="btn btn-blue"
-                style="margin: 0; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px;"
-                :disabled="generatingAutoRegisterToken"
-                @click="$emit('generate-auto-register-token')"
-              >
-                <AppIcon :name="generatingAutoRegisterToken ? 'spinner' : 'key'" :size="14" />
-                {{ settings.auto_register_token ? (trans.regenerateToken || '重新生成') : (trans.generateToken || '生成授权 Key') }}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="settings.auto_register_enabled" class="form-row mt-2">
-          <div class="form-group flex-1">
-            <div class="flex-center-gap-sm" style="justify-content: flex-start; gap: 12px; align-items: center;">
-              <button
-                type="button"
-                class="btn btn-primary"
-                style="margin: 0; display: inline-flex; align-items: center; gap: 6px;"
-                :disabled="tokenStatus.isExpired || !settings.auto_register_token"
-                @click="$emit('open-auto-discovery')"
-              >
-                <AppIcon name="terminal" :size="14" /> {{ trans.autoDiscoveryTitle || '生成自动注册部署脚本' }}
-              </button>
-              <span v-if="tokenStatus.isExpired" class="text-sm text-danger" style="display: inline-flex; align-items: center; gap: 4px;">
-                <AppIcon name="alert-triangle" :size="14" /> {{ trans.autoRegisterTokenExpiredAlert || '授权 Key 已过期，请先重新生成授权 Key' }}
-              </span>
-              <span v-else-if="!settings.auto_register_token" class="text-sm text-muted" style="display: inline-flex; align-items: center; gap: 4px;">
-                <AppIcon name="info" :size="14" /> {{ trans.autoRegisterTokenNotGenerated || '请先生成授权 Key 即可生成部署脚本' }}
-              </span>
-            </div>
-          </div>
-        </div>
+        <p class="text-muted text-sm">{{ trans.autoRegisterManageHint }}</p>
+        <button type="button" class="btn" @click="$emit('open-auto-discovery')">
+          <AppIcon name="terminal" :size="14" /> {{ trans.manageProbeDeployment }}
+        </button>
       </div>
 
       <!-- 5. 管理员登录设置 (Admin Login Settings) -->
@@ -420,7 +352,7 @@
       </div>
 
       <!-- 6. 网络探测节点 (Ping Nodes) -->
-      <div class="settings-section">
+      <div class="settings-section full-width">
         <div class="section-title">
           <AppIcon name="radio" :size="16" />
           <span>{{ trans.pingNodes }}</span>
@@ -847,30 +779,33 @@
     </div>
 
     <!-- 保存设置按钮 -->
-    <div class="text-right mt-5 mb-5">
+    <div v-show="settingsView === 'configuration'" class="settings-save-bar">
       <button @click="$emit('save-settings')" class="btn btn-primary btn-lg" :disabled="saving || hasPingNodeErrors" style="display: inline-flex; align-items: center; gap: 8px;">
         <AppIcon :name="saving ? 'spinner' : 'save'" :size="16" />
         <span>{{ saving ? trans.saving : trans.saveConfig }}</span>
       </button>
     </div>
 
-    <!-- 系统数据维护 (DB Management & Export/Import) -->
-    <div class="settings-grid mt-4">
+    <!-- Maintenance actions save independently of the general settings form. -->
+    <div v-if="settingsView === 'maintenance'" class="settings-grid settings-maintenance">
+      <CloudflareUsagePanel :key="selectedApiIndex" :trans="trans" :selected-api-index="selectedApiIndex" />
+      <div class="settings-section">
+        <div class="section-title"><AppIcon name="key" :size="16" /><span>{{ trans.loginKeyMaintenance }}</span></div>
+        <p class="text-muted text-sm">{{ trans.loginKeyMaintenanceHint }}</p>
+        <button type="button" class="btn" :disabled="dbLoading" @click="$emit('open-db-modal', 'rotateKey')">{{ trans.rotateLoginKey }}</button>
+      </div>
       <div class="settings-section">
         <div class="section-title">
           <AppIcon name="database" :size="16" />
           <span>{{ trans.dbManagement }}</span>
         </div>
+        <p class="text-muted text-sm">{{ trans.databaseAutoMigrationHint }}</p>
+        <details class="settings-advanced">
+          <summary>{{ trans.databaseRepairTools }}</summary>
+          <p class="text-muted text-sm">{{ trans.databaseRepairHint }}</p>
+          <button type="button" class="btn" :disabled="dbLoading" @click="$emit('open-db-modal', 'upgrade')">{{ trans.runDatabaseRepair }}</button>
+        </details>
         <div class="form-row">
-          <div class="form-group flex-1">
-            <label class="form-label">{{ trans.upgradeDatabase }}</label>
-            <p class="text-muted mb-2 text-sm">{{ trans.upgradeDesc }}</p>
-            <button type="button" @click="$emit('open-db-modal', 'upgrade')" class="btn btn-primary btn-lg" :disabled="dbLoading" style="display: inline-flex; align-items: center; gap: 6px;">
-              <AppIcon name="arrow-up" :size="15" />
-              <span>{{ trans.upgradeDatabase }}</span>
-            </button>
-          </div>
-
           <div class="form-group flex-1">
             <label class="form-label danger-label" style="display: inline-flex; align-items: center; gap: 4px;">
               <AppIcon name="alert-triangle" :size="14" />
@@ -944,6 +879,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import AppIcon from '../../../components/AppIcon.vue'
 import HelpTooltip from '../../../components/HelpTooltip.vue'
+import ThemeStorePanel from './ThemeStorePanel.vue'
+import CloudflareUsagePanel from './CloudflareUsagePanel.vue'
 import { FRONTEND_WS_TIMEOUT_MINUTES_MAX, HISTORY } from '../../../utils/constants.js'
 import { PING_NODE_FIELDS, validatePingNode } from '../../../utils/pingNode.js'
 import { adminApi } from '../../../utils/api.js'
@@ -959,7 +896,6 @@ const props = defineProps({
   saving: { type: Boolean, default: false },
   changeAdminPassword: { type: Boolean, default: false },
   testNotificationLoading: { type: Boolean, default: false },
-  generatingAutoRegisterToken: { type: Boolean, default: false },
   dbLoading: { type: Boolean, default: false },
   selectedApiIndex: { type: Number, default: 0 }
 })
@@ -968,43 +904,26 @@ const emit = defineEmits([
   'toggle-password', 'toggle-admin-password-change',
   'save-settings', 'upload-bg', 'upload-bg-mobile', 'upload-favicon',
   'send-test-notification', 'open-db-modal',
-  'alert-message', 'generate-auto-register-token', 'open-auto-discovery'
+  'alert-message', 'open-auto-discovery', 'theme-applied', 'theme-options-applied'
 ])
 
-const currentTime = ref(Date.now())
-let autoRegTimer = null
-
-onMounted(() => {
-  autoRegTimer = setInterval(() => {
-    currentTime.value = Date.now()
-  }, 10000)
-})
-
-onBeforeUnmount(() => {
-  if (autoRegTimer) clearInterval(autoRegTimer)
-})
-
-const tokenStatus = computed(() => {
-  const token = props.settings?.auto_register_token
-  const expires = Number(props.settings?.auto_register_token_expires) || 0
-  if (!token || !expires) {
-    return { isValid: false, isExpired: false, isEmpty: true }
-  }
-  const now = currentTime.value
-  if (now > expires) {
-    return { isValid: false, isExpired: true, isEmpty: false }
-  }
-  const diffSec = Math.floor((expires - now) / 1000)
-  const remainingMinutes = Math.max(1, Math.ceil(diffSec / 60))
-  const date = new Date(expires)
-  const pad = n => String(n).padStart(2, '0')
-  const formattedExpires = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
-  return {
-    isValid: true,
-    isExpired: false,
-    isEmpty: false,
-    formattedExpires,
-    remainingMinutes: `${remainingMinutes}m`
+const settingsView = ref('configuration')
+const themeStoreOpen = ref(false)
+const appearanceAdvanced = ref(null)
+const revealAppearanceAdvanced = () => {
+  settingsView.value = 'configuration'
+  if (appearanceAdvanced.value) appearanceAdvanced.value.open = true
+}
+const showRegistrationSettings = async () => {
+  settingsView.value = 'configuration'
+  await nextTick()
+  document.getElementById('auto-register-settings')?.scrollIntoView({ block: 'center' })
+}
+const turnstileScope = computed({
+  get: () => props.settings.turnstile_enabled ? 'site' : props.settings.turnstile_login_enabled ? 'login' : 'off',
+  set: (value) => {
+    props.settings.turnstile_enabled = value === 'site'
+    props.settings.turnstile_login_enabled = value === 'login'
   }
 })
 
@@ -1598,6 +1517,7 @@ const validateCspField = (field) => {
   const domains = value.split(',').map(s => s.trim()).filter(Boolean)
   for (const domain of domains) {
     if (!isValidCspOrigin(domain)) {
+      revealAppearanceAdvanced()
       cspErrors[field] = props.trans.cspInvalidDomain || 'Each domain must start with https://'
       return false
     }
@@ -1614,5 +1534,5 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', closeResourceAlertServerDropdowns)
 })
 
-defineExpose({ validateCspField, cspErrors, validatePingNodes, pingNodeErrors, validateSmtpFields, smtpErrors })
+defineExpose({ showRegistrationSettings, revealAppearanceAdvanced, validateCspField, cspErrors, validatePingNodes, pingNodeErrors, validateSmtpFields, smtpErrors })
 </script>

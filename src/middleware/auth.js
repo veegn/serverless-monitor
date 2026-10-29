@@ -1,7 +1,7 @@
 import { logError } from '../utils/observability.js';
 const ALGORITHM = { name: 'HMAC', hash: 'SHA-256' };
 import { verifyPasswordHash } from '../utils/common.js';
-import { isValidJwtSecret } from '../utils/settings.js';
+import { isValidJwtSecret, loadSettingsScope } from '../utils/settings.js';
 
 export const AUTH_COOKIE_NAME = 'cfsm_auth';
 const TOKEN_QUERY_KEYS = ['token', 'auth_token', 'ws_token'];
@@ -120,10 +120,30 @@ export async function generateToken(env, sys) {
 }
 
 export async function checkAuth(request, env, sys) {
-  if (await verifyToken(extractBearerToken(request), env, sys)) {
-    return true;
+  const tokens = [extractBearerToken(request), getCookieValue(request, AUTH_COOKIE_NAME)];
+  for (const token of tokens) {
+    if (await verifyToken(token, env, sys)) return true;
   }
-  return verifyToken(getCookieValue(request, AUTH_COOKIE_NAME), env, sys);
+  // A newly renewed session may reach another isolate with the previous key cached.
+  if (await refreshSigningKey(tokens, env, sys)) {
+    for (const token of tokens) {
+      if (await verifyToken(token, env, sys)) return true;
+    }
+  }
+  return false;
+}
+
+async function refreshSigningKey(tokens, env, sys) {
+  if (!env?.DB || !sys || !tokens.some(token => typeof token === 'string' && token.split('.').length === 3)) return false;
+  try {
+    const fresh = await loadSettingsScope(env.DB, 'access', { forceRefresh: true });
+    if (fresh.jwt_secret === sys.jwt_secret) return false;
+    sys.jwt_secret = fresh.jwt_secret;
+    return true;
+  } catch (error) {
+    logError('auth', 'auth.key_refresh.failed', 'Signing key refresh failed', error, {}, 'warn');
+    return false;
+  }
 }
 
 export async function checkWebSocketAuth(request, env, sys) {
@@ -134,12 +154,15 @@ export async function getWebSocketIdentity(request, env, sys) {
   const url = new URL(request.url);
   const tokens = [extractBearerToken(request), getCookieValue(request, AUTH_COOKIE_NAME),
     ...TOKEN_QUERY_KEYS.map(key => url.searchParams.get(key))];
-  for (const token of tokens) {
-    if (!token) continue;
-    const payload = await verifyJwt(token, getJwtSecret(env, sys));
-    if (payload?.sub === 'admin' && Number.isFinite(payload.exp) && payload.exp * 1000 > Date.now()) {
-      return { authenticated: true, expiresAt: payload.exp * 1000, token };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    for (const token of tokens) {
+      if (!token) continue;
+      const payload = await verifyJwt(token, getJwtSecret(env, sys));
+      if (payload?.sub === 'admin' && Number.isFinite(payload.exp) && payload.exp * 1000 > Date.now()) {
+        return { authenticated: true, expiresAt: payload.exp * 1000, token };
+      }
     }
+    if (attempt > 0 || !await refreshSigningKey(tokens, env, sys)) break;
   }
   return { authenticated: false, expiresAt: null };
 }

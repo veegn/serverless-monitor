@@ -1,7 +1,7 @@
 import { logEvent, logError, setLogContext } from '../utils/observability.js';
 import { buildAuthCookie, buildClearAuthCookie, checkAuth, simpleAuthResponse, validateCredentials, generateToken } from '../middleware/auth.js';
 import { getAllServers, clearServersListCache } from '../utils/cache.js';
-import { isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, saveSettings, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
+import { generateRandomSecret, isValidThemeOptions, isWssReportConfigured, isWssReportEnabled, normalizeBooleanSetting, normalizeDefaultLanguage, normalizeDisplayMode, normalizeExpireNotificationTime, normalizeExpireReminder, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, normalizeNotificationLanguage, normalizeNotificationTemplate, normalizeNotificationTimezone, normalizeNotificationWebhookBody, normalizeNotificationWebhookFormat, normalizeNotificationWebhookHeaders, normalizeNotificationWebhookMethod, normalizePreferredTheme, normalizeResourceAlertRules, normalizeTgNotify, saveSettings, saveSiteOptions, saveThemeOptions, SITE_FIELDS, APPEARANCE_FIELDS } from '../utils/settings.js';
 import { mergeMetricsIntoServer } from '../utils/metrics.js';
 import { normalizePctOrNull } from '../utils/traffic.js';
 import { verifyTurnstileToken, hashPassword } from '../utils/common.js';
@@ -556,6 +556,26 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
   });
 }
 
+  static async handleRotateJwtSecretAction({ request, env, sys }) {
+  const jwtSecret = generateRandomSecret(32);
+  const nextSettings = { ...sys, jwt_secret: jwtSecret };
+  // Prepare the replacement session before committing the new signing key.
+  const token = await generateToken(env, nextSettings);
+  await saveSettings(env.DB, { jwt_secret: jwtSecret });
+  sys.jwt_secret = jwtSecret;
+  try {
+    await notifyFrontendAccessChanged(env);
+  } catch (error) {
+    logError('auth', 'auth.key_rotation.broadcast_failed', 'Login key rotated; frontend access refresh failed', error);
+  }
+  logEvent('auth', 'auth.key_rotated', 'Login signing key rotated');
+  return AdminController.createSuccessResponseWithCookies({
+    success: true,
+    token,
+    message: 'loginKeyRotated'
+  }, [buildAuthCookie(request, token), AdminController.buildClearThemePreviewAuthCookie(request)]);
+}
+
   static async handleStartThemePreviewAction({ request, data }) {
   const normalizedThemeUrl = AdminController.normalizeThemeUrl(data.theme_url);
   if (!normalizedThemeUrl) {
@@ -720,6 +740,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
   get_settings: AdminController.handleGetSettingsAction,
   start_theme_preview: AdminController.handleStartThemePreviewAction,
   save_theme_options: AdminController.handleSaveThemeOptionsAction,
+  rotate_jwt_secret: AdminController.handleRotateJwtSecretAction,
   list: AdminController.handleListAction,
   d1_usage: AdminController.handleD1UsageAction,
   send_test_notification: AdminController.handleSendTestNotificationAction,
@@ -742,7 +763,7 @@ static PING_NODE_FIELDS = ['custom_ct', 'custom_cu', 'custom_cm', 'custom_bd', '
 
     const authenticatedActionHandler = AdminController.AUTHENTICATED_ADMIN_ACTION_HANDLERS[data.action];
     if (authenticatedActionHandler) {
-      return authenticatedActionHandler({ request, env, sys, data, loadFullSettings, ctx });
+      return await authenticatedActionHandler({ request, env, sys, data, loadFullSettings, ctx });
     }
 
     if (data.action === 'save_settings') {
