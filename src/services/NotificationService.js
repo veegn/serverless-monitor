@@ -1,4 +1,4 @@
-import { readNotificationRuntimeState, saveNotificationRuntimeState, clearNotificationRuntimeState, claimTrafficNotification, finishTrafficNotification, releaseTrafficNotification, resetTrafficNotification, readTrafficNotification } from '../database/NotificationStateRepository.js';
+import { readNotificationRuntimeState, readNotificationRuntimeStates, saveNotificationRuntimeState, clearNotificationRuntimeState, claimTrafficNotification, finishTrafficNotification, releaseTrafficNotification, resetTrafficNotification, readTrafficNotification } from '../database/NotificationStateRepository.js';
 import { logEvent, logError, correlationHeaders } from '../utils/observability.js';
 import { clearServersListCache, getAllServers } from '../utils/cache.js';
 import {
@@ -31,7 +31,8 @@ import {
   NOTIFICATION_RETRY_DELAY_MS,
   RESOURCE_ALERT_EVALUATE_RULE_BATCH_SIZE,
   RESOURCE_ALERT_EVALUATE_SERVER_BATCH_SIZE,
-  RESOURCE_ALERT_NOTIFICATION_SOFT_LIMIT
+  RESOURCE_ALERT_NOTIFICATION_SOFT_LIMIT,
+  SITE_SETTINGS_CACHE_TTL_MS
 } from '../utils/config.js';
 import { getNotificationMessages } from './notificationMessages.js';
 
@@ -47,7 +48,7 @@ export class NotificationService {
   static TRAFFIC_ALERT_STATE_KEY = 'traffic_alert_state';
   static TRAFFIC_ALERT_RESET_FACTOR = 0.5;
   static SMTP_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  static resourceAlertStateKnownEmpty = false;
+  static resourceAlertStateKnownEmpty = new WeakMap();
 
   constructor(env) {
     this.env = env;
@@ -63,12 +64,31 @@ export class NotificationService {
     return NotificationService.evaluateTrafficAlert(this.env, server, metrics, hooks);
   }
 
-  async checkOfflineNodes(db = this.env?.DB) {
-    return NotificationService.checkOfflineNodes(db, this.env);
+  async checkOfflineNodes(db = this.env?.DB, options = {}) {
+    return NotificationService.checkOfflineNodes(db, this.env, options);
   }
 
   async checkResourceAlerts(options = {}) {
     return NotificationService.checkResourceAlerts(this.env, options);
+  }
+
+  async checkMinuteAlerts(options = {}) {
+    const db = this.env?.DB;
+    if (!db || !this.env?.METRICS_BROADCASTER) return;
+    const settings = await loadSettingsScope(db, 'notifications');
+    if (!NotificationService.hasNotificationTarget(settings)) return;
+    const offlineEnabled = getTgNotifyMinutes(settings.tg_notify) > 0;
+    // Keep these reads lazy: disabled checks do not load nodes or runtime state.
+    // The snapshot lasts for this inspection only; state is read again next minute.
+    let servers, runtime;
+    const shared = {
+      ...options,
+      settings,
+      loadServers: () => servers ||= getAllServers(db, true, { scope: offlineEnabled ? 'offline' : 'resource' }),
+      loadRuntimeState: async key => (await (runtime ||= readNotificationRuntimeStates(db)))[key] || null
+    };
+    await this.checkOfflineNodes(db, shared);
+    await this.checkResourceAlerts(shared);
   }
 
   async checkExpiringServers(options = {}, db = this.env?.DB) {
@@ -206,14 +226,14 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   static async clearResourceAlertState(db) {
   if (!db) return false;
   const result = await clearNotificationRuntimeState(db, NotificationService.RESOURCE_ALERT_STATE_KEY);
-  NotificationService.resourceAlertStateKnownEmpty = true;
+  NotificationService.resourceAlertStateKnownEmpty.set(db, Date.now() + SITE_SETTINGS_CACHE_TTL_MS);
   return NotificationService.getD1Changes(result) > 0;
 }
 
   static async saveResourceAlertState(db, configSignature, alertState, hadStoredState) {
   if (NotificationService.hasResourceAlertStateEntries(alertState)) {
     await saveNotificationRuntimeState(db, NotificationService.RESOURCE_ALERT_STATE_KEY, { signature: configSignature, servers: alertState });
-    NotificationService.resourceAlertStateKnownEmpty = false;
+    NotificationService.resourceAlertStateKnownEmpty.delete(db);
     return;
   }
 
@@ -221,6 +241,16 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     await NotificationService.clearResourceAlertState(db);
   }
 }
+
+  static async clearResourceAlertStateIfPresent(db, options = {}) {
+    if ((NotificationService.resourceAlertStateKnownEmpty.get(db) || 0) > Date.now()) return false;
+    const state = options.loadRuntimeState
+      ? await options.loadRuntimeState(NotificationService.RESOURCE_ALERT_STATE_KEY)
+      : await readNotificationRuntimeState(db, NotificationService.RESOURCE_ALERT_STATE_KEY);
+    if (state) return NotificationService.clearResourceAlertState(db);
+    NotificationService.resourceAlertStateKnownEmpty.set(db, Date.now() + SITE_SETTINGS_CACHE_TTL_MS);
+    return false;
+  }
 
   static getResourceAlertStateStatus(state) {
   if (!state || typeof state !== 'object') return NotificationService.RESOURCE_ALERT_STATE_ACTIVE;
@@ -1070,14 +1100,14 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   }
 }
 
-  static async checkOfflineNodes(db, env) {
-  const siteSettings = await loadSettingsScope(db, 'notifications');
+  static async checkOfflineNodes(db, env, options = {}) {
+  const siteSettings = options.settings || await loadSettingsScope(db, 'notifications');
   const tgNotifyMinutes = getTgNotifyMinutes(siteSettings.tg_notify);
 
   if (tgNotifyMinutes === 0 || !NotificationService.hasNotificationTarget(siteSettings)) return;
 
   try {
-    const allServers = await getAllServers(db, true, { scope: 'offline' });
+    const allServers = options.loadServers ? await options.loadServers() : await getAllServers(db, true, { scope: 'offline' });
     
     if (!env?.METRICS_BROADCASTER) return;
     const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
@@ -1094,7 +1124,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     }
 
     let alertState = {};
-    const stateRes = await readNotificationRuntimeState(db, 'alert_state');
+    const stateRes = options.loadRuntimeState ? await options.loadRuntimeState('alert_state') : await readNotificationRuntimeState(db, 'alert_state');
     
     if (stateRes) {
       try {
@@ -1175,25 +1205,20 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
   if (!env?.DB || !env?.METRICS_BROADCASTER) return;
 
   const db = env.DB;
-  const minute = Number.isFinite(options?.minute) ? options.minute : new Date().getUTCMinutes();
-  // 每 2 分钟强制刷新一次设置，其余分钟复用缓存（TTL 120s），降低每分钟的 CPU 开销
-  const forceRefresh = minute % 2 === 0;
-  const siteSettings = await loadSettingsScope(db, 'notifications', { forceRefresh });
+  const siteSettings = options.settings || await loadSettingsScope(db, 'notifications');
   if (!NotificationService.hasNotificationTarget(siteSettings)) return;
 
   const resourceConfig = getResourceAlertConfig(siteSettings);
 
   if (!resourceConfig.enabled || !resourceConfig.hasRules) {
-    if (!NotificationService.resourceAlertStateKnownEmpty) {
-      await NotificationService.clearResourceAlertState(db);
-    }
+    await NotificationService.clearResourceAlertStateIfPresent(db, options);
     return;
   }
 
   try {
-    const allServers = await getAllServers(db, true, { scope: 'resource' });
+    const allServers = options.loadServers ? await options.loadServers() : await getAllServers(db, true, { scope: 'resource' });
     if (allServers.length === 0) {
-      await NotificationService.clearResourceAlertState(db);
+      await NotificationService.clearResourceAlertStateIfPresent(db, options);
       return;
     }
 
@@ -1239,7 +1264,7 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     }
 
     if (configuredRuleServers.length === 0) {
-      await NotificationService.clearResourceAlertState(db);
+      await NotificationService.clearResourceAlertStateIfPresent(db, options);
       return;
     }
 
@@ -1257,7 +1282,9 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
       }
     }
 
-    const stateRow = await readNotificationRuntimeState(db, NotificationService.RESOURCE_ALERT_STATE_KEY);
+    const stateRow = options.loadRuntimeState ? await options.loadRuntimeState(NotificationService.RESOURCE_ALERT_STATE_KEY)
+      : await readNotificationRuntimeState(db, NotificationService.RESOURCE_ALERT_STATE_KEY);
+    if (stateRow) NotificationService.resourceAlertStateKnownEmpty.delete(db);
     const hadStoredState = !!stateRow;
     const parsedState = NotificationService.parseResourceAlertState(stateRow);
     let alertState = parsedState.servers || {};

@@ -188,8 +188,7 @@ test('allowed cross-origin clients can read request IDs without duplicating expo
 test('cron detects failures handled inside a task instead of reporting a false successful run', async t => {
   const calls = capture(t);
   const app = new ServerlessMonitorApp({});
-  app.notificationService.checkOfflineNodes = async () => logError('alert', 'alert.offline.failed', 'Offline check failed', new Error('DB unavailable'));
-  app.notificationService.checkResourceAlerts = async () => {};
+  app.notificationService.checkMinuteAlerts = async () => logError('alert', 'alert.offline.failed', 'Offline check failed', new Error('DB unavailable'));
   await app.scheduled({ cron: '*/1 * * * *', scheduledTime: Date.now() });
   const result = calls.find(call => call.entry.event === 'cron.completed').entry;
   assert.equal(result.outcome, 'partial_failure');

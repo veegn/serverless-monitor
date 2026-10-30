@@ -59,15 +59,27 @@ const initialized = new WeakMap();
 export function ensureGroupedSettings(db, defaults, attempt = 0) {
   if (initialized.has(db)) return initialized.get(db);
   const promise = (async () => {
-    let marker;
-    try { marker = await db.prepare("SELECT value FROM settings WHERE key='settings.schema'").first(); }
+    let marker, version;
+    try {
+      // A completed database needs one metadata read on a cold binding.
+      const row = await db.prepare(`SELECT
+        (SELECT value FROM settings WHERE key='settings.schema') AS value,
+        (SELECT COALESCE(MAX(version),0) FROM schema_migrations WHERE component='settings') AS migration_version`).first();
+      marker = row?.value == null ? null : row;
+      version = Number(row?.migration_version || 0);
+      if (version > 2) throw new AppError('Unsupported settings schema version', 503);
+    }
     catch (error) {
-      if (!/no such table: settings/i.test(error.message)) throw error;
-      await db.prepare('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY NOT NULL,value TEXT)').run();
+      if (!/no such table: (settings|schema_migrations)/i.test(error.message)) throw error;
+      try { marker = await db.prepare("SELECT value FROM settings WHERE key='settings.schema'").first(); }
+      catch (error) {
+        if (!/no such table: settings/i.test(error.message)) throw error;
+        await db.prepare('CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY NOT NULL,value TEXT)').run();
+      }
+      version = await migrationVersion(db, 'settings', 2);
     }
     const schema = marker ? objectValue(marker.value, SCHEMA_KEY).version : 0;
     if (![0, 1, 2].includes(schema)) throw new AppError('Unsupported settings storage version', 503);
-    const version = await migrationVersion(db, 'settings', 2);
     if (version === 2 && schema === 2) return;
     const statements = [];
     if (!marker) {

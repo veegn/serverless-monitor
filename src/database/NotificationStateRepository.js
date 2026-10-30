@@ -31,6 +31,13 @@ export async function readNotificationRuntimeState(db, key) {
   return db.prepare('SELECT value,revision FROM notification_runtime_state WHERE key=?').bind(key).first();
 }
 
+export async function readNotificationRuntimeStates(db) {
+  await ensureNotificationStateSchema(db);
+  const { results = [] } = await db.prepare('SELECT key,value,revision FROM notification_runtime_state WHERE key IN (?,?)')
+    .bind(...RUNTIME_KEYS).all();
+  return Object.fromEntries(results.map(row => [row.key, row]));
+}
+
 export async function saveNotificationRuntimeState(db, key, value) {
   if (!RUNTIME_KEYS.includes(key)) throw new AppError('Invalid notification state key', 400);
   await ensureNotificationStateSchema(db);

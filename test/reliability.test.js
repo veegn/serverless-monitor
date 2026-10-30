@@ -193,11 +193,10 @@ test('Sunday maintenance no longer suppresses minute-level offline and resource 
   const app = new ServerlessMonitorApp({ DB: {} });
   const calls = [];
   app.notificationService = {
-    async checkOfflineNodes() { calls.push('offline'); },
-    async checkResourceAlerts(options) { calls.push(`resources:${options.minute}`); }
+    async checkMinuteAlerts(options) { calls.push(`minute:${options.minute}`); }
   };
   await app.scheduled({ cron: '*/1 * * * *', scheduledTime: Date.UTC(2026, 9, 25, 0, 2) });
-  assert.deepEqual(calls, ['offline', 'resources:2']);
+  assert.deepEqual(calls, ['minute:2']);
 });
 
 test('large subscriptions persist outside the attachment and survive a new session manager', async () => {

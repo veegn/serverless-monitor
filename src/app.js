@@ -440,8 +440,7 @@ export class ServerlessMonitorApp {
     const minute = now.getUTCMinutes();
 
     if (cron === '*/1 * * * *') {
-      await this.notificationService.checkOfflineNodes(this.db);
-      await this.notificationService.checkResourceAlerts({ minute });
+      await this.notificationService.checkMinuteAlerts({ minute });
     } else if (cron === '0 * * * *') {
       if (day === 0 && hour === 0) {
         debug('[Cron] 开始执行每周数据清理任务（表轮换）');
