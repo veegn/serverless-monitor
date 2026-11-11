@@ -168,6 +168,54 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
     assert.equal((await post('/update', invalidBatch)).status, 400);
     assert.equal((await sendAgentReport(adaptiveBatch)).acceptedSamples, 1, 'failed reports leave the socket usable');
 
+    await post('/test/fail-writes', {});
+    await post('/test/fail-aux-writes', {});
+    const degradedResponse = await mf.dispatchFetch('https://monitor.test/ws?subscribe=all', { headers: { Upgrade: 'websocket' } });
+    assert.equal(degradedResponse.status, 101, 'panel connects even when KV and Alarm writes fail');
+    const degradedPanel = degradedResponse.webSocket;
+    sockets.push(degradedPanel);
+    degradedPanel.accept();
+    await post('/test/forget-sessions', {});
+    const liveBroadcast = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('Live broadcast did not reach the panel')), 5000);
+      const listener = event => {
+        const message = JSON.parse(event.data);
+        if (!message.updates?.some(update => update.samples.some(sample => sample.data.cpu === 93))) return;
+        clearTimeout(timer);
+        degradedPanel.removeEventListener('message', listener);
+        resolve(message);
+      };
+      degradedPanel.addEventListener('message', listener);
+    });
+    const liveWithoutWrites = { ...liveReport, reportId: 'live-without-writes',
+      time: { local_ts: now + 4000 }, metrics: { cpu: 93 } };
+    const memoryAck = await sendAgentReport(liveWithoutWrites);
+    assert.equal(memoryAck.accepted, true);
+    assert.equal(memoryAck.persisted, undefined);
+    await liveBroadcast;
+    const liveState = await latestState();
+    assert.equal(liveState.samples[0].data.cpu, 93, 'page reload reads the latest in-memory snapshot');
+    const heartbeat = await (await post('/latest-timestamps', { serverIds: ['visible'] })).json();
+    assert.ok(heartbeat.timestamps.visible >= liveState.reportTs, 'offline checks see the live receipt');
+    assert.deepEqual(await readHistory(), beforeInvalid, 'committed history remains readable during quota exhaustion');
+    assert.equal((await mf.dispatchFetch('https://monitor.test/ws?subscribe=hidden', { headers: { Upgrade: 'websocket' } })).status, 403);
+
+    const pending = { ...adaptiveBatch, reportId: 'pending-after-quota',
+      time: { local_ts: now + 3500 }, samples: [{ ts: now - 360_000, metrics: { cpu: 39 } }] };
+    assert.equal((await sendAgentReport(pending)).persisted, false);
+    assert.deepEqual(await readHistory(), beforeInvalid);
+    await post('/test/restore-writes', {});
+    await post('/test/restore-aux-writes', {});
+    const replayed = await sendAgentReport(pending);
+    assert.equal(replayed.persisted, true);
+    assert.equal(replayed.acceptedSamples, 1);
+    await post('/test/forget-latest', {});
+    const checkpoint = await latestState();
+    assert.equal(checkpoint.samples[0].data.cpu, 93, 'the history retry also checkpoints the newer live snapshot');
+    assert.equal(checkpoint.reportTs, liveState.reportTs, 'checkpoint retains the actual snapshot receipt time');
+    assert.ok((await readHistory()).some(point => point.cpu === 39));
+    degradedPanel.close();
+
     await post('/test/legacy', { serverId: 'legacy', points: [{ timestamp: now - 120_000, cpu: 42 }] });
     const legacy = await (await mf.dispatchFetch('https://monitor.test/history?serverId=legacy&hours=1')).json();
     assert.equal(legacy.data[0].cpu, 42);

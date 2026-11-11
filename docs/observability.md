@@ -33,7 +33,7 @@ Worker、Durable Object、HTTP/WSS 上报、定时任务和通知使用同一套
 
 Worker 的普通 HTTP 响应携带 `X-Request-ID`，允许的跨域前端也可以读取该响应头。内部 DO 请求和每次提交重试沿用此 ID；不把完整 URL、查询参数或整个请求头写入应用日志。上下文通过异步局部存储隔离，避免并发请求串用节点、请求 ID 或日志级别。
 
-WSS 使用 `connectionId` 关联同一连接的握手、鉴权、上报和断开。每次消息回调另有自己的 `requestId`，而 `connectionId` 跨休眠回调保留；前端使用现有持久会话 ID，Agent 使用小型连接附件。升级响应 `101` 保持原 WebSocket 对象，不重新包装响应。
+WSS 使用 `connectionId` 关联同一连接的握手、鉴权、上报和断开。每次消息回调另有自己的 `requestId`，而 `connectionId` 通过连接附件跨休眠回调保留。升级响应 `101` 保持原 WebSocket 对象，不重新包装响应。
 
 ## 默认日志量与配置
 
@@ -72,7 +72,7 @@ DO 在内存中汇总报告，在后续上报跨越分钟边界时输出 `metric
 | `metrics.summary` | 已确认报告的分钟汇总 |
 | `metrics.committed` | debug 下的单次提交，包含 `serverId/reportId/duplicate/durationMs` |
 | `metrics.commit.failed` | 指标提交失败，查看 `error`、`persisted`、`status`、`attempt` |
-| `metrics.maintenance.failed` | 指标已经提交，但维护调度失败；重试仍安全 |
+| `metrics.maintenance.failed` | 维护 Alarm 排程失败，下次上报或连接会在退避后尝试排程 |
 | `metrics.commit.retry` | Worker 尚未收到持久化确认，包含 `attempt/nextAttempt/retryAfterMs` |
 | `metrics.commit.recovered` | 重试后提交成功，包含 `attempts/persisted` |
 | `metrics.commit.slow` | 指标提交已确认但耗时较长 |

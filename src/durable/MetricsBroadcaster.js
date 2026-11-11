@@ -11,7 +11,7 @@
 // - 前端订阅连接与 Agent 上报连接均使用 DO WebSocket Hibernation API，闲置时休眠以节省资源。
 //   通过 setWebSocketAutoResponse 自动响应 ping，无需唤醒 DO。
 
-import { SqlMetricsStore } from './SqlMetricsStore.js';
+import { SqlMetricsStore, REPORT_RETENTION_MS } from './SqlMetricsStore.js';
 import { ReportReplayCache } from '../utils/ReportReplayCache.js';
 import { getLatestReportSampleTimestamp } from '../utils/latestReportCache.js';
 import { reportFingerprint } from '../utils/reportFingerprint.js';
@@ -83,6 +83,14 @@ const RESOURCE_ALERT_MODE_AVERAGE = 'average';
 const RESOURCE_ALERT_MODE_CONTINUOUS = 'continuous';
 const MODE_REVISION_STORAGE_KEY = 'agent_mode_revision';
 const MODE_STATE_STORAGE_KEY = 'agent_mode_state';
+const MAX_LIVE_REPORT_IDS = 10_000;
+
+function validateReportId(reportId) {
+  if (reportId !== null && (typeof reportId !== 'string' || reportId.length === 0 || reportId.length > 128)) {
+    throw new AppError('Invalid reportId', 400);
+  }
+}
+
 function getAlertCutoffMinute(now, buckets) {
   return Math.floor(now / RESOURCE_ALERT_BUCKET_MS) * RESOURCE_ALERT_BUCKET_MS -
     Math.max(0, buckets - 1) * RESOURCE_ALERT_BUCKET_MS;
@@ -292,10 +300,12 @@ export class MetricsBroadcaster {
     this.metricsStore = new SqlMetricsStore(state.storage);
     this.frontendSubscriptions = new FrontendSubscriptions(env, state.storage);
     this.latestReportUpdates = new ReportReplayCache();
+    this.liveReportIds = new Map();
+    this.liveReportReceipts = new Map();
     this.resourceAlertWindows = new Map();
     this.resourceAlertSnapshotLoaded = false;
     this.resourceAlertSnapshotDirty = false;
-    this.resourceAlertLastSnapshotSave = 0;
+    this.resourceAlertLastSnapshotAttempt = 0;
     this.resourceAlertCacheActiveUntil = 0;
     this.agentServerDetails = new Map();
     this.agentHistoryWrites = new Map();
@@ -304,6 +314,7 @@ export class MetricsBroadcaster {
     this.modeRevisionLoaded = false;
     this.lastModeState = null;
     this.maintenanceAlarmAt = 0;
+    this.maintenanceScheduleRetryAt = 0;
     this.pendingFrontendBroadcasts = new Map();
     this.frontendBroadcastTimer = null;
     this.pendingFrontendBroadcastTs = 0;
@@ -325,10 +336,13 @@ export class MetricsBroadcaster {
       try {
         const stored = await this.state?.storage?.get?.(MODE_REVISION_STORAGE_KEY);
         if (Number.isInteger(stored) && stored > 0) {
-          this.modeRevision = stored;
+          this.modeRevision = Math.max(this.modeRevision, stored);
         }
       } catch (e) {
         logError('agent', 'mode.revision.load_failed', 'Reporting mode revision read failed', e, {}, 'warn');
+      }
+      for (const ws of this._getAgentReportWebSockets()) {
+        this.modeRevision = Math.max(this.modeRevision, ws.deserializeAttachment()?.lastModeRevision || 0);
       }
     }
     return this.modeRevision;
@@ -707,6 +721,7 @@ export class MetricsBroadcaster {
         this.agentServerDetails.delete(serverId);
         this.agentHistoryWrites.delete(serverId);
         this.latestReportUpdates.delete(serverId);
+        this.liveReportReceipts.delete(serverId);
         this._closeWsWithError(ws, 'Server not found', 404, { text: 'server_not_found' });
         return null;
       }
@@ -768,6 +783,7 @@ export class MetricsBroadcaster {
         : this._getWssReportIntervalMs(serverDetail));
     const nextAttachment = {
       ...attachment,
+      ...ws.deserializeAttachment?.(),
       connectionId: attachment.connectionId || crypto.randomUUID(),
       kind: AGENT_REPORT_KIND,
       authenticated: true,
@@ -961,8 +977,9 @@ export class MetricsBroadcaster {
     const settings = await loadSettingsScope(this.env.DB, 'monitoring', { forceRefresh: true });
     if (!isWssReportConfigured(settings)) this._closeAgentReportWebSockets();
     if (this.state.storage?.setAlarm) {
-      this.maintenanceAlarmAt = Date.now() + (more || moreSessions ? 1000 : this.resourceAlertSnapshotDirty ? 60_000 : 3600_000);
-      await this.state.storage.setAlarm(this.maintenanceAlarmAt);
+      const next = Date.now() + (more || moreSessions ? 1000 : this.resourceAlertSnapshotDirty ? 60_000 : 3600_000);
+      await this.state.storage.setAlarm(next);
+      this.maintenanceAlarmAt = next;
     }
     logEvent('storage', 'maintenance.completed', 'Durable Object maintenance completed',
       { historyPending: more, sessionsPending: moreSessions, snapshotPending: this.resourceAlertSnapshotDirty,
@@ -1055,17 +1072,23 @@ export class MetricsBroadcaster {
 
   async _ingestRealtimeUpdates(normalizedUpdates, reportTs = Date.now(), options = {}) {
     if (!Array.isArray(normalizedUpdates)) return;
-    if (this._shouldCacheResourceAlertSamples(reportTs)) {
-      await this._ensureResourceAlertSnapshotLoaded();
-      await this._cacheResourceAlertSamples(options.alertUpdates || normalizedUpdates, reportTs);
+    const alertUpdates = options.alertUpdates || normalizedUpdates;
+    const accepted = this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
+    if (accepted.length > 0) {
+      if (options.batchFrontend === true) {
+        await this._broadcastBatch(accepted, reportTs, 'single');
+        this._queueFrontendBroadcastBatch(accepted, reportTs);
+      } else {
+        await this._broadcastBatch(accepted, reportTs);
+      }
     }
-    normalizedUpdates = this._cacheLatestReportUpdates(normalizedUpdates, reportTs);
-    if (normalizedUpdates.length === 0) return;
-    if (options.batchFrontend === true) {
-      await this._broadcastBatch(normalizedUpdates, reportTs, 'single');
-      this._queueFrontendBroadcastBatch(normalizedUpdates, reportTs);
-    } else {
-      await this._broadcastBatch(normalizedUpdates, reportTs);
+    if (this._shouldCacheResourceAlertSamples(reportTs)) {
+      try {
+        await this._ensureResourceAlertSnapshotLoaded();
+        await this._cacheResourceAlertSamples(alertUpdates, reportTs);
+      } catch (error) {
+        logError('alert', 'alert.samples.failed', 'Resource alert update failed', error, {}, 'warn');
+      }
     }
   }
 
@@ -1194,7 +1217,12 @@ export class MetricsBroadcaster {
     const isFrontendActive = !!state.frontendActive;
 
     const lastState = await this._getLastModeState();
-    if (lastState !== null && lastState === isFrontendActive) {
+    const sockets = this._getAgentReportWebSockets();
+    if (lastState === isFrontendActive && !sockets.some(ws => {
+      const attachment = ws.deserializeAttachment();
+      return attachment?.authenticated && typeof attachment.lastRealtimeHint === 'boolean' &&
+        attachment.lastRealtimeHint !== isFrontendActive;
+    })) {
       return 0;
     }
     this.lastModeState = isFrontendActive;
@@ -1206,7 +1234,7 @@ export class MetricsBroadcaster {
     this.lastAgentRealtimeHintAt = now;
 
     let hinted = 0;
-    for (const ws of this._getAgentReportWebSockets()) {
+    for (const ws of sockets) {
       const attachment = ws.deserializeAttachment() || {};
       if (
         attachment.kind !== AGENT_REPORT_KIND ||
@@ -1222,6 +1250,13 @@ export class MetricsBroadcaster {
         attachment.reportIntervalMs,
         state
       );
+      const current = ws.deserializeAttachment();
+      if (current?.lastModeRevision > modeRevision) continue;
+      try {
+        ws.serializeAttachment?.({ ...current, lastModeRevision: modeRevision, lastRealtimeHint: isFrontendActive });
+      } catch (_) {
+        continue;
+      }
       this._sendWsJson(ws, {
         type: 'ack',
         ackFor: 'mode',
@@ -1267,19 +1302,26 @@ export class MetricsBroadcaster {
     const serverIds = new Set(updates.map(update => update.serverId));
     if (latestUpdates.some(update => !serverIds.has(update.serverId))) throw new AppError('Invalid latest report server', 400);
     const fingerprint = options.fingerprint || await reportFingerprint(updates);
-    if (reportId !== null && (typeof reportId !== 'string' || reportId.length === 0 || reportId.length > 128)) {
-      throw new AppError('Invalid reportId', 400);
+    validateReportId(reportId);
+    if (options.checkpointLive === true) {
+      this._pruneLatestReportUpdates();
+      for (let index = 0; index < latestUpdates.length; index++) {
+        const update = latestUpdates[index];
+        const live = this.latestReportUpdates.get(update.serverId);
+        if (live && getLatestReportSampleTimestamp(live) >= getLatestReportSampleTimestamp(update)) {
+          latestUpdates[index] = live;
+        }
+      }
     }
     const reportKey = `${updates.map(update => update.serverId).join(',')}:${reportId || fingerprint}`;
     const started = Date.now();
     const metadata = { serverId: updates.length === 1 ? updates[0].serverId : undefined,
       serverCount: updates.length, reportId, sampleCount: updates.reduce((sum, update) => sum + update.samples.length, 0) };
     setLogContext({ serverId: metadata.serverId, reportId });
-    let result;
     try {
-      result = await this.metricsStore.ingest(updates, { reportKey, fingerprint, latestUpdates,
+      const result = await this.metricsStore.ingest(updates, { reportKey, fingerprint, latestUpdates,
         persistHistory: options.persistHistory !== false, strictSamples: options.strictSamples === true });
-      await this._ensureMaintenanceAlarm();
+      await this._ensureMaintenanceAlarmBestEffort();
       const durationMs = Date.now() - started;
       this.reportLogs.record({ serverIds: updates.map(update => update.serverId), sampleCount: metadata.sampleCount,
         duplicate: result.duplicate, durationMs, transport: getLogContext().transport || 'http' });
@@ -1289,9 +1331,8 @@ export class MetricsBroadcaster {
       return result;
     } catch (error) {
       const status = error instanceof AppError ? error.code : 503;
-      logError('storage', result ? 'metrics.maintenance.failed' : 'metrics.commit.failed',
-        result ? 'Metrics committed but maintenance scheduling failed; retry is safe' : status < 500 ? 'Metrics report rejected' : 'Metrics commit failed; Agent must retry',
-        error, { ...metadata, persisted: result?.persisted === true, status, durationMs: Date.now() - started }, status < 500 ? 'warn' : 'error');
+      logError('storage', 'metrics.commit.failed', status < 500 ? 'Metrics report rejected' : 'Metrics commit failed; Agent must retry',
+        error, { ...metadata, persisted: false, status, durationMs: Date.now() - started }, status < 500 ? 'warn' : 'error');
       throw error;
     }
   }
@@ -1302,8 +1343,67 @@ export class MetricsBroadcaster {
     const desired = now + delayMs;
     if (this.maintenanceAlarmAt > now && this.maintenanceAlarmAt <= desired) return;
     const existing = await this.state.storage.getAlarm();
-    this.maintenanceAlarmAt = existing && existing <= desired ? existing : desired;
-    if (this.maintenanceAlarmAt !== existing) await this.state.storage.setAlarm(this.maintenanceAlarmAt);
+    const next = existing && existing <= desired ? existing : desired;
+    if (next !== existing) await this.state.storage.setAlarm(next);
+    this.maintenanceAlarmAt = next;
+  }
+
+  async _ensureMaintenanceAlarmBestEffort(delayMs) {
+    if (Date.now() < this.maintenanceScheduleRetryAt) return;
+    try {
+      await this._ensureMaintenanceAlarm(delayMs);
+    } catch (error) {
+      this.maintenanceScheduleRetryAt = Date.now() + 60_000;
+      logError('storage', 'metrics.maintenance.failed', 'Maintenance scheduling failed', error, {}, 'warn');
+    }
+  }
+
+  _acceptLiveReport(serverId, reportId, fingerprint, update, reportTs) {
+    validateReportId(reportId);
+    const key = JSON.stringify([serverId, reportId || fingerprint]);
+    const previous = this.liveReportIds.get(key);
+    if (previous && reportTs - previous.receivedAt < REPORT_RETENTION_MS) {
+      if (previous.fingerprint !== fingerprint) throw new AppError('Conflicting reportId with different content', 409);
+      return { duplicate: true, latestUpdates: [] };
+    }
+    this.liveReportIds.delete(key);
+    this.liveReportIds.set(key, { fingerprint, receivedAt: reportTs });
+    if (this.liveReportIds.size > MAX_LIVE_REPORT_IDS) this.liveReportIds.delete(this.liveReportIds.keys().next().value);
+
+    const latest = this.latestReportUpdates.get(serverId);
+    const hasFreshLatest = latest && reportTs - latest.reportTs <= LATEST_REPORT_CACHE_TTL_MS;
+    const sampleTs = getLatestReportSampleTimestamp(update);
+    if (hasFreshLatest && getLatestReportSampleTimestamp(latest) >= sampleTs) {
+      return { duplicate: false, latestUpdates: [] };
+    }
+    // Preserve observation order against a prior checkpoint on cold starts.
+    if (!hasFreshLatest) {
+      try {
+        if (this.metricsStore.latestRow(serverId)?.sample_ts >= sampleTs) {
+          return { duplicate: false, latestUpdates: [] };
+        }
+      } catch (error) {
+        logError('storage', 'metrics.latest.read_failed', 'Latest checkpoint unavailable for live report', error, { serverId }, 'warn');
+      }
+    }
+    return { duplicate: false, latestUpdates: [update] };
+  }
+
+  _rememberLiveReceipt(ws, serverId, receivedAt) {
+    const latest = Math.max(this.liveReportReceipts.get(serverId) || 0, receivedAt);
+    this.liveReportReceipts.delete(serverId);
+    this.liveReportReceipts.set(serverId, latest);
+    if (this.liveReportReceipts.size > LATEST_REPORT_CACHE_MAX_SERVERS) {
+      this.liveReportReceipts.delete(this.liveReportReceipts.keys().next().value);
+    }
+    const attachment = ws.deserializeAttachment?.();
+    if (attachment?.authenticated && attachment.serverId === serverId) {
+      try {
+        ws.serializeAttachment({ ...attachment, lastReportAt: Math.max(attachment.lastReportAt || 0, receivedAt) });
+      } catch (_) {
+        // A socket that closes during processing still has a receipt in memory.
+      }
+    }
   }
 
   _rejectAgentReport(ws, data, error) {
@@ -1397,12 +1497,22 @@ export class MetricsBroadcaster {
     const normalizedUpdates = [update];
     let persistence;
     try {
-      persistence = await this._persistUpdates(normalizedUpdates, reportId, options);
+      if (data.batch === false) {
+        persistence = this._acceptLiveReport(context.serverId, reportId, options.fingerprint,
+          this._normalizeBatchUpdates(options.latestUpdates)[0], reportTs);
+      } else {
+        persistence = await this._persistUpdates(normalizedUpdates, reportId,
+          { ...options, checkpointLive: data.batch === true });
+      }
     } catch (error) {
+      if (data.batch === true && (!(error instanceof AppError) || error.code >= 500)) {
+        this._rememberLiveReceipt(ws, context.serverId, reportTs);
+      }
       this._rejectAgentReport(ws, data, error);
       return;
     }
     if (!persistence.duplicate) {
+      if (data.batch === false) this._rememberLiveReceipt(ws, context.serverId, reportTs);
       if (context.resourceAlertEnabled) this._activateResourceAlertCache(reportTs);
       const realtimeState = this._getAgentRealtimeState(reportTs);
       if (realtimeState.realtimeActive) {
@@ -1412,7 +1522,9 @@ export class MetricsBroadcaster {
       } else {
         this._cacheLatestReportUpdates(persistence.latestUpdates, reportTs);
       }
-      if (persistence.latestUpdates.length) this._evaluateAgentTrafficAlertIfDue(context, latestMetrics);
+      if (persistence.latestUpdates.length) {
+        this._evaluateAgentTrafficAlertIfDue(context, persistence.latestUpdates[0].samples.at(-1).data);
+      }
     }
     const configAck = await this._buildAgentConfigAck(context);
     this._sendWsJson(ws, {
@@ -1489,6 +1601,8 @@ export class MetricsBroadcaster {
       realtimeState
     );
     const modeRevision = await this._getModeRevision();
+    server.serializeAttachment({ ...initialAttachment, lastModeRevision: modeRevision,
+      lastRealtimeHint: !!realtimeState.frontendActive });
 
     this._sendWsJson(server, {
       type: 'hello',
@@ -1591,7 +1705,7 @@ export class MetricsBroadcaster {
       try {
         await this.frontendSubscriptions.save(server, { ...access, scope, serverIds: [] });
         setLogContext({ transport: 'wss', connectionId: server.deserializeAttachment()?.sessionId });
-        await this._ensureMaintenanceAlarm();
+        await this._ensureMaintenanceAlarmBestEffort();
       } catch (_) {
         try { server.close(1013, 'Subscription storage unavailable'); } catch (_) {}
         return new Response('Subscription storage unavailable', { status: 503 });
@@ -1756,7 +1870,7 @@ export class MetricsBroadcaster {
       const body = await request.json();
       const ids = this._normalizeServerIds(body?.serverIds);
       if (!ids.ok) return new Response('Invalid serverIds', { status: 400 });
-      return Response.json({ timestamps: await this.metricsStore.timestamps(ids.ids) });
+      return Response.json({ timestamps: await this._getLatestReportTimestamps(ids.ids) });
     }
 
     if (method === 'POST' && path === '/latest-report-updates') {
@@ -1954,6 +2068,12 @@ export class MetricsBroadcaster {
   async _handleClearHistory() {
     await this.metricsStore.clear();
     this.latestReportUpdates.clear();
+    this.liveReportIds.clear();
+    this.liveReportReceipts.clear();
+    for (const ws of this._getAgentReportWebSockets()) {
+      const { lastReportAt: _lastReportAt, ...attachment } = ws.deserializeAttachment();
+      try { ws.serializeAttachment(attachment); } catch (_) {}
+    }
     return new Response(JSON.stringify({ ok: true }), {
       headers: { 'Content-Type': 'application/json' }
     });
@@ -1961,9 +2081,42 @@ export class MetricsBroadcaster {
 
   async _getLatestReportUpdates(serverIds) {
     const now = Date.now();
-    const stored = await this.metricsStore.latest(serverIds, now - LATEST_REPORT_CACHE_TTL_MS);
-    this._cacheLatestReportUpdates(stored);
-    return stored.map(update => ({ ...update, reportAgeMs: Math.max(0, now - update.reportTs) }));
+    this._pruneLatestReportUpdates(now);
+    const cached = new Map(serverIds.map(id => [id, this.latestReportUpdates.get(id)]).filter(([, update]) => update));
+    const missing = serverIds.filter(id => !cached.has(id));
+    const stored = new Map();
+    if (missing.length) {
+      try {
+        for (const update of await this.metricsStore.latest(missing)) stored.set(update.serverId, update);
+      } catch (error) {
+        if (!cached.size && !serverIds.some(id => this.latestReportUpdates.has(id))) throw error;
+        logError('storage', 'metrics.latest.read_failed', 'Latest checkpoint lookup failed; serving live data', error, {}, 'warn');
+      }
+    }
+    return serverIds.map(id => this.latestReportUpdates.get(id) || cached.get(id) || stored.get(id))
+      .filter(Boolean)
+      .map(update => ({ ...update, reportAgeMs: Math.max(0, now - update.reportTs) }));
+  }
+
+  async _getLatestReportTimestamps(serverIds) {
+    const timestamps = new Map(serverIds.map(id => [id, this.liveReportReceipts.get(id) || 0]));
+    for (const ws of this._getAgentReportWebSockets()) {
+      const attachment = ws.deserializeAttachment();
+      if (attachment?.authenticated && timestamps.has(attachment.serverId)) {
+        timestamps.set(attachment.serverId, Math.max(timestamps.get(attachment.serverId), attachment.lastReportAt || 0));
+      }
+    }
+    try {
+      const stored = await this.metricsStore.timestamps(serverIds);
+      for (const [id, receivedAt] of Object.entries(stored)) {
+        timestamps.set(id, Math.max(timestamps.get(id) || 0, receivedAt));
+      }
+    } catch (error) {
+      // A partial heartbeat response would mark the unknown nodes offline.
+      if ([...timestamps.values()].some(receivedAt => !receivedAt)) throw error;
+      logError('storage', 'metrics.timestamps.read_failed', 'Checkpoint timestamps unavailable; using live receipts', error, {}, 'warn');
+    }
+    return Object.fromEntries([...timestamps].filter(([, receivedAt]) => receivedAt > 0));
   }
 
   async _getDashboardLatencyWindows(serverIds, hours = DASHBOARD_LATENCY_WINDOW_HOURS, points = DASHBOARD_LATENCY_WINDOW_POINTS) {
@@ -2093,7 +2246,7 @@ export class MetricsBroadcaster {
         }
       }
 
-      this.resourceAlertLastSnapshotSave = Number(snapshot?.savedAt) || 0;
+      this.resourceAlertLastSnapshotAttempt = Number(snapshot?.savedAt) || 0;
     } catch (e) {
       logError('alert', 'alert.snapshot.load_failed', 'Resource alert snapshot read failed', e, {}, 'warn');
     }
@@ -2160,12 +2313,13 @@ export class MetricsBroadcaster {
     }
 
     await this._persistResourceAlertSnapshotIfNeeded(now);
-    if (this.resourceAlertSnapshotDirty) await this._ensureMaintenanceAlarm(60_000);
+    if (this.resourceAlertSnapshotDirty) await this._ensureMaintenanceAlarmBestEffort(60_000);
   }
 
   async _persistResourceAlertSnapshotIfNeeded(now = Date.now(), force = false) {
     if (!this.resourceAlertSnapshotDirty && !force) return;
-    if (!force && now - this.resourceAlertLastSnapshotSave < RESOURCE_ALERT_SNAPSHOT_INTERVAL_MS) return;
+    if (!force && now - this.resourceAlertLastSnapshotAttempt < RESOURCE_ALERT_SNAPSHOT_INTERVAL_MS) return;
+    this.resourceAlertLastSnapshotAttempt = now;
 
     this._pruneResourceAlertWindows(now);
     const windows = [];
@@ -2183,7 +2337,6 @@ export class MetricsBroadcaster {
         windows
       });
       this.resourceAlertSnapshotDirty = false;
-      this.resourceAlertLastSnapshotSave = now;
     } catch (e) {
       logError('alert', 'alert.snapshot.save_failed', 'Resource alert snapshot write failed; maintenance will retry', e, {}, 'warn');
     }
@@ -2347,17 +2500,6 @@ export class MetricsBroadcaster {
         try { ws.close(1012, 'Reload subscription'); } catch (_) {}
         continue;
       }
-      if ((attachment.accessValidUntil && Date.now() >= attachment.accessValidUntil) ||
-        (attachment.authorizationExpiresAt && Date.now() >= attachment.authorizationExpiresAt) ||
-        attachment.accessVersion !== 1) {
-        try {
-          attachment = await this.frontendSubscriptions.refresh(attachment);
-          await this.frontendSubscriptions.save(ws, attachment);
-        } catch (_) {
-          try { ws.close(1012, 'Refresh permissions'); } catch (_) {}
-          continue;
-        }
-      }
       if (targetScope === 'all' && attachment.scope !== 'all') continue;
       if (targetScope === 'single' && attachment.scope === 'all') continue;
 
@@ -2413,7 +2555,12 @@ export class MetricsBroadcaster {
     try {
       const msg = JSON.parse(message || '{}');
       if (msg && msg.type === 'subscribe') {
-        const current = await this.frontendSubscriptions.load(ws) || {};
+        let current;
+        try { current = await this.frontendSubscriptions.load(ws); } catch (_) {}
+        if (!current) {
+          ws.close(1012, 'Reload subscription');
+          return;
+        }
         const rawScope = this._getSubscribeScope(msg, current);
         if (rawScope === null) {
           this._closeInvalidSubscription(ws);

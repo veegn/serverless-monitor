@@ -74,6 +74,33 @@ export class RuntimeBroadcaster extends BaseBroadcaster {
       this.state.storage.sql.exec('DROP TRIGGER fail_latest');
       return new Response('OK');
     }
+    if (path === '/test/fail-aux-writes') {
+      this.originalState = this.state;
+      const storage = new Proxy(this.state.storage, { get(target, key) {
+        if (['put', 'delete', 'setAlarm'].includes(key)) {
+          return async () => { throw new Error('simulated write quota exhaustion'); };
+        }
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+      this.state = new Proxy(this.state, { get(target, key) {
+        if (key === 'storage') return storage;
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      } });
+      this.frontendSubscriptions.storage = storage;
+      return new Response('OK');
+    }
+    if (path === '/test/restore-aux-writes') {
+      this.state = this.originalState;
+      this.frontendSubscriptions.storage = this.state.storage;
+      return new Response('OK');
+    }
+    if (path === '/test/forget-latest') {
+      this.latestReportUpdates.clear();
+      this.liveReportReceipts.clear();
+      return new Response('OK');
+    }
     if (path === '/test/legacy') {
       const { serverId, points } = await request.json();
       await this.state.storage.put(`durable_history_v1:${serverId}`, points);
@@ -90,7 +117,7 @@ export class RuntimeBroadcaster extends BaseBroadcaster {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path.startsWith('/test/') || ['/history', '/batch-push', '/latest-report-updates', '/ws', '/frontend-access-changed'].includes(path)) {
+    if (path.startsWith('/test/') || ['/history', '/batch-push', '/latest-report-updates', '/latest-timestamps', '/ws', '/frontend-access-changed'].includes(path)) {
       const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
       return stub.fetch(request);
     }

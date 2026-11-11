@@ -214,3 +214,21 @@ test('large subscriptions persist outside the attachment and survive a new sessi
   await new FrontendSubscriptions({}, storage).save(ws, state);
   assert.deepEqual(await new FrontendSubscriptions({}, storage).load(ws), state);
 });
+
+test('large subscriptions held during write exhaustion never restore an older filter', async () => {
+  let attachment = { sessionId: 'large', kind: 'frontend', scope: 'all' };
+  const ws = {
+    deserializeAttachment: () => attachment,
+    serializeAttachment(value) { attachment = value; }
+  };
+  const storage = {
+    async put() { throw new Error('write quota exhausted'); },
+    async get() { assert.fail('must not restore the older subscription'); }
+  };
+  const ids = Array.from({ length: 500 }, (_, index) => `node-${index}-${'x'.repeat(40)}`);
+  const state = { accessVersion: 1, allowedServerIds: ids, scope: 'all', serverIds: ids };
+  const subscriptions = new FrontendSubscriptions({}, storage);
+  await subscriptions.save(ws, state);
+  assert.deepEqual(await subscriptions.load(ws), state);
+  assert.equal(await new FrontendSubscriptions({}, storage).load(ws), null);
+});

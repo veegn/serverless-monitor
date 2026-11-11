@@ -2,6 +2,10 @@ import { loadSettingsScope } from '../utils/settings.js';
 import { getWebSocketIdentity } from '../middleware/auth.js';
 import { AppError } from '../utils/errors.js';
 import { ensureServerSchema } from '../database/ServerRepository.js';
+import { logError } from '../utils/observability.js';
+
+// Leave room for structured-clone overhead under workerd's 16 KiB limit.
+const ATTACHMENT_BUDGET = 12 * 1024;
 
 // The browser's subscription is a filter, never an authorization grant.
 export class FrontendSubscriptions {
@@ -27,27 +31,54 @@ export class FrontendSubscriptions {
 
   async save(ws, state) {
     const sessionId = ws.deserializeAttachment()?.sessionId || crypto.randomUUID();
-    // Store large permission/subscription lists outside the size-limited WebSocket attachment.
-    await this.storage.put(`cfsm:frontend-session:${sessionId}`, state);
-    ws.serializeAttachment({ sessionId, scope: state.scope, kind: 'frontend' });
+    const attachment = { sessionId, scope: state.scope, kind: 'frontend' };
+    // The permission list is derived from current policy on wake. Only keep
+    // the browser's filter and the credential needed to verify it.
+    const restorable = { ...attachment, serverIds: state.serverIds ?? [], authorizationToken: state.authorizationToken };
+    if (new TextEncoder().encode(JSON.stringify(restorable)).byteLength <= ATTACHMENT_BUDGET) {
+      ws.serializeAttachment(restorable);
+    } else {
+      try {
+        await this.storage.put(`cfsm:frontend-session:${sessionId}`, state);
+        ws.serializeAttachment(attachment);
+      } catch (error) {
+        // Never fall back to an older or broader filter after this cache is lost.
+        ws.serializeAttachment({ ...attachment, volatile: true });
+        logError('frontend', 'frontend.session.volatile', 'Large subscription retained in memory', error, {}, 'warn');
+      }
+    }
     this.remember(sessionId, state);
   }
 
   async load(ws) {
     const attachment = ws.deserializeAttachment();
     if (!attachment?.sessionId) return attachment;
-    const cached = this.sessions.get(attachment.sessionId);
-    if (cached) return cached;
-    const state = await this.storage.get(`cfsm:frontend-session:${attachment.sessionId}`);
-    if (state) this.remember(attachment.sessionId, state);
-    return state;
+    const { sessionId } = attachment;
+    const cached = this.sessions.get(sessionId);
+    const state = cached || (Array.isArray(attachment.serverIds) ? attachment
+      : attachment.volatile ? null : await this.storage.get(`cfsm:frontend-session:${sessionId}`));
+    if (!state) return null;
+    if (state.accessVersion === 1 &&
+      (!state.accessValidUntil || Date.now() < state.accessValidUntil) &&
+      (!state.authorizationExpiresAt || Date.now() < state.authorizationExpiresAt)) {
+      if (!cached) this.remember(sessionId, state);
+      return state;
+    }
+    const refreshed = await this.refresh(state);
+    // A concurrent subscribe can replace the filter while authorization is in flight.
+    const current = this.sessions.get(sessionId);
+    if (current && current !== cached) return current;
+    this.remember(sessionId, refreshed);
+    return refreshed;
   }
 
   async remove(ws) {
-    const sessionId = ws.deserializeAttachment()?.sessionId;
+    const { sessionId, serverIds, volatile } = ws.deserializeAttachment() || {};
     if (!sessionId) return;
     this.sessions.delete(sessionId);
-    await this.storage.delete(`cfsm:frontend-session:${sessionId}`);
+    if (!Array.isArray(serverIds) && !volatile) {
+      await this.storage.delete(`cfsm:frontend-session:${sessionId}`);
+    }
   }
 
   async cleanup(activeSockets) {

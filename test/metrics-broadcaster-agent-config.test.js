@@ -1118,6 +1118,24 @@ test('modeRevision monotonically increments on visitor state transitions', async
   assert.equal(agentSent[1].realtimeHint, false);
 });
 
+test('mode hints recover a connected Agent after volatile mode changes and a DO wake', async () => {
+  const frames = [];
+  let attachment = { kind: 'agent-report', authenticated: true, serverId: 'server-1',
+    reportIntervalMs: 60_000, wssReportIntervalMs: 2000, lastModeRevision: 12, lastRealtimeHint: false };
+  const agent = {
+    deserializeAttachment: () => attachment,
+    serializeAttachment(value) { attachment = value; },
+    send(text) { frames.push(JSON.parse(text)); }
+  };
+  const broadcaster = makeBroadcaster([agent]);
+  broadcaster.state.storage.get = async key => key === 'agent_mode_revision' ? 10 : true;
+  broadcaster.state.storage.put = async () => { throw new Error('write quota exhausted'); };
+  await broadcaster._hintAgentRealtimeIntervals({ frontendActive: true });
+  assert.equal(frames[0].modeRevision, 13);
+  assert.equal(frames[0].realtimeHint, true);
+  assert.equal(attachment.lastModeRevision, 13);
+});
+
 test('reportId batch idempotency and conflict rejection', async () => {
   const savedBatches = [];
   const fakeDb = {

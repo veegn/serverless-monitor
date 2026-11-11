@@ -52,16 +52,20 @@ const live = (reportId, ts = now, cpu = 90) => ({ id: 'node', secret: 'node-secr
 const batch = (reportId, ts = now, cpu = 90) => ({ ...live(reportId, ts, cpu), batch: true,
   samples: [{ ts: now - 22_000, metrics: { cpu: 10 } }, { ts: now - 12_000, metrics: { cpu: 20 } }] });
 const latest = async broadcaster => (await broadcaster.metricsStore.latest(['node']))[0];
+const realtime = async broadcaster => (await broadcaster._getLatestReportUpdates(['node']))[0];
 const history = broadcaster => broadcaster.metricsStore.history('node', { now, points: 1000 });
 
-test('live snapshots persist latest state without history; batches store only samples and keep top-level metrics current', async t => {
+test('live snapshots stay in memory; batches store only samples and keep top-level metrics current', async t => {
   const f = fixture(t);
   const ack = await f.send(live('live'));
   assert.equal(ack.accepted, true);
   assert.equal(ack.persisted, undefined);
   assert.equal(ack.acceptedSamples, undefined);
+  assert.equal(f.broadcaster.metricsStore.initialized, false, 'live reports must not create storage tables');
+  assert.equal((await realtime(f.broadcaster)).samples[0].data.cpu, 90);
+  assert.equal((await f.broadcaster._getLatestReportTimestamps(['node'])).node, now);
   assert.deepEqual(await history(f.broadcaster), []);
-  assert.equal((await latest(f.broadcaster)).samples[0].data.cpu, 90);
+  assert.equal(await latest(f.broadcaster), undefined);
   const report = batch('batch', now + 2000, 95);
   report.samples[1].metrics = { cpu: 20, ram_total: 4096, ram_used: 1024, swap_used: 32,
     load_avg: '1.2 2.3 3.4', disk: { read_bps: 1024, write_iops: 12 },
@@ -102,7 +106,7 @@ test('a maximum-size batch acknowledges and stores all 300 samples exactly once'
 
 test('retry identity survives receipt-time changes, missing clocks, canonical key ordering and a DO restart', async t => {
   const f = fixture(t);
-  const report = live('stable');
+  const report = batch('stable');
   delete report.time;
   assert.equal((await f.send(report)).accepted, true);
   t.mock.timers.setTime(now + 15_000);
@@ -111,7 +115,7 @@ test('retry identity survives receipt-time changes, missing clocks, canonical ke
   assert.equal((await restarted.send(retry)).accepted, true);
   assert.equal(restarted.closed.length, 0);
   assert.equal(restarted.broadcasts.length, 0);
-  assert.equal((await latest(restarted.broadcaster)).samples[0].ts, now);
+  assert.equal((await latest(restarted.broadcaster)).samples[0].ts, report.samples.at(-1).ts);
   await restarted.send({ ...report, metrics: { cpu: 91 } });
   assert.equal(restarted.closed.at(-1)[0], 1008);
 });
@@ -121,9 +125,23 @@ test('observation times prefer accurate_ts, then calibrated local_ts, rather tha
   const report = live('clock');
   report.time = { accurate_ts: now - 3000, local_ts: now - 5000, calibrated: true, offset_ms: 1000 };
   await f.send(report);
-  assert.equal((await latest(f.broadcaster)).samples[0].ts, now - 3000);
+  assert.equal((await realtime(f.broadcaster)).samples[0].ts, now - 3000);
   await f.send({ ...report, reportId: 'clock-2', time: { local_ts: now - 2000, calibrated: true, offset_ms: 1000 } });
-  assert.equal((await latest(f.broadcaster)).samples[0].ts, now - 1000);
+  assert.equal((await realtime(f.broadcaster)).samples[0].ts, now - 1000);
+});
+
+test('repeated live report IDs are idempotent within the running DO', async t => {
+  const f = fixture(t);
+  const report = live('live-retry');
+  delete report.time;
+  await f.send(report);
+  t.mock.timers.setTime(now + 5000);
+  assert.equal((await f.send(report)).accepted, true);
+  assert.equal(f.broadcasts.length, 1);
+  assert.equal((await realtime(f.broadcaster)).reportTs, now);
+  assert.equal((await f.broadcaster._getLatestReportTimestamps(['node'])).node, now);
+  await f.send({ ...report, metrics: { cpu: 91 } });
+  assert.equal(f.closed.at(-1)[0], 1008);
 });
 
 test('late history commits without rolling latest state, memory cache or broadcasts back, including after restart', async t => {
@@ -193,6 +211,16 @@ test('SQLite write failures roll history, latest state and report identity back;
   t.mock.timers.setTime(now + 5000);
   assert.equal((await f.send(report)).acceptedSamples, 2);
   assert.equal(f.broadcasts.length, 1);
+  assert.deepEqual((await history(f.broadcaster)).map(row => row.cpu), [10, 20]);
+});
+
+test('a failed maintenance Alarm cannot turn a committed history batch into a negative ACK', async t => {
+  const f = fixture(t);
+  f.storage.getAlarm = async () => null;
+  f.storage.setAlarm = async () => { throw new Error('write quota exhausted'); };
+  const ack = await f.send(batch('committed-despite-alarm'));
+  assert.equal(ack.persisted, true);
+  assert.equal(ack.acceptedSamples, 2);
   assert.deepEqual((await history(f.broadcaster)).map(row => row.cpu), [10, 20]);
 });
 

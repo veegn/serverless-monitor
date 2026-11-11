@@ -6,7 +6,7 @@ import { encodeMetricParts, decodeMetricPart, equalMetricBytes } from './metricC
 export const HISTORY_RETENTION_MS = 7 * 24 * 3600_000;
 const MINUTE = 60_000;
 const HOUR = 3600_000;
-const REPORT_RETENTION_MS = 10 * MINUTE;
+export const REPORT_RETENTION_MS = 10 * MINUTE;
 const LEGACY_HISTORY_PREFIX = 'durable_history_v1:';
 const LEGACY_LATEST_KEY = 'cfsm:latest_report_updates';
 const hourOf = ts => Math.floor(ts / HOUR) * HOUR;
@@ -85,8 +85,12 @@ export class SqlMetricsStore {
   }
 
   latestRow(serverId) {
-    return this.rows(`SELECT bucket, received_at, sample_ts FROM metric_blocks
-      WHERE server_id = ? AND part = 0 AND received_at > 0 ORDER BY bucket DESC LIMIT 1`, serverId)[0];
+    // Live-only nodes can check for a prior checkpoint without creating the schema.
+    if (!this.initialized && !this.sql.exec(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metric_blocks'"
+    ).toArray().length) return undefined;
+    return this.sql.exec(`SELECT bucket, received_at, sample_ts FROM metric_blocks
+      WHERE server_id = ? AND part = 0 AND received_at > 0 ORDER BY bucket DESC LIMIT 1`, serverId).toArray()[0];
   }
 
   async migrateLatest() {
@@ -238,9 +242,9 @@ export class SqlMetricsStore {
         const active = get(update.serverId, currentHour);
         const latestSampleTs = Math.max(...update.samples.map(sample => Number(sample.ts) || 0));
         if (!active.block.l || latestSampleTs > active.sampleTs) {
-          active.block.l = { ...update, reportTs: now };
+          active.block.l = { ...update, reportTs: update.reportTs ?? now };
           active.sampleTs = latestSampleTs || now;
-          acceptedLatest.push(update);
+          acceptedLatest.push(active.block.l);
         }
       }
       for (const serverId of serverIds) {
