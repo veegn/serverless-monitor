@@ -124,6 +124,7 @@
         <div class="stat-main-value stat-main-value-sm stat-sub-info">
           <span class="stat-online-color">{{ trans.online }}:{{ stats.online }}</span> |
           <span class="stat-offline-color">{{ trans.offline }}:{{ stats.offline }}</span>
+          <span v-if="stats.unknown">{{ trans.metricsUnknown }}:{{ stats.unknown }}</span>
         </div>
       </div>
       <div class="stat-item">
@@ -675,7 +676,8 @@ const setFilter = (code) => {
 }
 
 const getStatusColor = (server) => {
-  return isServerOnline(server) ? 'var(--accent-green)' : 'var(--accent-red)'
+  if (isServerOnline(server)) return 'var(--accent-green)'
+  return server.metricsUnavailable ? 'var(--text-secondary)' : 'var(--accent-red)'
 }
 
 const formatConnCount = (value) => {
@@ -858,6 +860,7 @@ const applyServerSample = (serverId, data, sampleTs, displayTs, reportTs = null)
   const merged = withDisplayTiming({
     ...data,
     id: serverId,
+    metricsUnavailable: existing?.metricsUnavailable === true && now.value - nextReportTs >= TIME.ONLINE_THRESHOLD_MS,
     report_timestamp: nextReportTs,
     last_updated: nextReportTs,
     sample_timestamp: sampleTs,
@@ -910,6 +913,7 @@ const advanceServerClocks = () => {
 const recomputeStats = (currentTs = Date.now()) => {
   const list = servers.value || []
   let online = 0
+  let unknown = 0
   let speedIn = 0, speedOut = 0, netRx = 0, netTx = 0
   const regionCounts = {}
   let unknownCount = 0
@@ -920,6 +924,8 @@ const recomputeStats = (currentTs = Date.now()) => {
       online++
       speedIn += parseFloat(s.net_in_speed) || 0
       speedOut += parseFloat(s.net_out_speed) || 0
+    } else if (s.metricsUnavailable) {
+      unknown++
     }
     netRx += parseFloat(s.net_rx) || 0
     netTx += parseFloat(s.net_tx) || 0
@@ -933,7 +939,8 @@ const recomputeStats = (currentTs = Date.now()) => {
   stats.value = {
     total: list.length,
     online,
-    offline: list.length - online,
+    offline: list.length - online - unknown,
+    unknown,
     globalNetRx: netRx,
     globalNetTx: netTx,
     globalSpeedIn: speedIn,
@@ -1017,6 +1024,7 @@ const refreshData = async () => {
         drawMarkers()
         sitesRemaining.value = Math.max(0, sitesRemaining.value - 1)
       })
+      unavailableLiveSites = new Set(data.unavailableSites)
       replayLatestReportUpdates(data)
     } catch (e) {
       console.log('[INFO] Multi-site refresh error:', e)
@@ -1030,6 +1038,7 @@ const refreshData = async () => {
   try {
     const data = await fetchServersAll()
     if (!data) return
+    unavailableLiveSites = new Set(data.unavailableSites)
 
     const rawServers = Array.isArray(data.servers)
       ? data.servers
@@ -1068,6 +1077,7 @@ const refreshData = async () => {
 //   - 订阅 "all"，收到任何服务器的更新都会合并对应 server 的指标
 // -------------------------------------------------------------------------
 let liveSockets = []
+let unavailableLiveSites = new Set()
 let liveConnectionClosedByUser = false
 let themeObserver = null
 let timeUpdateInterval = null
@@ -1117,10 +1127,10 @@ const startLiveSocket = () => {
     return
   }
 
-  // 为每个 API base 创建独立的 WebSocket 连接，跳过没有服务器的 base
-  liveSockets = bases.map((_, index) => {
-    const ids = idsByIndex.get(index)
-    if (!ids || ids.length === 0) return null
+  // A failed initial lookup can still recover through the authorized live feed.
+  liveSockets = bases.map((base, index) => {
+    const ids = idsByIndex.get(index) || []
+    if (!ids.length && !unavailableLiveSites.has(base)) return null
     return createLiveSocket('all', {
       replay: false,
       timeoutMinutes: sysConfig.value.frontend_ws_timeout_minutes,

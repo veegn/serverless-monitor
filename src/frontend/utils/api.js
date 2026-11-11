@@ -308,7 +308,8 @@ export const fetchServersAll = async () => {
 const createEmptyMergedData = () => ({
   servers: [],
   latestReportUpdates: [],
-  stats: { total: 0, online: 0, offline: 0, globalNetRx: 0, globalNetTx: 0, globalSpeedIn: 0, globalSpeedOut: 0 },
+  unavailableSites: [],
+  stats: { total: 0, online: 0, offline: 0, unknown: 0, globalNetRx: 0, globalNetTx: 0, globalSpeedIn: 0, globalSpeedOut: 0 },
   regionStats: {},
   sysConfig: {
     show_price: true,
@@ -324,8 +325,11 @@ const createEmptyMergedData = () => ({
   }
 })
 
-const mergeSiteResult = (mergedData, { data, error, baseUrl }, multiSite, localTitle) => {
-  if (error || !data) return
+const mergeSiteResult = (mergedData, { data, error, status, baseUrl }, multiSite, localTitle) => {
+  if (error || !data) {
+    if (error && baseUrl && (!status || status >= 500)) mergedData.unavailableSites.push(baseUrl)
+    return
+  }
 
   const rawServers = Array.isArray(data.servers)
     ? data.servers
@@ -345,6 +349,7 @@ const mergeSiteResult = (mergedData, { data, error, baseUrl }, multiSite, localT
     mergedData.stats.total += data.stats.total || 0
     mergedData.stats.online += data.stats.online || 0
     mergedData.stats.offline += data.stats.offline || 0
+    mergedData.stats.unknown += data.stats.unknown || 0
     mergedData.stats.globalNetRx += data.stats.globalNetRx || 0
     mergedData.stats.globalNetTx += data.stats.globalNetTx || 0
     mergedData.stats.globalSpeedIn += data.stats.globalSpeedIn || 0
@@ -403,7 +408,7 @@ export const fetchAllHistory = async (id, hours, apiIndex = 0) => {
     error.message = result.message || result.error
     throw error
   }
-  return Array.isArray(result.data) ? result.data : []
+  return { samples: Array.isArray(result.data) ? result.data : [], cachedAt: result.historyCachedAt || '' }
 }
 
 export const adminApi = async (data, apiIndex = 0) => {

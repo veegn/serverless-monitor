@@ -27,6 +27,8 @@
       </div>
     </div>
 
+    <p v-if="historyCachedAt" role="status">{{ trans.historyCached }} · {{ formatTimestamp(historyCachedAt) }}</p>
+
     <div class="host-card">
       <div class="host-card-header">
         <div class="host-name">
@@ -42,9 +44,9 @@
           <span>{{ server.name || 'Loading...' }}</span>
           <span style="color: var(--text-muted);">:~#</span>
         </div>
-        <span class="status-badge" :class="{ online: isOnline, offline: !isOnline }">
-          <span class="pulse-dot" :class="{ online: isOnline, offline: !isOnline }"></span>
-          <span>{{ isOnline ? trans.online : trans.offline }}</span>
+        <span class="status-badge" :class="{ online: isOnline, offline: !isOnline && !server.metricsUnavailable }">
+          <span class="pulse-dot" :class="{ online: isOnline, offline: !isOnline && !server.metricsUnavailable }"></span>
+          <span>{{ isOnline ? trans.online : server.metricsUnavailable ? trans.metricsUnknown : trans.offline }}</span>
         </span>
       </div>
       <div class="sysinfo-grid" id="info-panel">
@@ -683,6 +685,7 @@ const pingChartRef = ref(null)
 const lossChartRef = ref(null)
 const loadChartRef = ref(null)
 const historyLoaded = ref(false)
+const historyCachedAt = ref('')
 const hasDiskIoData = ref(false)
 
 const charts = {}
@@ -1361,7 +1364,8 @@ const clearDiskIoChart = () => {
 
 const loadAllHistory = async (hours) => {
   try {
-    const allData = await fetchAllHistory(serverId, hours, apiIndex.value)
+    const { samples: allData, cachedAt } = await fetchAllHistory(serverId, hours, apiIndex.value)
+    historyCachedAt.value = cachedAt
     lastReportChartUpdateTime = 0
     lossHistoryFields.value = Object.fromEntries(PING_FIELD_DEFS.map(item => [
       item.lossField,
@@ -1765,6 +1769,7 @@ const fetchCurrentStatus = async (incomingData, options = {}) => {
         }
         newServer[key] = data[key]
       }
+      if (isServerOnline(newServer)) newServer.metricsUnavailable = false
       server.value = newServer
     } else {
       config.value = data.sysConfig || null

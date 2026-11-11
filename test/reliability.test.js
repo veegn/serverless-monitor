@@ -79,8 +79,9 @@ test('old DO snapshots migrate once and a failed migration read can be retried',
   assert.equal(storage.store.has('durable_history_v1:a'), true);
   fail = false;
   assert.equal((await store.history('a'))[0].cpu, 12);
-  assert.equal(storage.store.has('durable_history_v1:a'), false);
+  assert.equal(storage.store.has('durable_history_v1:a'), true);
   await store.ingest([update('a', [[now, 24]])], { now });
+  assert.equal(storage.store.has('durable_history_v1:a'), false);
   assert.equal((await new SqlMetricsStore(storage).history('a', { now })).length, 2);
 });
 

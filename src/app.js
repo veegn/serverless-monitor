@@ -26,6 +26,7 @@ import { verifyTurnstileToken } from './utils/common.js';
 import { getCorsAllowedOrigins, createOptionsResponse, applyCors } from './utils/cors.js';
 import { getRemoteVersion } from './utils/version.js';
 import { HISTORY_ALL_QUERY_COLUMNS } from './utils/historyFields.js';
+import { clearMetricsHistoryCache } from './utils/cache.js';
 import { withLogContext, requestLogContext, getLogContext, getLogCounts, getSlowThresholdMs, logEvent, logError, wasResponseLogged, correlationHeaders } from './utils/observability.js';
 import {
   CURRENT_VERSION,
@@ -367,13 +368,24 @@ export class ServerlessMonitorApp {
         if (!await checkAuth(request, this.env, sys)) {
           return simpleAuthResponse();
         }
-        const result = await this.dbService.clearHistory();
-        if (!result.success) throw new AppError('Failed to clear history', 503);
         if (!this.env.METRICS_BROADCASTER) throw new AppError('History storage unavailable', 503);
         const id = this.env.METRICS_BROADCASTER.idFromName('global');
         const stub = this.env.METRICS_BROADCASTER.get(id);
-        const response = await stub.fetch('http://internal/clear-history', { method: 'POST', headers: correlationHeaders() });
-        if (!response.ok) throw new AppError('Failed to clear history', 503);
+        let response;
+        try {
+          response = await stub.fetch('http://internal/clear-history', { method: 'POST', headers: correlationHeaders() });
+        } catch (error) {
+          const failure = new AppError('DO history cleanup did not finish', 503);
+          failure.cause = error;
+          throw failure;
+        }
+        if (!response.ok) {
+          const retryAfter = Number(response.headers.get('Retry-After'));
+          throw new AppError('DO history cleanup did not finish', 503, { retryAfterMs: retryAfter * 1000 });
+        }
+        clearMetricsHistoryCache();
+        const result = await this.dbService.clearHistory();
+        if (!result.success) throw new AppError('DO history cleared; legacy D1 cleanup failed', 503);
         return createSuccessResponse(result);
       }}
     ];

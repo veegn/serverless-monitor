@@ -170,6 +170,16 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
 
     await post('/test/fail-writes', {});
     await post('/test/fail-aux-writes', {});
+    await post('/test/fail-migrations', {});
+    const registry = await mf.getD1Database('DB');
+    await registry.prepare("INSERT INTO servers (id, name, is_hidden) VALUES ('new-node', 'New node', '0')").run();
+    await post('/test/forget-latest', {});
+    const serversResponse = await mf.dispatchFetch('https://monitor.test/api/servers');
+    assert.equal(serversResponse.status, 200, 'unmigrated nodes cannot block the dashboard');
+    const servers = await serversResponse.json();
+    assert.ok(servers.servers.some(server => server.id === 'new-node'));
+    assert.ok(servers.latestReportUpdates.some(update => update.serverId === 'visible'));
+    assert.equal((await mf.dispatchFetch('https://monitor.test/api/history/all?id=new-node&hours=1')).status, 200);
     const degradedResponse = await mf.dispatchFetch('https://monitor.test/ws?subscribe=all', { headers: { Upgrade: 'websocket' } });
     assert.equal(degradedResponse.status, 101, 'panel connects even when KV and Alarm writes fail');
     const degradedPanel = degradedResponse.webSocket;
@@ -205,6 +215,7 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
     assert.equal((await sendAgentReport(pending)).persisted, false);
     assert.deepEqual(await readHistory(), beforeInvalid);
     await post('/test/restore-writes', {});
+    await post('/test/restore-migrations', {});
     await post('/test/restore-aux-writes', {});
     const replayed = await sendAgentReport(pending);
     assert.equal(replayed.persisted, true);

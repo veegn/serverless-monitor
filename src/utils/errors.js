@@ -19,13 +19,17 @@ export function createErrorResponse(error, shouldLog = true) {
   const message = error instanceof AppError 
     ? error.message 
     : 'Internal Server Error';
+  const headers = { 'Content-Type': 'application/json' };
+  if (code === 503 && error.details?.retryAfterMs > 0) {
+    headers['Retry-After'] = String(Math.ceil(error.details.retryAfterMs / 1000));
+  }
 
   return new Response(JSON.stringify({ 
     error: message, 
     code: code 
   }), {
     status: code,
-    headers: { 'Content-Type': 'application/json' }
+    headers
   });
 }
 

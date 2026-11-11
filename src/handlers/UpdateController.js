@@ -488,9 +488,13 @@ export class UpdateController {
         if (response.status >= 400 && response.status < 500) {
           throw new AppError('Metrics report rejected', response.status);
         }
+        const retryAfter = Number(response.headers.get('Retry-After'));
+        if (response.status === 503 && retryAfter > 0 && Number.isFinite(retryAfter)) {
+          throw new AppError('Metrics storage unavailable; retry report', 503, { retryAfterMs: retryAfter * 1000 });
+        }
         throw new Error(`Metrics storage returned HTTP ${response.status}`);
       } catch (error) {
-        if (error instanceof AppError && error.code < 500) throw error;
+        if (error instanceof AppError && (error.code < 500 || error.details?.retryAfterMs)) throw error;
         lastError = error;
       }
       if (attempt < 2) {

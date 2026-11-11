@@ -11,6 +11,16 @@ const LEGACY_HISTORY_PREFIX = 'durable_history_v1:';
 const LEGACY_LATEST_KEY = 'cfsm:latest_report_updates';
 const hourOf = ts => Math.floor(ts / HOUR) * HOUR;
 
+function importLegacyState(block, offset, state, profiles) {
+  const previous = block.m[offset];
+  if (!previous) block.m[offset] = state;
+  else if (state.s.length && state.s.every(ts => !previous.s.includes(ts))) {
+    mergeAggregate(previous, state);
+    previous.s.push(...state.s);
+  }
+  Object.assign(block.g, profiles);
+}
+
 // History, status, receipt time and retry journal normally share one hourly row.
 // Every ACK follows a synchronous SQLite transaction; there is no volatile flush.
 export class SqlMetricsStore {
@@ -52,8 +62,22 @@ export class SqlMetricsStore {
 
   rows(query, ...bindings) { this.init(); return this.sql.exec(query, ...bindings).toArray(); }
 
+  select(query, ...bindings) {
+    if (!this.sql) throw new AppError('SQLite metrics storage unavailable', 503);
+    return this.sql.exec(query, ...bindings).toArray();
+  }
+
+  hasTable(name) {
+    return this.initialized || this.select("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", name).length > 0;
+  }
+
+  hasMigration(key) {
+    return this.hasTable('metric_migrations') &&
+      this.select('SELECT 1 FROM metric_migrations WHERE key = ?', key).length > 0;
+  }
+
   readBlock(serverId, hour) {
-    const rows = this.rows('SELECT * FROM metric_blocks WHERE server_id = ? AND bucket = ? ORDER BY part', serverId, hour);
+    const rows = this.select('SELECT * FROM metric_blocks WHERE server_id = ? AND bucket = ? ORDER BY part', serverId, hour);
     const block = emptyBlock();
     for (const row of rows) {
       const decoded = decodeMetricPart(row.payload, hour);
@@ -86,11 +110,9 @@ export class SqlMetricsStore {
 
   latestRow(serverId) {
     // Live-only nodes can check for a prior checkpoint without creating the schema.
-    if (!this.initialized && !this.sql.exec(
-      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'metric_blocks'"
-    ).toArray().length) return undefined;
-    return this.sql.exec(`SELECT bucket, received_at, sample_ts FROM metric_blocks
-      WHERE server_id = ? AND part = 0 AND received_at > 0 ORDER BY bucket DESC LIMIT 1`, serverId).toArray()[0];
+    if (!this.hasTable('metric_blocks')) return undefined;
+    return this.select(`SELECT bucket, received_at, sample_ts FROM metric_blocks
+      WHERE server_id = ? AND part = 0 AND received_at > 0 ORDER BY bucket DESC LIMIT 1`, serverId)[0];
   }
 
   async migrateLatest() {
@@ -126,21 +148,11 @@ export class SqlMetricsStore {
         if (this.rows('SELECT key FROM metric_migrations WHERE key = ?', `v2:${serverId}`).length) return;
         const hours = this.rows(`SELECT DISTINCT CAST(bucket / ? AS INTEGER) * ? AS hour FROM metric_history
           WHERE server_id = ? AND bucket >= ? AND bucket <= ? ORDER BY hour`, HOUR, HOUR, serverId, now - HISTORY_RETENTION_MS - MINUTE, now);
-        const importState = (entry, bucket, state, profiles = {}) => {
-          const offset = bucket - entry.hour;
-          const previous = entry.block.m[offset];
-          if (!previous) entry.block.m[offset] = state;
-          else if (!state.s.every(ts => previous.s.includes(ts))) {
-            const fresh = state.s.filter(ts => !previous.s.includes(ts));
-            if (fresh.length === state.s.length) { mergeAggregate(previous, state); previous.s.push(...fresh); }
-          }
-          Object.assign(entry.block.g, profiles);
-        };
         for (const { hour } of hours) {
           const entry = this.readBlock(serverId, hour);
           for (const row of this.rows('SELECT bucket, aggregate FROM metric_history WHERE server_id = ? AND bucket >= ? AND bucket < ?', serverId, hour, hour + HOUR)) {
             const { state, profiles } = legacyAggregate(JSON.parse(row.aggregate));
-            importState(entry, row.bucket, state, profiles);
+            importLegacyState(entry.block, row.bucket - hour, state, profiles);
           }
           this.writeBlock(entry, now);
         }
@@ -151,7 +163,7 @@ export class SqlMetricsStore {
           const hour = hourOf(ts);
           if (!snapshots.has(hour)) snapshots.set(hour, this.readBlock(serverId, hour));
           const { state, profiles } = legacyAggregate({ timestamp: ts, data: point, seen: [ts] });
-          importState(snapshots.get(hour), Math.floor(ts / MINUTE) * MINUTE, state, profiles);
+          importLegacyState(snapshots.get(hour).block, Math.floor(ts / MINUTE) * MINUTE - hour, state, profiles);
         }
         for (const entry of snapshots.values()) this.writeBlock(entry, now);
         const latest = this.rows('SELECT * FROM metric_latest WHERE server_id = ?', serverId)[0];
@@ -259,38 +271,91 @@ export class SqlMetricsStore {
     });
   }
 
-  async latest(serverIds, since = 0) {
+  async readCheckpoints(serverIds, read, onError) {
     const results = [];
+    let legacy;
     for (const serverId of serverIds) {
-      await this.migrateServer(serverId);
-      const row = this.latestRow(serverId);
-      if (!row || row.received_at < since) continue;
-      const { block } = this.readBlock(serverId, row.bucket);
-      if (block.l) results.push({ ...block.l, reportTs: block.l.reportTs ?? row.received_at });
+      try {
+        const row = this.latestRow(serverId);
+        if (row) {
+          results.push(read(serverId, row));
+          continue;
+        }
+        if (this.hasMigration(`v2:${serverId}`)) continue;
+        const old = this.hasTable('metric_latest') && this.select(
+          'SELECT received_at, data FROM metric_latest WHERE server_id = ?', serverId
+        )[0];
+        if (old) {
+          results.push(read(serverId, old));
+          continue;
+        }
+        legacy ||= this.hasMigration('__latest__') ? Promise.resolve(new Map()) :
+          Promise.resolve(this.storage.get(LEGACY_LATEST_KEY)).then(value => new Map(Array.isArray(value) ? value : []));
+        const update = (await legacy).get(serverId);
+        if (Number(update?.reportTs) > 0) results.push(read(serverId, { received_at: Number(update.reportTs), update }));
+      } catch (error) {
+        if (!onError) throw error;
+        onError(serverId, error);
+      }
     }
-    return results;
+    return results.filter(Boolean);
   }
 
-  async timestamps(serverIds) {
-    const result = {};
-    for (const serverId of serverIds) {
-      await this.migrateServer(serverId);
-      const row = this.latestRow(serverId);
-      if (row) result[serverId] = row.received_at;
+  async latest(serverIds, since = 0, onError = null) {
+    return this.readCheckpoints(serverIds, (id, row) => {
+      if (row.received_at < since) return null;
+      const update = row.update ?? (row.data !== undefined ? JSON.parse(row.data) : this.readBlock(id, row.bucket).block.l);
+      return update && { ...update, serverId: id, reportTs: update.reportTs ?? row.received_at };
+    }, onError);
+  }
+
+  async timestamps(serverIds, onError = null) {
+    return Object.fromEntries(await this.readCheckpoints(serverIds, (id, row) => [id, row.received_at], onError));
+  }
+
+  async readLegacyHistory(serverId, start, now) {
+    const blocks = new Map();
+    const add = (bucket, { state, profiles }) => {
+      const hour = hourOf(bucket);
+      if (!blocks.has(hour)) blocks.set(hour, emptyBlock());
+      importLegacyState(blocks.get(hour), bucket - hour, state, profiles);
+    };
+    if (this.hasTable('metric_history')) {
+      for (const row of this.select(
+        'SELECT bucket, aggregate FROM metric_history WHERE server_id = ? AND bucket >= ? AND bucket <= ? ORDER BY bucket',
+        serverId, hourOf(start), now
+      )) add(row.bucket, legacyAggregate(JSON.parse(row.aggregate)));
     }
-    return result;
+    const points = await this.storage.get(`${LEGACY_HISTORY_PREFIX}${serverId}`);
+    for (const point of Array.isArray(points) ? points : []) {
+      const ts = Number(point?.timestamp);
+      if (!Number.isFinite(ts) || ts < hourOf(start) || ts > now) continue;
+      add(Math.floor(ts / MINUTE) * MINUTE, legacyAggregate({ timestamp: ts, data: point, seen: [ts] }));
+    }
+    return blocks;
   }
 
   async history(serverId, { hours = 1, points = null, now = Date.now() } = {}) {
-    await this.migrateServer(serverId, now);
     const { durationMs, intervalMs, sourceIntervalMs, points: pointLimit } = historySampling(hours, points);
     const start = now - durationMs;
+    // Read old formats without creating schema or writing migration markers.
+    const migration = `v2:${serverId}`;
+    const legacy = this.hasMigration(migration) ? new Map() : await this.readLegacyHistory(serverId, start, now);
+    if (legacy.size && this.hasMigration(migration)) legacy.clear();
     const buckets = new Map();
     const profiles = {};
     // At most 169 ordinary hourly rows for seven days. Every minute participates;
     // choosing only the final minute in a window would lose spikes.
-    const rows = this.rows('SELECT bucket, part, payload FROM metric_blocks WHERE server_id = ? AND bucket >= ? AND bucket <= ? ORDER BY bucket, part', serverId, hourOf(start), hourOf(now));
+    const rows = this.hasTable('metric_blocks') ? this.select(
+      'SELECT bucket, part, payload FROM metric_blocks WHERE server_id = ? AND bucket >= ? AND bucket <= ? ORDER BY bucket, part',
+      serverId, hourOf(start), hourOf(now)
+    ) : [];
     const consume = (hour, block) => {
+      const old = legacy.get(hour);
+      if (old && old !== block) {
+        for (const [offset, state] of Object.entries(old.m)) importLegacyState(block, offset, state, old.g);
+      }
+      legacy.delete(hour);
       Object.assign(profiles, block.g);
       const fineByMinute = new Map();
       for (const [offset, state] of Object.entries(block.f)) {
@@ -318,6 +383,7 @@ export class SqlMetricsStore {
       Object.assign(block.m, decoded.m); Object.assign(block.f, decoded.f); Object.assign(block.g, decoded.g);
     }
     if (currentHour !== null) consume(currentHour, block);
+    for (const [hour, old] of legacy) consume(hour, old);
     return [...buckets].sort((a, b) => a[0] - b[0]).map(([, state]) => materializeAggregate(state, profiles));
   }
 
@@ -361,12 +427,17 @@ export class SqlMetricsStore {
 
   async clear() {
     this.init(); this.generation++;
-    this.storage.transactionSync(() => {
-      for (const table of ['metric_blocks', 'metric_history', 'metric_latest', 'metric_reports', 'metric_migrations']) this.sql.exec(`DELETE FROM ${table}`);
-    });
-    const legacy = await this.storage.list({ prefix: LEGACY_HISTORY_PREFIX });
-    if (legacy.size) await this.storage.delete([...legacy.keys()]);
-    await this.storage.delete(LEGACY_LATEST_KEY);
-    this.migrations.clear(); this.latestMigration = null;
+    try {
+      // Keep migration markers until legacy keys are gone to prevent reimport.
+      const legacy = await this.storage.list({ prefix: LEGACY_HISTORY_PREFIX });
+      if (legacy.size) await this.storage.delete([...legacy.keys()]);
+      await this.storage.delete(LEGACY_LATEST_KEY);
+      this.storage.transactionSync(() => {
+        for (const table of ['metric_blocks', 'metric_history', 'metric_latest', 'metric_reports', 'metric_migrations']) this.sql.exec(`DELETE FROM ${table}`);
+      });
+    } finally {
+      this.migrations.clear();
+      this.latestMigration = null;
+    }
   }
 }

@@ -126,16 +126,15 @@ export class DashboardController {
 }
 
   static async getDurableRealtimeState(env, serverIds) {
-  const empty = { latestReportUpdates: [] };
-  if (!env.METRICS_BROADCASTER || !Array.isArray(serverIds) || serverIds.length === 0) return empty;
-
-  try {
-    const id = env.METRICS_BROADCASTER.idFromName('global');
-    const stub = env.METRICS_BROADCASTER.get(id);
-    const updates = [];
-
-    for (let offset = 0; offset < serverIds.length; offset += DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE) {
-      const chunk = serverIds.slice(offset, offset + DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE);
+  if (!Array.isArray(serverIds) || !serverIds.length) return { latestReportUpdates: [], unavailableServerIds: [] };
+  if (!env.METRICS_BROADCASTER) return { latestReportUpdates: [], unavailableServerIds: serverIds };
+  const updates = [];
+  const unavailableServerIds = [];
+  for (let offset = 0; offset < serverIds.length; offset += DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE) {
+    const chunk = serverIds.slice(offset, offset + DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE);
+    try {
+      const id = env.METRICS_BROADCASTER.idFromName('global');
+      const stub = env.METRICS_BROADCASTER.get(id);
       const response = await stub.fetch('http://internal/latest-report-updates', {
         method: 'POST',
         headers: correlationHeaders({ 'Content-Type': 'application/json' }),
@@ -143,30 +142,29 @@ export class DashboardController {
       });
       if (!response.ok) throw new AppError('Realtime metrics unavailable', 503);
       const data = await response.json();
-      if (Array.isArray(data?.updates)) updates.push(...data.updates);
+      if (!Array.isArray(data?.updates)) throw new Error('Invalid latest report response');
+      updates.push(...data.updates);
+      if (Array.isArray(data.unavailableServerIds)) unavailableServerIds.push(...data.unavailableServerIds);
+    } catch (error) {
+      unavailableServerIds.push(...chunk);
+      logError('dashboard', 'dashboard.latest.failed', 'Latest report lookup failed; serving available data', error, { serverCount: chunk.length }, 'warn');
     }
-
-    return { latestReportUpdates: updates };
-  } catch (e) {
-    logError('dashboard', 'dashboard.latest.failed', 'Latest report lookup failed', e, {}, 'warn');
-    throw new AppError('Realtime metrics unavailable', 503);
   }
+  return { latestReportUpdates: updates, unavailableServerIds };
 }
 
   static async getDurableDashboardLatencyWindows(env, serverIds, options = {}) {
-    const empty = new Map();
-    if (!env?.METRICS_BROADCASTER || !Array.isArray(serverIds) || serverIds.length === 0) return empty;
+    const latencyMap = new Map();
+    if (!env?.METRICS_BROADCASTER || !Array.isArray(serverIds) || serverIds.length === 0) return latencyMap;
 
     const hours = options.hours || DASHBOARD_LATENCY_WINDOW_HOURS;
     const points = options.points || DASHBOARD_LATENCY_WINDOW_POINTS;
 
-    try {
-      const id = env.METRICS_BROADCASTER.idFromName('global');
-      const stub = env.METRICS_BROADCASTER.get(id);
-      const latencyMap = new Map();
-
-      for (let offset = 0; offset < serverIds.length; offset += DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE) {
-        const chunk = serverIds.slice(offset, offset + DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE);
+    for (let offset = 0; offset < serverIds.length; offset += DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE) {
+      const chunk = serverIds.slice(offset, offset + DASHBOARD_LATEST_REPORT_ID_CHUNK_SIZE);
+      try {
+        const id = env.METRICS_BROADCASTER.idFromName('global');
+        const stub = env.METRICS_BROADCASTER.get(id);
         const response = await stub.fetch('http://internal/dashboard-latency-windows', {
           method: 'POST',
           headers: correlationHeaders({ 'Content-Type': 'application/json' }),
@@ -181,13 +179,11 @@ export class DashboardController {
             }
           }
         }
+      } catch (error) {
+        logError('dashboard', 'dashboard.latency.failed', 'Latency window lookup failed', error, { serverCount: chunk.length }, 'warn');
       }
-
-      return latencyMap;
-    } catch (e) {
-      logError('dashboard', 'dashboard.latency.failed', 'Latency window lookup failed', e, {}, 'warn');
-      return empty;
     }
+    return latencyMap;
   }
 
   static async getDurableHistory(env, serverId, hours = 1, columns = '', points = null) {
@@ -242,7 +238,7 @@ export class DashboardController {
       .filter(Boolean)
   ));
   if (normalizedServerIds.length === 0) {
-    return { latestReportUpdates: [] };
+    return { latestReportUpdates: [], unavailableServerIds: [] };
   }
 
   const durableState = await DashboardController.getDurableRealtimeState(env, normalizedServerIds);
@@ -254,6 +250,7 @@ export class DashboardController {
   }
 
   return {
+    unavailableServerIds: durableState.unavailableServerIds,
     latestReportUpdates: DashboardController.mergeLatestReportUpdates(
       normalizedServerIds,
       durableLatestReportUpdates,
@@ -291,6 +288,7 @@ export class DashboardController {
     }
   }
   mergeMetricsIntoServer(server, effectiveMetrics);
+  server.metricsUnavailable = realtimeState.unavailableServerIds.includes(id);
   let latestReportUpdates = realtimeState.latestReportUpdates;
   if ((!latestReportUpdates || latestReportUpdates.length === 0) && effectiveMetrics) {
     const reportTs = effectiveMetrics.timestamp || Date.now();
@@ -386,7 +384,7 @@ export class DashboardController {
   const sampling = historySampling(clampedHours, longHistoryPoints);
   const headers = { 'X-History-Interval-Seconds': String(sampling.intervalMs / 1000) };
 
-  const cached = getMetricsHistoryCache(id, clampedHours, columns, longHistoryPoints);
+  const cached = getMetricsHistoryCache(id, clampedHours, columns, longHistoryPoints, { allowStale: true });
   if (cached && Date.now() - cached.timestamp < cacheDuration) {
     const cachedData = Array.isArray(cached.data)
       ? cached.data.map(DashboardController.omitNullLossProbeFields)
@@ -394,7 +392,16 @@ export class DashboardController {
     return createSuccessResponse(cachedData, { ...headers, 'X-Cache': 'HIT' });
   }
 
-  let data = await DashboardController.getDurableHistory(env, id, clampedHours, columns, longHistoryPoints);
+  let data;
+  try {
+    data = await DashboardController.getDurableHistory(env, id, clampedHours, columns, longHistoryPoints);
+  } catch (error) {
+    if (!cached || Date.now() >= cached.staleUntil) throw error;
+    return createSuccessResponse(cached.data.map(DashboardController.omitNullLossProbeFields), {
+      ...headers, 'X-Cache': 'STALE', 'X-History-Cached-At': new Date(cached.timestamp).toISOString(),
+      'Cache-Control': 'no-store'
+    });
+  }
   if (!Array.isArray(data)) {
     data = [];
   }

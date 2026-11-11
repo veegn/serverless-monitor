@@ -113,7 +113,8 @@ const handleResponse = async (res, options = {}) => {
       localStorage.setItem(TURNSTILE_VERIFIED_KEY, data.turnstile_verified)
       localStorage.removeItem(STORAGE.TURNSTILE_TOKEN)
     }
-    return { data, status: res.status }
+    const historyCachedAt = res.headers.get('X-History-Cached-At')
+    return { data, status: res.status, ...(historyCachedAt ? { historyCachedAt } : {}) }
   } catch (e) {
     return { data: null, status: res.status }
   }

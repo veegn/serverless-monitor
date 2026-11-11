@@ -84,6 +84,11 @@ const RESOURCE_ALERT_MODE_CONTINUOUS = 'continuous';
 const MODE_REVISION_STORAGE_KEY = 'agent_mode_revision';
 const MODE_STATE_STORAGE_KEY = 'agent_mode_state';
 const MAX_LIVE_REPORT_IDS = 10_000;
+const WRITE_QUOTA_BACKOFF_MS = 60_000;
+
+function isWriteQuotaError(error) {
+  return /\b(?:write quota|daily (?:storage )?writes? limit|(?:rows written|storage writes).{0,50}(?:quota|limit)|(?:quota|limit).{0,50}(?:rows written|storage writes))\b/i.test(error?.message || '');
+}
 
 function validateReportId(reportId) {
   if (reportId !== null && (typeof reportId !== 'string' || reportId.length === 0 || reportId.length > 128)) {
@@ -315,6 +320,7 @@ export class MetricsBroadcaster {
     this.lastModeState = null;
     this.maintenanceAlarmAt = 0;
     this.maintenanceScheduleRetryAt = 0;
+    this.storageWriteRetryAt = 0;
     this.pendingFrontendBroadcasts = new Map();
     this.frontendBroadcastTimer = null;
     this.pendingFrontendBroadcastTs = 0;
@@ -962,6 +968,7 @@ export class MetricsBroadcaster {
       this.reportLogs.flush();
       try { return await this.runMaintenance(started); }
       catch (error) {
+        this._noteWriteQuota(error);
         logError('storage', 'maintenance.failed', 'Durable Object maintenance failed; Alarm will retry', error, { durationMs: Date.now() - started });
         throw error;
       }
@@ -970,12 +977,17 @@ export class MetricsBroadcaster {
 
   async runMaintenance(started = Date.now()) {
     this.maintenanceAlarmAt = 0;
+    try {
+      const settings = await loadSettingsScope(this.env.DB, 'monitoring', { forceRefresh: true });
+      if (!isWssReportConfigured(settings)) this._closeAgentReportWebSockets();
+    } catch (error) {
+      logError('storage', 'maintenance.monitoring.failed', 'Monitoring settings unavailable during maintenance', error, {}, 'warn');
+    }
+    this._checkStorageWriteBackoff();
     const more = this.metricsStore.cleanup();
     const moreSessions = await this.frontendSubscriptions.cleanup(this._getFrontendWebSockets());
     await this._ensureResourceAlertSnapshotLoaded();
     await this._persistResourceAlertSnapshotIfNeeded(Date.now(), true);
-    const settings = await loadSettingsScope(this.env.DB, 'monitoring', { forceRefresh: true });
-    if (!isWssReportConfigured(settings)) this._closeAgentReportWebSockets();
     if (this.state.storage?.setAlarm) {
       const next = Date.now() + (more || moreSessions ? 1000 : this.resourceAlertSnapshotDirty ? 60_000 : 3600_000);
       await this.state.storage.setAlarm(next);
@@ -1303,6 +1315,7 @@ export class MetricsBroadcaster {
     if (latestUpdates.some(update => !serverIds.has(update.serverId))) throw new AppError('Invalid latest report server', 400);
     const fingerprint = options.fingerprint || await reportFingerprint(updates);
     validateReportId(reportId);
+    this._checkStorageWriteBackoff();
     if (options.checkpointLive === true) {
       this._pruneLatestReportUpdates();
       for (let index = 0; index < latestUpdates.length; index++) {
@@ -1333,8 +1346,21 @@ export class MetricsBroadcaster {
       const status = error instanceof AppError ? error.code : 503;
       logError('storage', 'metrics.commit.failed', status < 500 ? 'Metrics report rejected' : 'Metrics commit failed; Agent must retry',
         error, { ...metadata, persisted: false, status, durationMs: Date.now() - started }, status < 500 ? 'warn' : 'error');
-      throw error;
+      throw this._noteWriteQuota(error);
     }
+  }
+
+  _checkStorageWriteBackoff() {
+    const retryAfterMs = this.storageWriteRetryAt - Date.now();
+    if (retryAfterMs > 0) throw new AppError('Metrics storage write quota exhausted', 503, { retryAfterMs });
+  }
+
+  _noteWriteQuota(error) {
+    if (error instanceof AppError || !isWriteQuotaError(error)) return error;
+    this.storageWriteRetryAt = Date.now() + WRITE_QUOTA_BACKOFF_MS;
+    const retry = new AppError('Metrics storage write quota exhausted', 503, { retryAfterMs: WRITE_QUOTA_BACKOFF_MS });
+    retry.cause = error;
+    return retry;
   }
 
   async _ensureMaintenanceAlarm(delayMs = 3600_000) {
@@ -1349,10 +1375,11 @@ export class MetricsBroadcaster {
   }
 
   async _ensureMaintenanceAlarmBestEffort(delayMs) {
-    if (Date.now() < this.maintenanceScheduleRetryAt) return;
+    if (Date.now() < Math.max(this.maintenanceScheduleRetryAt, this.storageWriteRetryAt)) return;
     try {
       await this._ensureMaintenanceAlarm(delayMs);
     } catch (error) {
+      this._noteWriteQuota(error);
       this.maintenanceScheduleRetryAt = Date.now() + 60_000;
       logError('storage', 'metrics.maintenance.failed', 'Maintenance scheduling failed', error, {}, 'warn');
     }
@@ -1414,7 +1441,7 @@ export class MetricsBroadcaster {
     const retryable = !(error instanceof AppError) || error.code >= 500;
     this._sendWsJson(ws, { type: 'ack', ackFor: 'report', ts: Date.now(), accepted: false,
       ...(data.batch === true ? { persisted: false, acceptedSamples: 0 } : {}),
-      ...(retryable ? { retryAfterMs: 1000 } : { error: error.message, code: error.code }),
+      ...(retryable ? { retryAfterMs: error.details?.retryAfterMs || 1000 } : { error: error.message, code: error.code }),
       ...(data.reportId ? { reportId: data.reportId } : {}) });
   }
 
@@ -1836,7 +1863,8 @@ export class MetricsBroadcaster {
         if (persistence.duplicate) return Response.json({ ok: true, persisted: true, duplicate: true, latestAccepted: false });
       } catch (error) {
         return Response.json({ error: error.message, persisted: false }, {
-          status: error instanceof AppError ? error.code : 503
+          status: error instanceof AppError ? error.code : 503,
+          headers: error.details?.retryAfterMs ? { 'Retry-After': String(Math.ceil(error.details.retryAfterMs / 1000)) } : undefined
         });
       }
       const normalizedUpdates = persistence.latestUpdates;
@@ -1870,7 +1898,7 @@ export class MetricsBroadcaster {
       const body = await request.json();
       const ids = this._normalizeServerIds(body?.serverIds);
       if (!ids.ok) return new Response('Invalid serverIds', { status: 400 });
-      return Response.json({ timestamps: await this._getLatestReportTimestamps(ids.ids) });
+      return Response.json(await this._getLatestReportTimestamps(ids.ids));
     }
 
     if (method === 'POST' && path === '/latest-report-updates') {
@@ -1892,8 +1920,9 @@ export class MetricsBroadcaster {
         });
       }
 
-      const updates = await this._getLatestReportUpdates(normalizedServerIds.ids);
-      const payload = { updates };
+      const unavailableServerIds = [];
+      const updates = await this._getLatestReportUpdates(normalizedServerIds.ids, unavailableServerIds);
+      const payload = { updates, unavailableServerIds };
 
       return new Response(JSON.stringify(payload), {
         headers: {
@@ -2066,7 +2095,15 @@ export class MetricsBroadcaster {
   }
 
   async _handleClearHistory() {
-    await this.metricsStore.clear();
+    try {
+      this._checkStorageWriteBackoff();
+      await this.metricsStore.clear();
+    } catch (error) {
+      const failure = this._noteWriteQuota(error);
+      logError('storage', 'metrics.clear.failed', 'History cleanup did not finish', failure);
+      return Response.json({ error: 'DO history cleanup did not finish' }, { status: 503,
+        headers: failure.details?.retryAfterMs ? { 'Retry-After': String(Math.ceil(failure.details.retryAfterMs / 1000)) } : undefined });
+    }
     this.latestReportUpdates.clear();
     this.liveReportIds.clear();
     this.liveReportReceipts.clear();
@@ -2079,18 +2116,20 @@ export class MetricsBroadcaster {
     });
   }
 
-  async _getLatestReportUpdates(serverIds) {
+  async _getLatestReportUpdates(serverIds, unavailableServerIds = []) {
     const now = Date.now();
     this._pruneLatestReportUpdates(now);
     const cached = new Map(serverIds.map(id => [id, this.latestReportUpdates.get(id)]).filter(([, update]) => update));
     const missing = serverIds.filter(id => !cached.has(id));
     const stored = new Map();
     if (missing.length) {
-      try {
-        for (const update of await this.metricsStore.latest(missing)) stored.set(update.serverId, update);
-      } catch (error) {
-        if (!cached.size && !serverIds.some(id => this.latestReportUpdates.has(id))) throw error;
-        logError('storage', 'metrics.latest.read_failed', 'Latest checkpoint lookup failed; serving live data', error, {}, 'warn');
+      for (const update of await this.metricsStore.latest(missing, 0, (serverId, error) => {
+        unavailableServerIds.push(serverId);
+        if (unavailableServerIds.length === 1) {
+          logError('storage', 'metrics.latest.read_failed', 'Latest checkpoint lookup failed', error, { serverId }, 'warn');
+        }
+      })) {
+        stored.set(update.serverId, update);
       }
     }
     return serverIds.map(id => this.latestReportUpdates.get(id) || cached.get(id) || stored.get(id))
@@ -2106,17 +2145,17 @@ export class MetricsBroadcaster {
         timestamps.set(attachment.serverId, Math.max(timestamps.get(attachment.serverId), attachment.lastReportAt || 0));
       }
     }
-    try {
-      const stored = await this.metricsStore.timestamps(serverIds);
-      for (const [id, receivedAt] of Object.entries(stored)) {
-        timestamps.set(id, Math.max(timestamps.get(id) || 0, receivedAt));
+    const unavailableServerIds = [];
+    const stored = await this.metricsStore.timestamps(serverIds, (serverId, error) => {
+      unavailableServerIds.push(serverId);
+      if (unavailableServerIds.length === 1) {
+        logError('storage', 'metrics.timestamps.read_failed', 'Checkpoint timestamp unavailable', error, { serverId }, 'warn');
       }
-    } catch (error) {
-      // A partial heartbeat response would mark the unknown nodes offline.
-      if ([...timestamps.values()].some(receivedAt => !receivedAt)) throw error;
-      logError('storage', 'metrics.timestamps.read_failed', 'Checkpoint timestamps unavailable; using live receipts', error, {}, 'warn');
+    });
+    for (const [id, receivedAt] of Object.entries(stored)) {
+      timestamps.set(id, Math.max(timestamps.get(id) || 0, receivedAt));
     }
-    return Object.fromEntries([...timestamps].filter(([, receivedAt]) => receivedAt > 0));
+    return { timestamps: Object.fromEntries([...timestamps].filter(([, receivedAt]) => receivedAt > 0)), unavailableServerIds };
   }
 
   async _getDashboardLatencyWindows(serverIds, hours = DASHBOARD_LATENCY_WINDOW_HOURS, points = DASHBOARD_LATENCY_WINDOW_POINTS) {
@@ -2127,7 +2166,13 @@ export class MetricsBroadcaster {
     const intervalMs = Math.max(10_000, Math.ceil((queryEnd - queryStart) / points));
 
     for (const serverId of serverIds) {
-      const history = await this.metricsStore.history(serverId, { hours, points: Math.ceil(hours * 60), now });
+      let history;
+      try {
+        history = await this.metricsStore.history(serverId, { hours, points: Math.ceil(hours * 60), now });
+      } catch (error) {
+        logError('storage', 'metrics.history.read_failed', 'Latency history unavailable', error, { serverId }, 'warn');
+        continue;
+      }
 
       if (!history || history.length === 0) {
         windows[serverId] = { ping: [], loss: [] };
@@ -2204,10 +2249,14 @@ export class MetricsBroadcaster {
       targetIds = targetIds.filter(id => allowedIds.includes(id));
       // Keep individual frames bounded even if many nodes have large backfill batches.
       for (let offset = 0; offset < targetIds.length; offset += 10) {
-        const updates = await this._getLatestReportUpdates(targetIds.slice(offset, offset + 10));
-        if (updates.length > 0) this._sendWsJson(ws, {
-          type: 'batchUpdate', ts: Date.now(), updates: updates.map(maskPublicIpUpdate)
-        });
+        try {
+          const updates = await this._getLatestReportUpdates(targetIds.slice(offset, offset + 10));
+          if (updates.length > 0) this._sendWsJson(ws, {
+            type: 'batchUpdate', ts: Date.now(), updates: updates.map(maskPublicIpUpdate)
+          });
+        } catch (error) {
+          logError('frontend', 'frontend.replay.failed', 'Report replay batch failed', error, {}, 'warn');
+        }
       }
     } catch (e) {
       logError('frontend', 'frontend.replay.failed', 'Report replay failed', e, {}, 'warn');
@@ -2317,6 +2366,7 @@ export class MetricsBroadcaster {
   }
 
   async _persistResourceAlertSnapshotIfNeeded(now = Date.now(), force = false) {
+    if (now < this.storageWriteRetryAt) return;
     if (!this.resourceAlertSnapshotDirty && !force) return;
     if (!force && now - this.resourceAlertLastSnapshotAttempt < RESOURCE_ALERT_SNAPSHOT_INTERVAL_MS) return;
     this.resourceAlertLastSnapshotAttempt = now;
@@ -2338,6 +2388,7 @@ export class MetricsBroadcaster {
       });
       this.resourceAlertSnapshotDirty = false;
     } catch (e) {
+      this._noteWriteQuota(e);
       logError('alert', 'alert.snapshot.save_failed', 'Resource alert snapshot write failed; maintenance will retry', e, {}, 'warn');
     }
   }

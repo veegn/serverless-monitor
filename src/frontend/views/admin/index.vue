@@ -68,6 +68,10 @@
             <div class="stat-main-value" id="stat-offline">{{ stats.offline }}</div>
             <div class="stat-label">{{ trans.offline }}</div>
           </div>
+          <div v-if="stats.unknown" class="stat-card">
+            <div class="stat-main-value">{{ stats.unknown }}</div>
+            <div class="stat-label">{{ trans.metricsUnknown }}</div>
+          </div>
           <div class="stat-card">
             <div class="stat-main-value" id="stat-avg-cpu">{{ stats.avg_cpu }}%</div>
             <div class="stat-label">{{ trans.avgCpu }}</div>

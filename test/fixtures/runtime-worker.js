@@ -74,6 +74,15 @@ export class RuntimeBroadcaster extends BaseBroadcaster {
       this.state.storage.sql.exec('DROP TRIGGER fail_latest');
       return new Response('OK');
     }
+    if (path === '/test/fail-migrations') {
+      this.state.storage.sql.exec(`CREATE TRIGGER fail_migrations BEFORE INSERT ON metric_migrations
+        BEGIN SELECT RAISE(ABORT, 'simulated migration write failure'); END`);
+      return new Response('OK');
+    }
+    if (path === '/test/restore-migrations') {
+      this.state.storage.sql.exec('DROP TRIGGER fail_migrations');
+      return new Response('OK');
+    }
     if (path === '/test/fail-aux-writes') {
       this.originalState = this.state;
       const storage = new Proxy(this.state.storage, { get(target, key) {

@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeD1 } from './helpers/d1.js';
+import { ServerlessMonitorApp } from '../src/app.js';
 import { AdminController } from '../src/handlers/AdminController.js';
 import { checkAuth, generateToken, getWebSocketIdentity } from '../src/middleware/auth.js';
+import { getMetricsHistoryCache, setMetricsHistoryCache } from '../src/utils/cache.js';
 import { loadSettings } from '../src/utils/settings.js';
 
 const setup = async () => {
@@ -86,4 +88,44 @@ test('partial settings saves preserve hidden preferences, query credentials, and
   assert.equal(persisted.cloudflare_token, 'analytics-token');
   assert.equal(persisted.auto_register_token, 'active-registration-key');
   assert.equal(Number(persisted.auto_register_token_expires), 9876543210);
+});
+
+test('history cleanup only invalidates the Worker cache after the DO confirms deletion', async () => {
+  const { env, token } = await setup();
+  env.API_SECRET = 'maintenance-test-secret';
+  let doFailed = true;
+  let d1Attempts = 0;
+  const app = new ServerlessMonitorApp({
+    ...env,
+    METRICS_BROADCASTER: {
+      idFromName: () => 'global',
+      get: () => ({
+        fetch: async () => doFailed
+          ? new Response(null, { status: 503, headers: { 'Retry-After': '60' } })
+          : Response.json({ ok: true })
+      })
+    }
+  });
+  app.dbService.clearHistory = async () => {
+    d1Attempts++;
+    return { success: false };
+  };
+  const clear = () => app.fetch(new Request('https://monitor.test/clearHistory', {
+    method: 'POST', headers: { Authorization: `Bearer ${token}` }
+  }));
+  const serverId = 'history-cleanup-cache-test';
+  setMetricsHistoryCache(serverId, 1, 'cpu', [{ timestamp: Date.now(), cpu: 42 }]);
+
+  const blocked = await clear();
+  assert.equal(blocked.status, 503);
+  assert.equal(blocked.headers.get('Retry-After'), '60');
+  assert.equal(d1Attempts, 0);
+  assert.ok(getMetricsHistoryCache(serverId, 1, 'cpu'));
+
+  doFailed = false;
+  const partial = await clear();
+  assert.equal(partial.status, 503);
+  assert.match((await partial.json()).error, /DO history cleared.*D1 cleanup failed/);
+  assert.equal(d1Attempts, 1);
+  assert.ok(!getMetricsHistoryCache(serverId, 1, 'cpu', null, { allowStale: true }));
 });

@@ -159,7 +159,8 @@
               >{{ server.agent_version || '●' }}</span>
             </td>
             <td>
-              <span :style="{ color: server.is_online ? 'var(--accent-green)' : 'var(--accent-red)' }" class="font-bold">{{ (server.is_online ? '● ' + trans.online : '● ' + trans.offline).toUpperCase() }}</span>
+              <span v-if="server.is_online === null">{{ trans.metricsUnknown }}</span>
+              <span v-else :style="{ color: server.is_online ? 'var(--accent-green)' : 'var(--accent-red)' }" class="font-bold">{{ (server.is_online ? '● ' + trans.online : '● ' + trans.offline).toUpperCase() }}</span>
             </td>
             <td>
               <div class="action-group">

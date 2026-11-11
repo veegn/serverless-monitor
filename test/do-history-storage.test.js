@@ -78,7 +78,7 @@ test('DO History: Ingests, persists to DO storage, and responds to GET /history'
   assert.equal(decimateBody.data.length, 1);
 });
 
-test('DO History: Restores lazily from storage on cold start', async () => {
+test('DO History: reads legacy storage on cold start without writes', async () => {
   const storage = makeMockStorage();
   const baseTs = Date.now();
   // Pre-seed storage as if from a previous session
@@ -90,7 +90,7 @@ test('DO History: Restores lazily from storage on cold start', async () => {
   const newBroadcaster = makeBroadcasterWithStorage(storage);
   assert.equal(storage.store.has('durable_history_v1:server-reboot-01'), true);
 
-  // Querying /history restores it lazily
+  // Reads retain the legacy key until the next successful ingestion migrates it.
   const req = new Request(`http://internal/history?serverId=server-reboot-01&hours=1`);
   const res = await newBroadcaster.fetch(req);
   assert.equal(res.status, 200);
@@ -100,7 +100,8 @@ test('DO History: Restores lazily from storage on cold start', async () => {
   assert.equal(body.data.length, 2);
   assert.equal(body.data[0].cpu, 12);
   assert.equal(body.data[1].cpu, 25);
-  assert.equal(storage.store.has('durable_history_v1:server-reboot-01'), false);
+  assert.equal(storage.store.has('durable_history_v1:server-reboot-01'), true);
+  assert.equal(newBroadcaster.metricsStore.initialized, false);
 });
 
 test('HTTP Update: D1 quota error is gracefully caught and does not block broadcast', async () => {
@@ -142,9 +143,13 @@ test('HTTP Update: D1 quota error is gracefully caught and does not block broadc
   assert.equal(res.status, 200);
 });
 
-test('DashboardController: handleHistory returns DO history directly when available', async () => {
+test('DashboardController: handleHistory retains a bounded stale cache after DO failure', async t => {
+  const now = Date.now();
+  t.mock.timers.enable({ apis: ['Date'], now });
+  let unavailable = false;
   const fakeBroadcaster = {
     async fetch(url) {
+      if (unavailable) return new Response(null, { status: 503 });
       return new Response(JSON.stringify({
         ok: true,
         data: [
@@ -175,6 +180,15 @@ test('DashboardController: handleHistory returns DO history directly when availa
   assert.equal(json.length, 2);
   assert.equal(json[0].cpu, 15);
   assert.equal(json[1].cpu, 25);
+  unavailable = true;
+  t.mock.timers.setTime(now + 2 * 60_000);
+  const stale = await controller.handleHistory(req, 'srv-test-do', 1, 'cpu', { is_public: 'true' });
+  assert.equal(stale.headers.get('X-Cache'), 'STALE');
+  assert.equal(stale.headers.get('X-History-Cached-At'), new Date(now).toISOString());
+  assert.deepEqual(await stale.json(), json);
+  t.mock.timers.setTime(now + 20 * 60_000);
+  await assert.rejects(controller.handleHistory(req, 'srv-test-do', 1, 'cpu', { is_public: 'true' }),
+    error => error.code === 503);
 });
 
 test('DO History: Clears history on POST /clear-history', async () => {

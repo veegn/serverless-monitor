@@ -3,6 +3,31 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ServerService } from '../src/services/ServerService.js';
 import { clearServersListCache } from '../src/utils/cache.js';
+import { cacheLatestReportUpdate } from '../src/utils/latestReportCache.js';
+
+test('server list uses authorized cached metrics and separates unknown nodes during DO failure', async () => {
+  clearServersListCache();
+  const now = Date.now();
+  cacheLatestReportUpdate('quota-cached', [{ ts: now, data: { cpu: 25 } }], now);
+  cacheLatestReportUpdate('quota-hidden', [{ ts: now, data: { cpu: 100 } }], now);
+  const env = {
+    DB: makeD1({ servers: [
+      { id: 'quota-cached', name: 'Cached' },
+      { id: 'quota-unknown', name: 'Unknown' },
+      { id: 'quota-hidden', name: 'Hidden', is_hidden: 1 }
+    ] }),
+    METRICS_BROADCASTER: { idFromName: () => 'global',
+      get: () => ({ fetch: async () => new Response(null, { status: 503 }) }) }
+  };
+  const result = await ServerService.getServersWithState(env);
+  assert.equal(result.servers.length, 2);
+  assert.equal(result.servers.find(server => server.id === 'quota-cached').cpu, 25);
+  assert.equal(result.servers.find(server => server.id === 'quota-unknown').is_online, null);
+  assert.deepEqual(result.latestReportUpdates.map(update => update.serverId), ['quota-cached']);
+  assert.equal(result.stats.online, 1);
+  assert.equal(result.stats.offline, 0);
+  assert.equal(result.stats.unknown, 1);
+});
 
 test('ServerService: admin mode retains real IPs, hidden nodes, and private note while stripping secret', async () => {
   clearServersListCache();

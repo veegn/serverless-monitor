@@ -63,7 +63,7 @@ test('live snapshots stay in memory; batches store only samples and keep top-lev
   assert.equal(ack.acceptedSamples, undefined);
   assert.equal(f.broadcaster.metricsStore.initialized, false, 'live reports must not create storage tables');
   assert.equal((await realtime(f.broadcaster)).samples[0].data.cpu, 90);
-  assert.equal((await f.broadcaster._getLatestReportTimestamps(['node'])).node, now);
+  assert.equal((await f.broadcaster._getLatestReportTimestamps(['node'])).timestamps.node, now);
   assert.deepEqual(await history(f.broadcaster), []);
   assert.equal(await latest(f.broadcaster), undefined);
   const report = batch('batch', now + 2000, 95);
@@ -139,7 +139,7 @@ test('repeated live report IDs are idempotent within the running DO', async t =>
   assert.equal((await f.send(report)).accepted, true);
   assert.equal(f.broadcasts.length, 1);
   assert.equal((await realtime(f.broadcaster)).reportTs, now);
-  assert.equal((await f.broadcaster._getLatestReportTimestamps(['node'])).node, now);
+  assert.equal((await f.broadcaster._getLatestReportTimestamps(['node'])).timestamps.node, now);
   await f.send({ ...report, metrics: { cpu: 91 } });
   assert.equal(f.closed.at(-1)[0], 1008);
 });
@@ -221,6 +221,22 @@ test('a failed maintenance Alarm cannot turn a committed history batch into a ne
   const ack = await f.send(batch('committed-despite-alarm'));
   assert.equal(ack.persisted, true);
   assert.equal(ack.acceptedSamples, 2);
+  assert.deepEqual((await history(f.broadcaster)).map(row => row.cpu), [10, 20]);
+});
+
+test('write quota backoff preserves live reports and retries history after the cooldown', async t => {
+  const f = fixture(t);
+  f.broadcaster.metricsStore.init();
+  f.storage.db.exec("CREATE TRIGGER blocked BEFORE INSERT ON metric_blocks BEGIN SELECT RAISE(ABORT, 'write quota exhausted'); END");
+  const report = batch('quota');
+  assert.equal((await f.send(report)).retryAfterMs, 60_000);
+  f.storage.db.exec('DROP TRIGGER blocked');
+  assert.equal((await f.send(report)).persisted, false, 'pending history is still unconfirmed during cooldown');
+  assert.equal((await f.send(live('live-during-quota', now + 1000))).accepted, true);
+  assert.equal((await realtime(f.broadcaster)).samples[0].ts, now + 1000);
+  assert.deepEqual(await history(f.broadcaster), []);
+  t.mock.timers.setTime(now + 60_000);
+  assert.equal((await f.send(report)).persisted, true);
   assert.deepEqual((await history(f.broadcaster)).map(row => row.cpu), [10, 20]);
 });
 

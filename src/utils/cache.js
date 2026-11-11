@@ -135,28 +135,33 @@ function getCacheKey(serverId, hours, columns, samplePoints = null) {
   return `${serverId}:${hours}:${sortedColumns}${sampleSuffix}`;
 }
 
-export function getMetricsHistoryCache(serverId, hours, columns, samplePoints = null) {
+export function getMetricsHistoryCache(serverId, hours, columns, samplePoints = null, { allowStale = false } = {}) {
   const key = getCacheKey(serverId, hours, columns, samplePoints);
   const entry = metricsHistoryCache.get(key);
-  if (entry && Date.now() >= entry.expiresAt) {
+  if (entry && Date.now() >= entry.staleUntil) {
     metricsHistoryCache.delete(key);
     return null;
   }
-  return entry;
+  return !allowStale && entry && Date.now() >= entry.expiresAt ? null : entry;
 }
 
 export function setMetricsHistoryCache(serverId, hours, columns, data, samplePoints = null) {
   const key = getCacheKey(serverId, hours, columns, samplePoints);
   const now = Date.now();
   for (const [cachedKey, entry] of metricsHistoryCache) {
-    if (entry.expiresAt <= now) metricsHistoryCache.delete(cachedKey);
+    if (entry.staleUntil <= now) metricsHistoryCache.delete(cachedKey);
   }
   metricsHistoryCache.delete(key);
-  metricsHistoryCache.set(key, { data, timestamp: now, expiresAt: now + getCacheDuration(hours, samplePoints) });
+  const expiresAt = now + getCacheDuration(hours, samplePoints);
+  metricsHistoryCache.set(key, { data, timestamp: now, expiresAt, staleUntil: expiresAt + 5 * 60_000 });
   while (metricsHistoryCache.size > 512) metricsHistoryCache.delete(metricsHistoryCache.keys().next().value);
 }
 
 export function clearMetricsHistoryCache(serverId) {
+  if (serverId === undefined) {
+    metricsHistoryCache.clear();
+    return;
+  }
   for (const key of metricsHistoryCache.keys()) {
     if (key.startsWith(`${serverId}:`)) {
       metricsHistoryCache.delete(key);
@@ -166,7 +171,7 @@ export function clearMetricsHistoryCache(serverId) {
 
 export function clearAllCaches() {
   clearServersListCache();
-  metricsHistoryCache.clear();
+  clearMetricsHistoryCache();
   clearSiteSettingsCache();
   clearAppearanceSettingsCache();
 }

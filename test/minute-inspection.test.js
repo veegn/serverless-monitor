@@ -33,7 +33,8 @@ async function fixture(t, { settings = {}, runtime = {} } = {}) {
       requests.push({ url, body });
       if (url.endsWith('/latest-timestamps')) {
         if (control.failTimestamps) return new Response('Unavailable', { status: 503 });
-        return Response.json({ timestamps: { a: Date.now() - (control.offline ? 10 * 60_000 : 0) } });
+        return Response.json({ timestamps: { a: Date.now() - (control.offline ? 10 * 60_000 : 0) },
+          unavailableServerIds: control.unavailableServerIds });
       }
       assert.ok(url.endsWith('/evaluate-resource-alerts'));
       return Response.json({ results: body.rules.map(rule => {
@@ -95,6 +96,18 @@ test('offline notification failure remains retryable and the next inspection see
   await f.tick(3);
   assert.deepEqual(f.readState('alert_state'), {});
   assert.equal(f.notifications.length, 3);
+});
+
+test('offline inspection preserves state for nodes with an unavailable heartbeat lookup', async t => {
+  const f = await fixture(t);
+  f.control.offline = true;
+  f.control.unavailableServerIds = ['a'];
+  await f.tick(1);
+  assert.equal(f.notifications.length, 0);
+  f.control.unavailableServerIds = [];
+  await f.tick(2);
+  assert.equal(f.notifications.length, 1);
+  assert.deepEqual(f.readState('alert_state'), { a: true });
 });
 
 test('resource alerts still trigger and recover, and offline lookup failure does not suppress evaluation', async t => {

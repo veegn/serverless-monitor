@@ -1110,18 +1110,37 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     const allServers = options.loadServers ? await options.loadServers() : await getAllServers(db, true, { scope: 'offline' });
     
     if (!env?.METRICS_BROADCASTER) return;
-    const stub = env.METRICS_BROADCASTER.get(env.METRICS_BROADCASTER.idFromName('global'));
+    const id = env.METRICS_BROADCASTER.idFromName('global');
     const latestTimestampsMap = new Map();
+    const unavailable = new Set();
     for (let offset = 0; offset < allServers.length; offset += 500) {
-      const response = await stub.fetch('http://internal/latest-timestamps', {
-        method: 'POST', headers: correlationHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ serverIds: allServers.slice(offset, offset + 500).map(server => server.id) })
-      });
-      if (!response.ok) throw new Error('Latest report timestamps unavailable');
-      const result = await response.json();
-      if (!result.timestamps || typeof result.timestamps !== 'object') throw new Error('Invalid timestamps response');
-      for (const [id, timestamp] of Object.entries(result.timestamps)) latestTimestampsMap.set(id, Number(timestamp));
+      const serverIds = allServers.slice(offset, offset + 500).map(server => server.id);
+      try {
+        const response = await env.METRICS_BROADCASTER.get(id).fetch('http://internal/latest-timestamps', {
+          method: 'POST', headers: correlationHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ serverIds })
+        });
+        if (!response.ok) throw new Error('Latest report timestamps unavailable');
+        const result = await response.json();
+        if (!result.timestamps || typeof result.timestamps !== 'object') throw new Error('Invalid timestamps response');
+        for (const [serverId, timestamp] of Object.entries(result.timestamps)) latestTimestampsMap.set(serverId, Number(timestamp));
+        if (Array.isArray(result.unavailableServerIds)) {
+          for (const serverId of result.unavailableServerIds) unavailable.add(serverId);
+        }
+      } catch (error) {
+        for (const serverId of serverIds) unavailable.add(serverId);
+        logError('alert', 'alert.offline.failed', 'Heartbeat lookup failed for a batch', error, { serverCount: serverIds.length }, 'warn');
+      }
     }
+
+    const now = Date.now();
+    const offlineThreshold = tgNotifyMinutes * 60 * 1000;
+    const checkable = allServers.filter(server => {
+      if (server.offline_notify_disabled === '1') return false;
+      const receivedAt = latestTimestampsMap.get(server.id);
+      return !unavailable.has(server.id) || (receivedAt > 0 && now - receivedAt <= offlineThreshold);
+    });
+    if (!checkable.length) return;
 
     let alertState = {};
     const stateRes = options.loadRuntimeState ? await options.loadRuntimeState('alert_state') : await readNotificationRuntimeState(db, 'alert_state');
@@ -1135,14 +1154,10 @@ static getZonedDateParts(timestamp = Date.now(), timezone = 'UTC') {
     }
 
     const previousState = { ...alertState };
-    const now = Date.now();
-    const offlineThreshold = tgNotifyMinutes * 60 * 1000;
     const offlineNodes = [];
     const recoveredNodes = [];
 
-    for (const s of allServers) {
-      if (s.offline_notify_disabled === '1') continue;
-
+    for (const s of checkable) {
       const hasLatestReport = latestTimestampsMap.has(s.id);
       const lastReportTime = latestTimestampsMap.get(s.id);
 

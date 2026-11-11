@@ -52,9 +52,11 @@ export class ServerService {
 
     const latencyHistory = durableLatencyMap || new Map();
     const reportsById = new Map((realtimeState?.latestReportUpdates || []).map(update => [update.serverId, update]));
+    const unavailable = new Set(realtimeState?.unavailableServerIds);
 
     const now = Date.now();
     let globalOnline = 0;
+    let globalUnknown = 0;
     let globalTotalCpu = 0;
     let globalSpeedIn = 0;
     let globalSpeedOut = 0;
@@ -102,7 +104,9 @@ export class ServerService {
         DashboardController.normalizePublicIpFields(item);
       }
 
-      item.is_online = isOnline;
+      item.metricsUnavailable = unavailable.has(server.id);
+      item.is_online = !isOnline && item.metricsUnavailable ? null : isOnline;
+      if (item.is_online === null) globalUnknown++;
       if (!item.region) item.region = server.region || '';
 
       // 绝不暴露探针明文 secret 与废弃的 bandwidth 字段
@@ -137,11 +141,12 @@ export class ServerService {
       DashboardController.attachLatencyHistoryToServers(servers, latencyHistory);
     }
 
-    const globalOffline = servers.length - globalOnline;
+    const globalOffline = servers.length - globalOnline - globalUnknown;
     const stats = {
       total: servers.length,
       online: globalOnline,
       offline: globalOffline,
+      unknown: globalUnknown,
       total_cpu: globalTotalCpu,
       avg_cpu: globalOnline > 0 ? (globalTotalCpu / globalOnline).toFixed(2) : 0,
       total_net_in: globalSpeedIn,
