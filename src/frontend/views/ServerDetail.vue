@@ -412,7 +412,7 @@ import { getPublicAssetUrl } from '../utils/config.js'
 import { Chart, LineController, LineElement, PointElement, CategoryScale, LinearScale, Filler, Legend, Tooltip } from 'chart.js'
 import { createChartUpdateScheduler } from '../utils/chartUpdates.js'
 import { t, currentLang, useTranslation } from '../utils/i18n'
-import { CHART } from '../utils/constants'
+import { CHART, TIME } from '../utils/constants'
 import { HISTORY_RANGES, historySampling } from '../../utils/historyPolicy.js'
 import { historySeries } from '../utils/historyCharts.js'
 import { formatDateTime, normalizeTimestamp as normalizeMetricTimestamp } from '../utils/time.js'
@@ -693,6 +693,7 @@ const lossChartRef = ref(null)
 const loadChartRef = ref(null)
 const historyLoaded = ref(false)
 const historyCachedAt = ref('')
+const historyRows = ref([])
 const hasDiskIoData = ref(false)
 
 const charts = {}
@@ -1252,19 +1253,40 @@ const shouldBreakGap = (prevPoint, nextPoint) => {
   return gap > breakThreshold
 }
 
-const applyGapBreak = (data) => {
-  if (!data || data.length < 2) return data
-  
+const getOfflineHistoryTail = (lastTimestamp = 0) => {
+  if (!isOffline.value) return null
+  const nowTs = currentTime.value
+  const reportTs = getServerReportTimestamp(server.value)
+  const offlineStart = reportTs ? reportTs + TIME.ONLINE_THRESHOLD_MS : 0
+  const rangeStart = nowTs - Number(currentHours.value) * 3600_000
+  const lastDataStart = lastTimestamp ? lastTimestamp + 1 : rangeStart
+  const start = Math.max(rangeStart, offlineStart, lastDataStart)
+  return start < nowTs ? { start, end: nowTs } : null
+}
+
+const applyGapBreak = (data, offlineValue = null) => {
+  const source = Array.isArray(data) ? data : []
   const result = []
-  for (let i = 0; i < data.length; i++) {
-    result.push(data[i])
-    if (i < data.length - 1) {
-      if (shouldBreakGap(data[i], data[i + 1])) {
-        const currentTime = getChartTimestamp(data[i])
-        const nextTime = getChartTimestamp(data[i + 1])
-        const gap = nextTime - currentTime
-        result.push(createChartPoint(currentTime + gap / 2, null))
-      }
+  for (let i = 0; i < source.length; i++) {
+    result.push(source[i])
+    if (i >= source.length - 1 || !shouldBreakGap(source[i], source[i + 1])) continue
+
+    const previousTime = getChartTimestamp(source[i])
+    const nextTime = getChartTimestamp(source[i + 1])
+    if (offlineValue === 0) {
+      result.push(createChartPoint(previousTime + getHistoryGapBreakMs(), 0))
+      result.push(createChartPoint(nextTime - 1, 0))
+    } else {
+      result.push(createChartPoint(previousTime + (nextTime - previousTime) / 2, null))
+    }
+  }
+
+  if (offlineValue === 0) {
+    const lastTimestamp = source.length ? getChartTimestamp(source[source.length - 1]) : 0
+    const tail = getOfflineHistoryTail(lastTimestamp)
+    if (tail) {
+      result.push(createChartPoint(tail.start, 0))
+      result.push(createChartPoint(tail.end, 0))
     }
   }
   return result
@@ -1298,7 +1320,7 @@ const getLastDatasetTimestamp = (data) => {
   return 0
 }
 
-const updateChartDataset = (chart, datasetIndex, dataPoints, yAccessor) => {
+const updateChartDataset = (chart, datasetIndex, dataPoints, yAccessor, offlineValue = null) => {
   if (!chart) return
 
   const dataset = chart.data.datasets[datasetIndex]
@@ -1307,7 +1329,9 @@ const updateChartDataset = (chart, datasetIndex, dataPoints, yAccessor) => {
   let processedData = []
   if (dataPoints && dataPoints.length > 0) {
     processedData = historySeries(dataPoints, yAccessor)
-    processedData = applyGapBreak(processedData)
+    processedData = applyGapBreak(processedData, offlineValue)
+  } else if (offlineValue === 0 && isOffline.value) {
+    processedData = applyGapBreak([], offlineValue)
   }
 
   dataset.data = processedData
@@ -1353,9 +1377,9 @@ const updateLoadChart = (chart, dataPoints) => {
   const load5Data = processedData.map(d => createChartPoint(d.x, d.load5))
   const load15Data = processedData.map(d => createChartPoint(d.x, d.load15))
   
-  chart.data.datasets[0].data = applyGapBreak(load1Data)
-  chart.data.datasets[1].data = applyGapBreak(load5Data)
-  chart.data.datasets[2].data = applyGapBreak(load15Data)
+  chart.data.datasets[0].data = applyGapBreak(load1Data, 0)
+  chart.data.datasets[1].data = applyGapBreak(load5Data, 0)
+  chart.data.datasets[2].data = applyGapBreak(load15Data, 0)
   syncChartLabels(chart)
   chartUpdates.schedule(chart)
 }
@@ -1370,10 +1394,63 @@ const clearDiskIoChart = () => {
   chartUpdates.schedule(chart)
 }
 
+const applyOfflineMetricHistory = (allData) => {
+  updateChartDataset(charts.cpu, 0, allData, fieldAccessor('cpu', true), 0)
+  rebuildGpuChartDatasets()
+  for (const chartKey of GPU_DETAIL_CHART_KEYS) {
+    const chart = charts[chartKey]
+    if (!chart) continue
+    for (let index = 0; index < chart.data.datasets.length; index += 1) {
+      const gpuId = chart.data.datasets[index].gpuId
+      const accessor = gpuId ? gpuFieldAccessor(gpuId, chartKey) : () => null
+      updateChartDataset(chart, index, allData, accessor, 0)
+    }
+  }
+
+  updateChartDataset(charts.ram, 0, allData, percentAccessor('ram_used', 'ram_total'), 0)
+  updateChartDataset(charts.ram, 1, allData, percentAccessor('swap_used', 'swap_total'), 0)
+  updateChartDataset(charts.disk, 0, allData, percentAccessor('disk_used', 'disk_total'), 0)
+
+  const diskIoRows = allData.filter(hasValidDiskIoPayload)
+  if (diskIoRows.length > 0) {
+    markDiskIoDataAvailable(diskIoRows[0])
+    DISK_IO_FIELDS.forEach((field, index) => {
+      updateChartDataset(charts.diskIo, index, diskIoRows, diskIoAccessor(field), 0)
+    })
+  } else {
+    if (hasValidDiskIoPayload(server.value) && server.value.last_updated) {
+      markDiskIoDataAvailable(server.value)
+      if (isOffline.value) {
+        DISK_IO_FIELDS.forEach((field, index) => {
+          updateChartDataset(charts.diskIo, index, [], () => 0, 0)
+        })
+      } else {
+        clearDiskIoChart()
+        appendDiskIoChart(server.value, new Date(server.value.last_updated).getTime())
+      }
+    } else {
+      clearDiskIoChart()
+      hasDiskIoData.value = false
+    }
+  }
+
+  updateChartDataset(charts.proc, 0, allData, fieldAccessor('processes'), 0)
+  updateChartDataset(charts.net, 0, allData, fieldAccessor('net_in_speed', true), 0)
+  updateChartDataset(charts.net, 1, allData, fieldAccessor('net_out_speed', true), 0)
+  updateChartDataset(charts.conn, 0, allData, fieldAccessor('tcp_conn', true), 0)
+  updateChartDataset(charts.conn, 1, allData, fieldAccessor('udp_conn', true), 0)
+  PING_FIELD_DEFS.forEach((item, index) => {
+    updateChartDataset(charts.ping, index, allData, fieldAccessor(item.field, true), 0)
+    updateChartDataset(charts.loss, index, allData, fieldAccessor(item.lossField, true), 0)
+  })
+  updateLoadChart(charts.load, allData)
+}
+
 const loadAllHistory = async (hours) => {
   try {
     const { samples: allData, cachedAt } = await fetchAllHistory(serverId, hours, apiIndex.value)
     historyCachedAt.value = cachedAt
+    historyRows.value = allData
     lastReportChartUpdateTime = 0
     lossHistoryFields.value = Object.fromEntries(PING_FIELD_DEFS.map(item => [
       item.lossField,
@@ -1385,57 +1462,7 @@ const loadAllHistory = async (hours) => {
         const rowTime = new Date(row.timestamp).getTime()
         return Number.isFinite(rowTime) ? Math.max(latest, rowTime) : latest
       }, 0)
-      updateChartDataset(charts.cpu, 0, allData, fieldAccessor('cpu', true))
-      rebuildGpuChartDatasets()
-      for (const chartKey of GPU_DETAIL_CHART_KEYS) {
-        const chart = charts[chartKey]
-        if (!chart) continue
-        for (let i = 0; i < chart.data.datasets.length; i++) {
-          const dataset = chart.data.datasets[i]
-          const gpuId = dataset.gpuId
-          const accessor = gpuId ? gpuFieldAccessor(gpuId, chartKey) : () => null
-          updateChartDataset(chart, i, allData, accessor)
-        }
-      }
-      updateChartDataset(charts.ram, 0, allData, percentAccessor('ram_used', 'ram_total'))
-      updateChartDataset(charts.ram, 1, allData, percentAccessor('swap_used', 'swap_total'))
-      updateChartDataset(charts.disk, 0, allData, percentAccessor('disk_used', 'disk_total'))
-      const diskIoRows = allData.filter(hasValidDiskIoPayload)
-      if (diskIoRows.length > 0) {
-        markDiskIoDataAvailable(diskIoRows[0])
-        DISK_IO_FIELDS.forEach((field, index) => {
-          updateChartDataset(charts.diskIo, index, diskIoRows, diskIoAccessor(field))
-        })
-      } else {
-        clearDiskIoChart()
-        hasDiskIoData.value = false
-        if (hasValidDiskIoPayload(server.value) && server.value.last_updated) {
-          appendDiskIoChart(server.value, new Date(server.value.last_updated).getTime())
-        }
-      }
-      updateChartDataset(charts.proc, 0, allData, fieldAccessor('processes'))
-      updateChartDataset(charts.net, 0, allData, fieldAccessor('net_in_speed', true))
-      updateChartDataset(charts.net, 1, allData, fieldAccessor('net_out_speed', true))
-      updateChartDataset(charts.conn, 0, allData, fieldAccessor('tcp_conn', true))
-      updateChartDataset(charts.conn, 1, allData, fieldAccessor('udp_conn', true))
-      updateChartDataset(charts.ping, 0, allData, fieldAccessor('ping_ct', true))
-      updateChartDataset(charts.ping, 1, allData, fieldAccessor('ping_cu', true))
-      updateChartDataset(charts.ping, 2, allData, fieldAccessor('ping_cm', true))
-      updateChartDataset(charts.ping, 3, allData, fieldAccessor('ping_bd', true))
-      updateChartDataset(charts.ping, 4, allData, fieldAccessor('ping_node_1', true))
-      updateChartDataset(charts.ping, 5, allData, fieldAccessor('ping_node_2', true))
-      updateChartDataset(charts.ping, 6, allData, fieldAccessor('ping_node_3', true))
-      updateChartDataset(charts.ping, 7, allData, fieldAccessor('ping_node_4', true))
-      updateChartDataset(charts.loss, 0, allData, fieldAccessor('loss_ct', true))
-      updateChartDataset(charts.loss, 1, allData, fieldAccessor('loss_cu', true))
-      updateChartDataset(charts.loss, 2, allData, fieldAccessor('loss_cm', true))
-      updateChartDataset(charts.loss, 3, allData, fieldAccessor('loss_bd', true))
-      updateChartDataset(charts.loss, 4, allData, fieldAccessor('loss_node_1', true))
-      updateChartDataset(charts.loss, 5, allData, fieldAccessor('loss_node_2', true))
-      updateChartDataset(charts.loss, 6, allData, fieldAccessor('loss_node_3', true))
-      updateChartDataset(charts.loss, 7, allData, fieldAccessor('loss_node_4', true))
-      updateLoadChart(charts.load, allData)
-
+      applyOfflineMetricHistory(allData)
       const avg = (arr, field, skipZero = true) => {
         const vals = arr.map(d => parseFloat(d[field])).filter(v => !isNaN(v) && (skipZero ? v !== 0 : true))
         return vals.length ? Math.round(vals.reduce((s, v) => s + v, 0) / vals.length) : null
@@ -1457,6 +1484,8 @@ const loadAllHistory = async (hours) => {
       avgLossNode3.value = avg(allData, 'loss_node_3', false)
       avgLossNode4.value = avg(allData, 'loss_node_4', false)
       syncProbeChartVisibility()
+    } else {
+      applyOfflineMetricHistory(allData)
     }
 
     updateAllChartTimeUnits(hours)
@@ -1933,6 +1962,12 @@ const init = async () => {
 watch([cpuChartRef, gpuChartRef, gpuMemChartRef, gpuClockChartRef, gpuPowerChartRef, ramChartRef, diskChartRef, diskIoChartRef, netChartRef, procChartRef, connChartRef, pingChartRef, lossChartRef, loadChartRef], () => {
   if (!chartsReady.value) {
     initChartsOnMount()
+  }
+})
+
+watch(isOffline, () => {
+  if (historyLoaded.value && chartsReady.value) {
+    applyOfflineMetricHistory(historyRows.value)
   }
 })
 
