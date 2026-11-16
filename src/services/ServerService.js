@@ -66,16 +66,14 @@ export class ServerService {
 
     const servers = rawServers.map(server => {
       let latestMetrics = null;
+      const report = reportsById.get(server.id);
 
-      if (realtimeState?.latestReportUpdates) {
-        const doReport = reportsById.get(server.id);
-        if (doReport && Array.isArray(doReport.samples) && doReport.samples.length > 0) {
-          const lastSample = doReport.samples[doReport.samples.length - 1];
-          latestMetrics = {
-            timestamp: lastSample.ts || doReport.reportTs || now,
-            ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
-          };
-        }
+      if (Array.isArray(report?.samples) && report.samples.length > 0) {
+        const lastSample = report.samples[report.samples.length - 1];
+        latestMetrics = {
+          timestamp: lastSample.ts || report.reportTs || now,
+          ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
+        };
       }
 
       const item = {
@@ -85,7 +83,8 @@ export class ServerService {
 
       let isOnline = false;
       if (latestMetrics) {
-        isOnline = (now - latestMetrics.timestamp) < ServerService.ONLINE_THRESHOLD_MS;
+        item.report_timestamp = report.reportTs ?? latestMetrics.timestamp;
+        isOnline = (now - item.report_timestamp) < ServerService.ONLINE_THRESHOLD_MS;
         mergeMetricsIntoServer(item, latestMetrics);
       } else {
         item.last_updated = 0;

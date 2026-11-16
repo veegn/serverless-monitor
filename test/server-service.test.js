@@ -32,6 +32,7 @@ test('server list uses authorized cached metrics and separates unknown nodes dur
 test('ServerService: admin mode retains real IPs, hidden nodes, and private note while stripping secret', async () => {
   clearServersListCache();
   const now = Date.now();
+  const sampleTs = now - 10 * 60_000;
 
   const publicServer = {
     id: 'srv-admin-pub-1',
@@ -64,7 +65,7 @@ test('ServerService: admin mode retains real IPs, hidden nodes, and private note
               serverId: 'srv-admin-pub-1',
               reportTs: now,
               samples: [{
-                ts: now,
+                ts: sampleTs,
                 data: {
                   cpu: 25.5,
                   net_in_speed: 1024,
@@ -103,6 +104,8 @@ test('ServerService: admin mode retains real IPs, hidden nodes, and private note
   const pub = result.servers.find(s => s.id === 'srv-admin-pub-1');
   assert.ok(pub);
   assert.equal(pub.is_online, true);
+  assert.equal(pub.report_timestamp, now);
+  assert.equal(pub.last_updated, sampleTs);
   assert.equal(pub.ip_v4, '198.51.100.10', 'Admin must receive unmasked real IPv4');
   assert.equal(pub.ip_v6, '2001:db8::10', 'Admin must receive unmasked real IPv6');
   assert.equal(pub.note, 'Sensitive rack location note', 'Admin must retain note');

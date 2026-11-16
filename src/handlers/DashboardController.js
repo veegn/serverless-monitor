@@ -285,6 +285,7 @@ export class DashboardController {
         timestamp: lastSample.ts || doReport.reportTs || Date.now(),
         ...(lastSample.data || lastSample.payload || lastSample.metrics || {})
       };
+      server.report_timestamp = doReport.reportTs ?? effectiveMetrics.timestamp;
     }
   }
   mergeMetricsIntoServer(server, effectiveMetrics);

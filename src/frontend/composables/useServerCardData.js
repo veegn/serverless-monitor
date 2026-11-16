@@ -1,9 +1,10 @@
 import { computed } from 'vue'
-import { formatBytes, getFlagRegionCode, isServerOnline } from '../utils/api'
+import { formatBytes, getFlagRegionCode } from '../utils/api'
 import { getPublicAssetUrl } from '../utils/config'
 import { currentLang, useTranslation } from '../utils/i18n'
 import { LATENCY_WINDOW, PING } from '../utils/constants'
 import { formatBillingPrice } from '../utils/server.js'
+import { getServerStatus } from '../utils/serverMetrics.js'
 
 export const DEFAULT_SERVER_CARD_CONFIG = {
   show_price: true,
@@ -100,9 +101,13 @@ export function useServerCardData(props) {
   })
 
   const regionCode = computed(() => getFlagRegionCode(props.server.region))
-  const isOnline = computed(() => isServerOnline(props.server, currentTime.value))
-  const statusColor = computed(() => isOnline.value ? 'var(--accent-green)' : 'var(--accent-red)')
-  const statusText = computed(() => isOnline.value ? trans.value.online : trans.value.offline)
+  const status = computed(() => getServerStatus(props.server, currentTime.value))
+  const isOnline = computed(() => status.value === 'online')
+  const statusColor = computed(() => {
+    if (isOnline.value) return 'var(--accent-green)'
+    return status.value === 'unknown' ? 'var(--text-secondary)' : 'var(--accent-red)'
+  })
+  const statusText = computed(() => status.value === 'unknown' ? trans.value.metricsUnknown : trans.value[status.value])
 
   const cpuPercent = computed(() => clampPercent(Number.parseFloat(props.server.cpu || 0) || 0))
   const cpuCores = computed(() => parseInt(props.server.cpu_cores) || 0)

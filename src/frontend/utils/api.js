@@ -6,6 +6,8 @@ import { normalizeTimestamp } from './time.js'
 import { TIME } from './constants'
 import { resolveDisplayMode } from './displayMode.js'
 
+export { isServerOnline } from './serverMetrics.js'
+
 export const VERSION = ref('')
 export const LAST_WORKERS_VERSION = ref('')
 export const LAST_AGENT_VERSION = ref('')
@@ -277,11 +279,6 @@ export const formatBytes = (bytes) => {
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   const safeIndex = Math.max(0, Math.min(i, sizes.length - 1))
   return parseFloat((bytes / Math.pow(k, safeIndex)).toFixed(1)) + ' ' + sizes[safeIndex]
-}
-
-export const isServerOnline = (server, now = Date.now()) => {
-  const lastUpdated = normalizeTimestamp(server?.report_timestamp ?? server?.last_updated)
-  return lastUpdated && (now - lastUpdated) < TIME.ONLINE_THRESHOLD_MS
 }
 
 export const fetchServers = async () => {

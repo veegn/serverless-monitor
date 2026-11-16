@@ -374,12 +374,13 @@ import Footer from '../components/Footer.vue'
 import OsIcon from '../components/OsIcon.vue'
 import UiIcon from '../components/UiIcon.vue'
 import LiveConnectionTimeoutModal from '../components/LiveConnectionTimeoutModal.vue'
-import { fetchConfig, fetchServersAll, fetchServersAllWithProgress, formatBytes, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
+import { fetchConfig, fetchServersAll, fetchServersAllWithProgress, formatBytes, createLiveSocket, getFlagRegionCode, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
 import { calcTrafficUsagePercent, getUsageColor } from '../composables/useServerCardData'
 import { getTitle, hasMultipleApiBases, getApiBases, getPublicAssetUrl } from '../utils/config'
 import { currentLang, useTranslation } from '../utils/i18n.js'
 import { TIME, DEFAULT_SITE_TITLE, STORAGE, LATENCY_WINDOW } from '../utils/constants'
 import { normalizeTimestamp as normalizeMetricTimestamp } from '../utils/time.js'
+import { getServerMetricsForDisplay, getServerReportTimestamp, getServerStatus, isServerOnline } from '../utils/serverMetrics.js'
 import { normalizeDashboardView, normalizeDisplayMode, resolveDisplayMode } from '../utils/displayMode.js'
 import { getPlaybackElapsedMs, resolvePlaybackCursor } from '../utils/playback.js'
 import { getMikusAssetUrl, isMikusThemeEnabled, normalizeThemeOptions, setMikusThemeClass } from '../utils/themeOptions.js'
@@ -635,9 +636,11 @@ watch(
 watch(filterMoreLabel, scheduleFilterMeasurement, { flush: 'post' })
 
 const filteredServers = computed(() => {
-  if (currentFilter.value === 'all') return servers.value
-  if (currentFilter.value === 'unknown') return servers.value.filter(s => !s.region)
-  return servers.value.filter(s => (s.region || 'xx').toLowerCase() === currentFilter.value)
+  const filter = currentFilter.value
+  let list = servers.value
+  if (filter === 'unknown') list = list.filter(server => !server.region)
+  else if (filter !== 'all') list = list.filter(server => (server.region || 'xx').toLowerCase() === filter)
+  return list.map(server => getServerMetricsForDisplay(server, getServerStatus(server, now.value)))
 })
 
 const groupedServers = computed(() => {
@@ -676,7 +679,7 @@ const setFilter = (code) => {
 }
 
 const getStatusColor = (server) => {
-  if (isServerOnline(server)) return 'var(--accent-green)'
+  if (isServerOnline(server, now.value)) return 'var(--accent-green)'
   return server.metricsUnavailable ? 'var(--text-secondary)' : 'var(--accent-red)'
 }
 
@@ -730,10 +733,6 @@ const getUpdateTime = (lastUpdated) => {
 const PLAYBACK_TICK_MS = 1000
 const MAX_BUFFER_SAMPLES_PER_SERVER = 600
 const playbackBuffers = new Map()
-
-const getServerReportTimestamp = (server, fallback = null) => {
-  return normalizeMetricTimestamp(server?.report_timestamp ?? server?.last_updated, fallback)
-}
 
 const getServerSampleTimestamp = (server) => {
   return normalizeMetricTimestamp(server?.sample_timestamp ?? server?.timestamp ?? server?.last_updated, null)
@@ -918,13 +917,12 @@ const recomputeStats = (currentTs = Date.now()) => {
   const regionCounts = {}
   let unknownCount = 0
   for (const s of list) {
-    const ts = new Date(s.last_updated || 0).getTime()
-    const isOnline = ts && (currentTs - ts) < TIME.ONLINE_THRESHOLD_MS
-    if (isOnline) {
+    const status = getServerStatus(s, currentTs)
+    if (status === 'online') {
       online++
       speedIn += parseFloat(s.net_in_speed) || 0
       speedOut += parseFloat(s.net_out_speed) || 0
-    } else if (s.metricsUnavailable) {
+    } else if (status === 'unknown') {
       unknown++
     }
     netRx += parseFloat(s.net_rx) || 0

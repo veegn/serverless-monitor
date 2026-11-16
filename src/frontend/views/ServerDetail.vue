@@ -44,15 +44,15 @@
           <span>{{ server.name || 'Loading...' }}</span>
           <span style="color: var(--text-muted);">:~#</span>
         </div>
-        <span class="status-badge" :class="{ online: isOnline, offline: !isOnline && !server.metricsUnavailable }">
-          <span class="pulse-dot" :class="{ online: isOnline, offline: !isOnline && !server.metricsUnavailable }"></span>
-          <span>{{ isOnline ? trans.online : server.metricsUnavailable ? trans.metricsUnknown : trans.offline }}</span>
+        <span class="status-badge" :class="{ online: isOnline, offline: isOffline }">
+          <span class="pulse-dot" :class="{ online: isOnline, offline: isOffline }"></span>
+          <span>{{ status === 'unknown' ? trans.metricsUnknown : trans[status] }}</span>
         </span>
       </div>
       <div class="sysinfo-grid" id="info-panel">
         <div class="sysinfo-item">
           <span class="sysinfo-label"><UiIcon name="uptime" size="13" /> {{ trans.uptime }}</span>
-          <span class="sysinfo-value">{{ formatUptime(server.boot_time) }}</span>
+          <span class="sysinfo-value">{{ isOffline ? '00:00' : formatUptime(server.boot_time) }}</span>
         </div>
         <div class="sysinfo-item" v-if="server.expire_date">
           <span class="sysinfo-label"><UiIcon name="expire" size="13" /> {{ trans.expire }}</span>
@@ -80,7 +80,7 @@
         </div>
         <div class="sysinfo-item">
           <span class="sysinfo-label"><UiIcon name="load" size="13" /> {{ trans.loadAvg }}</span>
-          <span class="sysinfo-value highlight">{{ server.load_avg || '0.00 0.00 0.00' }}</span>
+          <span class="sysinfo-value highlight">{{ displayMetrics.load_avg || '0.00 0.00 0.00' }}</span>
         </div>
         <div class="sysinfo-item">
           <span class="sysinfo-label"><UiIcon name="globe" size="13" /> {{ trans.totalTraffic }}</span>
@@ -88,7 +88,7 @@
         </div>
         <div class="sysinfo-item">
           <span class="sysinfo-label"><UiIcon name="speed" size="13" /> {{ trans.realtimeSpeed }}</span>
-          <span class="sysinfo-value sysinfo-small"><UiIcon name="arrow-down" size="10" /> {{ formatBytes(server.net_in_speed) }}/s / <UiIcon name="arrow-up" size="10" /> {{ formatBytes(server.net_out_speed) }}/s</span>
+          <span class="sysinfo-value sysinfo-small"><UiIcon name="arrow-down" size="10" /> {{ formatBytes(displayMetrics.net_in_speed) }}/s / <UiIcon name="arrow-up" size="10" /> {{ formatBytes(displayMetrics.net_out_speed) }}/s</span>
         </div>
         <div class="sysinfo-item" v-if="server.net_rx_monthly">
           <span class="sysinfo-label"><UiIcon name="chart" size="13" /> {{ trans.monthlyTraffic }}</span>
@@ -139,7 +139,7 @@
           <div class="chart-header-actions">
             <div class="chart-current-value-container">
               <span class="chart-current-value">{{ ramPercent }}%</span>
-              <div class="chart-subtitle">{{ trans.swap }}: {{ server.swap_used || '0' }} / {{ server.swap_total || '0' }} MiB</div>
+              <div class="chart-subtitle">{{ trans.swap }}: {{ displayMetrics.swap_used || '0' }} / {{ server.swap_total || '0' }} MiB</div>
             </div>
             <ChartExpandButton :expanded="isChartExpanded('ram')" @toggle="toggleChartExpanded('ram')" />
           </div>
@@ -157,8 +157,8 @@
           </span>
           <div class="chart-header-actions">
             <div class="net-indicator">
-              <span class="net-down">▼ {{ formatBytes(server.net_in_speed) }}/s</span>
-              <span class="net-up">▲ {{ formatBytes(server.net_out_speed) }}/s</span>
+              <span class="net-down">▼ {{ formatBytes(displayMetrics.net_in_speed) }}/s</span>
+              <span class="net-up">▲ {{ formatBytes(displayMetrics.net_out_speed) }}/s</span>
             </div>
             <ChartExpandButton :expanded="isChartExpanded('net')" @toggle="toggleChartExpanded('net')" />
           </div>
@@ -176,9 +176,9 @@
           </span>
           <div class="chart-header-actions">
             <div class="load-avg-row">
-              <span class="load-1m">{{ trans.load1m }} <b>{{ (parseLoadAvg(server.load_avg)[0] || 0).toFixed(2) }}</b></span>
-              <span class="load-5m">{{ trans.load5m }} <b>{{ (parseLoadAvg(server.load_avg)[1] || 0).toFixed(2) }}</b></span>
-              <span class="load-15m">{{ trans.load15m }} <b>{{ (parseLoadAvg(server.load_avg)[2] || 0).toFixed(2) }}</b></span>
+              <span class="load-1m">{{ trans.load1m }} <b>{{ loadAverages[0].toFixed(2) }}</b></span>
+              <span class="load-5m">{{ trans.load5m }} <b>{{ loadAverages[1].toFixed(2) }}</b></span>
+              <span class="load-15m">{{ trans.load15m }} <b>{{ loadAverages[2].toFixed(2) }}</b></span>
             </div>
             <ChartExpandButton :expanded="isChartExpanded('load')" @toggle="toggleChartExpanded('load')" />
           </div>
@@ -197,7 +197,7 @@
           <div class="chart-header-actions">
             <div class="chart-current-value-container">
               <span class="chart-current-value">{{ diskPercent }}%</span>
-              <div class="chart-subtitle">{{ trans.used }} {{ formatBytes(server.disk_used*1024*1024) }} / {{ formatBytes(server.disk_total*1024*1024) }}</div>
+              <div class="chart-subtitle">{{ trans.used }} {{ formatBytes(displayMetrics.disk_used*1024*1024) }} / {{ formatBytes(server.disk_total*1024*1024) }}</div>
             </div>
             <ChartExpandButton :expanded="isChartExpanded('disk')" @toggle="toggleChartExpanded('disk')" />
           </div>
@@ -300,7 +300,7 @@
             {{ trans.processes }}
           </span>
           <div class="chart-header-actions">
-            <span class="chart-current-value">{{ server.processes || '0' }}</span>
+            <span class="chart-current-value">{{ displayMetrics.processes || '0' }}</span>
             <ChartExpandButton :expanded="isChartExpanded('proc')" @toggle="toggleChartExpanded('proc')" />
           </div>
         </div>
@@ -317,8 +317,8 @@
           </span>
           <div class="chart-header-actions">
             <div class="net-indicator">
-              <span class="conn-tcp">TCP <b>{{ server.tcp_conn || '0' }}</b></span>
-              <span class="conn-udp">UDP <b>{{ server.udp_conn || '0' }}</b></span>
+              <span class="conn-tcp">TCP <b>{{ displayMetrics.tcp_conn || '0' }}</b></span>
+              <span class="conn-udp">UDP <b>{{ displayMetrics.udp_conn || '0' }}</b></span>
             </div>
             <ChartExpandButton :expanded="isChartExpanded('conn')" @toggle="toggleChartExpanded('conn')" />
           </div>
@@ -405,7 +405,7 @@ import Footer from '../components/Footer.vue'
 import OsIcon from '../components/OsIcon.vue'
 import UiIcon from '../components/UiIcon.vue'
 import LiveConnectionTimeoutModal from '../components/LiveConnectionTimeoutModal.vue'
-import { fetchServerDetail, fetchAllHistory, fetchConfig, formatBytes, createLiveSocket, getFlagRegionCode, isServerOnline, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
+import { fetchServerDetail, fetchAllHistory, fetchConfig, formatBytes, createLiveSocket, getFlagRegionCode, normalizeLiveSocketTimeoutMinutes } from '../utils/api.js'
 import { isAdminLoggedIn } from '../utils/http'
 import { getTrafficUsageBytes } from '../composables/useServerCardData'
 import { getPublicAssetUrl } from '../utils/config.js'
@@ -418,6 +418,7 @@ import { historySeries } from '../utils/historyCharts.js'
 import { formatDateTime, normalizeTimestamp as normalizeMetricTimestamp } from '../utils/time.js'
 import useTheme from '../composables/useTheme'
 import { isDisabledProbeMetric } from '../utils/server.js'
+import { getServerMetricsForDisplay, getServerReportTimestamp, getServerStatus, isServerOnline } from '../utils/serverMetrics.js'
 import { resolvePlaybackCursor } from '../utils/playback.js'
 import { applyMikusThemeOptions } from '../utils/themeOptions.js'
 
@@ -445,6 +446,8 @@ if (indexParam !== undefined && indexParam !== null && !isNaN(parseInt(indexPara
 }
 
 const server = ref({})
+const currentTime = ref(Date.now())
+let statusTimer
 const REALTIME_HISTORY_HOURS = 0.167
 const LATEST_REPORT_MAX_REPLAY_DELAY = 120000
 const REPORT_CHART_UPDATE_INTERVAL_MS = 30000
@@ -564,9 +567,12 @@ const timeOptions = computed(() => {
   return HISTORY_RANGES
 })
 
-const isOnline = computed(() => isServerOnline(server.value))
+const status = computed(() => getServerStatus(server.value, currentTime.value))
+const isOnline = computed(() => status.value === 'online')
+const isOffline = computed(() => status.value === 'offline')
+const displayMetrics = computed(() => getServerMetricsForDisplay(server.value, status.value))
 
-const cpuPercent = computed(() => (parseFloat(server.value.cpu) || 0).toFixed(1))
+const cpuPercent = computed(() => (parseFloat(displayMetrics.value.cpu) || 0).toFixed(1))
 
 const parseGpuInfo = (raw) => {
   if (!raw) return []
@@ -594,7 +600,7 @@ const gpuPercentText = computed(() => {
   const formatUtil = (info) => {
     if (info === null || info === undefined) return 'N/A'
     const v = parseFloat(info)
-    return Number.isNaN(v) ? 'N/A' : `${v.toFixed(1)}%`
+    return Number.isNaN(v) ? 'N/A' : `${(isOffline.value ? 0 : v).toFixed(1)}%`
   }
   if (list.length === 1) return formatUtil(list[0].info)
   return list.map(g => formatUtil(g.info)).join(' / ')
@@ -615,8 +621,9 @@ const gpuMemText = computed(() => {
   const list = gpuInfoList.value
   if (list.length === 0) return 'N/A'
   return list.map(g => {
-    const used = gpuDetailValue(g, 'mem_used')
-    if (used === null) return 'N/A'
+    const reportedUsed = gpuDetailValue(g, 'mem_used')
+    if (reportedUsed === null) return 'N/A'
+    const used = isOffline.value ? 0 : reportedUsed
     const total = gpuDetailValue(g, 'mem_total')
     return total !== null ? `${formatBytes(used * 1024 * 1024)} / ${formatBytes(total * 1024 * 1024)}` : formatBytes(used * 1024 * 1024)
   }).join(' / ')
@@ -627,7 +634,7 @@ const gpuClockText = computed(() => {
   if (list.length === 0) return 'N/A'
   return list.map(g => {
     const v = gpuDetailValue(g, 'sm_clock')
-    return v === null ? 'N/A' : `${Math.round(v)} MHz`
+    return v === null ? 'N/A' : `${isOffline.value ? 0 : Math.round(v)} MHz`
   }).join(' / ')
 })
 
@@ -636,23 +643,23 @@ const gpuPowerText = computed(() => {
   if (list.length === 0) return 'N/A'
   return list.map(g => {
     const v = gpuDetailValue(g, 'power')
-    return v === null ? 'N/A' : `${v.toFixed(1)} W`
+    return v === null ? 'N/A' : `${(isOffline.value ? 0 : v).toFixed(1)} W`
   }).join(' / ')
 })
 
 const ramPercent = computed(() => {
   if (server.value.ram_total > 0) {
-    return ((server.value.ram_used / server.value.ram_total) * 100).toFixed(2)
+    return ((displayMetrics.value.ram_used / server.value.ram_total) * 100).toFixed(2)
   }
   return '0.00'
 })
 const diskPercent = computed(() => {
   if (server.value.disk_total > 0) {
-    return ((server.value.disk_used / server.value.disk_total) * 100).toFixed(2)
+    return ((displayMetrics.value.disk_used / server.value.disk_total) * 100).toFixed(2)
   }
   return '0.00'
 })
-const diskIo = computed(() => hasValidDiskIoPayload(server.value) ? normalizeDiskIo(server.value) : EMPTY_DISK_IO)
+const diskIo = computed(() => !isOffline.value && hasValidDiskIoPayload(server.value) ? normalizeDiskIo(server.value) : EMPTY_DISK_IO)
 const hasGpuData = computed(() => gpuInfoList.value.length > 0)
 
 const isExpired = computed(() => {
@@ -811,6 +818,7 @@ const parseLoadAvg = (loadAvgStr) => {
   const load15 = parseFloat(parts[2]) || 0
   return [load1, load5, load15]
 }
+const loadAverages = computed(() => parseLoadAvg(displayMetrics.value.load_avg))
 
 const isLossValid = (value) => !isDisabledProbeMetric(value) && value !== null && value !== undefined && value !== '' && !Number.isNaN(parseFloat(value))
 const formatLoss = (value) => isLossValid(value) ? `${Math.max(0, Math.min(100, parseFloat(value))).toFixed(0)}%` : ''
@@ -838,7 +846,7 @@ const formatUptime = (bootTime) => {
   const bootTimeMs = parseBootTimeToMs(bootTime)
   if (!bootTimeMs) return 'N/A'
   
-  const diffMs = Date.now() - bootTimeMs
+  const diffMs = currentTime.value - bootTimeMs
   
   if (diffMs < 0) return 'N/A'
   
@@ -1537,7 +1545,7 @@ const REALTIME_SAMPLE_FIELDS = new Set([
   'cpu', 'ram_total', 'ram_used', 'swap_total', 'swap_used',
   'net_in_speed', 'net_out_speed', 'disk'
 ])
-const TIMING_FIELDS = new Set(['last_updated', 'sample_timestamp'])
+const TIMING_FIELDS = new Set(['last_updated', 'report_timestamp', 'sample_timestamp'])
 
 const appendLoadChartData = (timestamp, loadAvg) => {
   const chart = charts.load
@@ -1576,20 +1584,21 @@ const getReplaySampleData = (sample) => {
   return sample.data || sample.payload || sample.metrics || null
 }
 
-const buildLiveStatusData = (event) => {
+const buildLiveStatusData = (event, reportTs) => {
   const receiveTs = Date.now()
   return {
     ...event.data,
     sample_timestamp: event.ts,
+    report_timestamp: reportTs,
     last_updated: receiveTs,
     timestamp: receiveTs
   }
 }
 
-const scheduleLatestReportReplay = (event, delay) => {
+const scheduleLatestReportReplay = (event, reportTs, delay) => {
   const timer = setTimeout(() => {
     latestReportReplayTimers.delete(timer)
-    fetchCurrentStatus(buildLiveStatusData(event), {
+    fetchCurrentStatus(buildLiveStatusData(event, reportTs), {
       mergeMode: 'sample',
       chartMode: 'sample'
     })
@@ -1618,17 +1627,20 @@ const replayReportUpdate = (update, { messageTs = Date.now(), replayCachedReport
   const events = toReplayEvents(update, messageTs)
   if (events.length === 0) return
 
+  const fallbackTs = replayCachedReport ? getServerReportTimestamp(server.value) : messageTs
+  const reportTs = normalizeMetricTimestamp(update.reportTs ?? update.report_timestamp, fallbackTs)
+  if (replayCachedReport && !isServerOnline({ report_timestamp: reportTs })) return
+
   const shouldReplaySamples = isRealtimeHistoryRange()
   if (includeReportUpdate) {
     const latestEvent = events[events.length - 1]
-    fetchCurrentStatus(buildLiveStatusData(latestEvent), {
+    fetchCurrentStatus(buildLiveStatusData(latestEvent, reportTs), {
       mergeMode: shouldReplaySamples ? 'report' : 'all',
       chartMode: 'report'
     })
   }
   if (!shouldReplaySamples) return
 
-  const reportTs = normalizeMetricTimestamp(update.reportTs ?? update.report_timestamp, messageTs)
   const reportAge = Number(update.reportAgeMs)
   const reportAgeMs = Math.max(0, Number.isFinite(reportAge)
     ? reportAge
@@ -1649,12 +1661,12 @@ const replayReportUpdate = (update, { messageTs = Date.now(), replayCachedReport
   }
 
   if (immediateEvent) {
-    scheduleLatestReportReplay(immediateEvent, 0)
+    scheduleLatestReportReplay(immediateEvent, reportTs, 0)
   }
 
   for (const event of futureEvents) {
     const delay = Math.max(0, Math.min(event.ts - playbackStartTs, LATEST_REPORT_MAX_REPLAY_DELAY))
-    scheduleLatestReportReplay(event, delay)
+    scheduleLatestReportReplay(event, reportTs, delay)
   }
 }
 
@@ -1785,9 +1797,8 @@ const fetchCurrentStatus = async (incomingData, options = {}) => {
       if (chartMode === 'report' || chartMode === 'all') appendReportChartsThrottled(data, dataTimestamp)
     }
 
-    if (data.last_updated) {
-      lastUpdateText.value = formatTimestamp(data.last_updated)
-    }
+    const reportedAt = getServerReportTimestamp(data)
+    if (reportedAt) lastUpdateText.value = formatTimestamp(reportedAt)
     return data
   } catch (e) {
     console.error('[ERROR] Update status failed:', e)
@@ -1839,6 +1850,7 @@ const initChartsOnMount = async () => {
 }
 
 const handleVisibility = () => {
+  if (!document.hidden) currentTime.value = Date.now()
   if (!liveSocket) return
   if (document.hidden) {
     clearLatestReportReplayTimers()
@@ -1925,10 +1937,12 @@ watch([cpuChartRef, gpuChartRef, gpuMemChartRef, gpuClockChartRef, gpuPowerChart
 })
 
 onMounted(() => {
+  statusTimer = setInterval(() => { currentTime.value = Date.now() }, 1000)
   init()
 })
 
 onUnmounted(() => {
+  clearInterval(statusTimer)
   chartUpdates.cancel()
   document.removeEventListener('visibilitychange', handleVisibility)
   if (liveSocket) liveSocket.close()

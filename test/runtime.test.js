@@ -57,6 +57,11 @@ test('workerd: HTTP persistence, restart, retry, legacy migration and WebSocket 
     assert.equal(publicRows.at(-1).peaks.cpu, 20);
     assert.equal(publicRows.at(-1).disk.read_bps, 100);
     assert.equal('gpu_info' in publicRows.at(-1), false, 'missing report-level fields remain absent');
+    const detailResponse = await mf.dispatchFetch('https://monitor.test/api/server?id=visible');
+    assert.equal(detailResponse.status, 200);
+    const detail = await detailResponse.json();
+    assert.equal(detail.report_timestamp, detail.latestReportUpdates[0].reportTs);
+    assert.ok(detail.report_timestamp > detail.last_updated, 'the report receipt and sample time are distinct');
 
     const columns = (await db.prepare('PRAGMA table_info(servers)').all()).results.map(column => column.name);
     assert.equal(columns.includes('history_partition_id'), false);
