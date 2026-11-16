@@ -2,7 +2,7 @@ import { logError, setLogContext, correlationHeaders } from '../utils/observabil
 import { checkAuth, simpleAuthResponse } from '../middleware/auth.js';
 import { ServerService } from '../services/ServerService.js';
 import { getAllServers, getServerDetail, getMetricsHistoryCache, setMetricsHistoryCache, getCacheDuration } from '../utils/cache.js';
-import { mergeMetricsIntoServer, coerceNumericMetricFields } from '../utils/metrics.js';
+import { mergeMetricsIntoServer, coerceNumericMetricFields, OFFLINE_REPORT_THRESHOLD_MS, zeroOfflineMetrics } from '../utils/metrics.js';
 import { normalizeLongHistoryPoints, loadSettingsScope, debug } from '../utils/settings.js';
 import { HISTORY_RANGES, historySampling } from '../utils/historyPolicy.js';
 import { AppError, createSuccessResponse, createBadRequestResponse, createNotFoundResponse, createUnauthorizedResponse } from '../utils/errors.js';
@@ -290,6 +290,17 @@ export class DashboardController {
   }
   mergeMetricsIntoServer(server, effectiveMetrics);
   server.metricsUnavailable = realtimeState.unavailableServerIds.includes(id);
+  const reportTimestampValue = server.report_timestamp ?? effectiveMetrics?.timestamp ?? server.last_updated;
+  let reportTimestamp = Number(reportTimestampValue);
+  if (!Number.isFinite(reportTimestamp)) reportTimestamp = new Date(reportTimestampValue).getTime();
+  if (Number.isFinite(reportTimestamp) && reportTimestamp > 0 && reportTimestamp < 10_000_000_000) {
+    reportTimestamp *= 1000;
+  }
+  const now = Date.now();
+  const isOffline = !server.metricsUnavailable && (!Number.isFinite(reportTimestamp)
+    || now - reportTimestamp >= OFFLINE_REPORT_THRESHOLD_MS);
+  if (isOffline) Object.assign(server, zeroOfflineMetrics(server));
+
   let latestReportUpdates = realtimeState.latestReportUpdates;
   if ((!latestReportUpdates || latestReportUpdates.length === 0) && effectiveMetrics) {
     const reportTs = effectiveMetrics.timestamp || Date.now();
@@ -303,7 +314,11 @@ export class DashboardController {
       }]
     }];
   }
-  server.latestReportUpdates = latestReportUpdates;
+  server.latestReportUpdates = (latestReportUpdates || []).filter(update => {
+    let reportTs = Number(update?.reportTs ?? update?.samples?.at(-1)?.ts);
+    if (Number.isFinite(reportTs) && reportTs > 0 && reportTs < 10_000_000_000) reportTs *= 1000;
+    return Number.isFinite(reportTs) && now - reportTs < OFFLINE_REPORT_THRESHOLD_MS;
+  });
   server.sysConfig = {
     long_history_points: normalizeLongHistoryPoints(sys.long_history_points) === 'auto'
       ? 'auto' : Number(normalizeLongHistoryPoints(sys.long_history_points))
@@ -352,6 +367,43 @@ export class DashboardController {
     return createSuccessResponse(data);
   }
 
+  static normalizeReportTimestamp(value, fallback = null) {
+    let timestamp = Number(value);
+    if (!Number.isFinite(timestamp)) timestamp = new Date(value).getTime();
+    if (!Number.isFinite(timestamp) || timestamp <= 0) return fallback;
+    return timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp;
+  }
+
+  static createOfflineHistoryPoint(timestamp, source, columns) {
+    const zeroed = zeroOfflineMetrics(source || {});
+    const point = { timestamp };
+    for (const column of String(columns || '').split(',').map(value => value.trim()).filter(Boolean)) {
+      if (column === 'timestamp') continue;
+      if (column === 'peaks' || column === 'averages') {
+        point[column] = zeroOfflineMetrics(zeroed);
+      } else if (Object.prototype.hasOwnProperty.call(zeroed, column)) {
+        point[column] = zeroed[column];
+      }
+    }
+    return point;
+  }
+
+  static appendOfflineHistoryTail(rows, { now, rangeStart, reportTs, reportMetrics, columns }) {
+    const data = Array.isArray(rows) ? rows : [];
+    const lastTimestamp = data.reduce((latest, row) => {
+      const timestamp = DashboardController.normalizeReportTimestamp(row?.timestamp, 0);
+      return Math.max(latest, timestamp || 0);
+    }, 0);
+    const start = Math.max(rangeStart, reportTs + OFFLINE_REPORT_THRESHOLD_MS, lastTimestamp + 1);
+    if (start >= now) return data;
+
+    return [
+      ...data,
+      DashboardController.createOfflineHistoryPoint(start, reportMetrics, columns),
+      DashboardController.createOfflineHistoryPoint(now, reportMetrics, columns)
+    ];
+  }
+
   static async fetchHistoryData(env, request, id, hours, columns, sys = null) {
   if (!id) return createBadRequestResponse('Missing ID');
 
@@ -386,32 +438,62 @@ export class DashboardController {
   const headers = { 'X-History-Interval-Seconds': String(sampling.intervalMs / 1000) };
 
   const cached = getMetricsHistoryCache(id, clampedHours, columns, longHistoryPoints, { allowStale: true });
-  if (cached && Date.now() - cached.timestamp < cacheDuration) {
-    const cachedData = Array.isArray(cached.data)
-      ? cached.data.map(DashboardController.omitNullLossProbeFields)
-      : cached.data;
-    return createSuccessResponse(cachedData, { ...headers, 'X-Cache': 'HIT' });
-  }
-
   let data;
-  try {
-    data = await DashboardController.getDurableHistory(env, id, clampedHours, columns, longHistoryPoints);
-  } catch (error) {
-    if (!cached || Date.now() >= cached.staleUntil) throw error;
-    return createSuccessResponse(cached.data.map(DashboardController.omitNullLossProbeFields), {
-      ...headers, 'X-Cache': 'STALE', 'X-History-Cached-At': new Date(cached.timestamp).toISOString(),
-      'Cache-Control': 'no-store'
-    });
+  let cacheState = 'MISS';
+  let staleHeaders = {};
+  if (cached && Date.now() - cached.timestamp < cacheDuration) {
+    data = cached.data;
+    cacheState = 'HIT';
+  } else {
+    try {
+      data = await DashboardController.getDurableHistory(env, id, clampedHours, columns, longHistoryPoints);
+    } catch (error) {
+      if (!cached || Date.now() >= cached.staleUntil) throw error;
+      data = cached.data;
+      cacheState = 'STALE';
+      staleHeaders = {
+        'X-History-Cached-At': new Date(cached.timestamp).toISOString(),
+        'Cache-Control': 'no-store'
+      };
+    }
   }
   if (!Array.isArray(data)) {
     data = [];
   }
 
-  const sanitizedData = Array.isArray(data)
-    ? data.map(DashboardController.omitNullLossProbeFields)
-    : data;
-  setMetricsHistoryCache(id, clampedHours, columns, sanitizedData, longHistoryPoints);
+  const sanitizedData = data.map(DashboardController.omitNullLossProbeFields);
+  if (cacheState === 'MISS') {
+    setMetricsHistoryCache(id, clampedHours, columns, sanitizedData, longHistoryPoints);
+  }
 
-  return createSuccessResponse(sanitizedData, { ...headers, 'X-Cache': 'MISS' });
+  const realtimeState = await DashboardController.getRealtimeStateForServers(env, [id]);
+  const isRealtimeUnavailable = realtimeState.unavailableServerIds.includes(id);
+  const latestReport = realtimeState.latestReportUpdates.find(update => update.serverId === id);
+  const latestSample = latestReport?.samples?.at(-1);
+  const reportTs = DashboardController.normalizeReportTimestamp(
+    latestReport?.reportTs ?? latestSample?.ts
+  );
+  let responseData = sanitizedData;
+  let dynamicHeaders = {};
+  const now = Date.now();
+
+  if (!isRealtimeUnavailable && reportTs && now - reportTs >= OFFLINE_REPORT_THRESHOLD_MS && latestSample) {
+    const reportMetrics = latestSample.data || latestSample.payload || latestSample.metrics || latestSample;
+    responseData = DashboardController.appendOfflineHistoryTail(sanitizedData, {
+      now,
+      rangeStart: now - sampling.durationMs,
+      reportTs,
+      reportMetrics,
+      columns
+    });
+    if (responseData !== sanitizedData) dynamicHeaders = { 'Cache-Control': 'no-store' };
+  }
+
+  return createSuccessResponse(responseData, {
+    ...headers,
+    'X-Cache': cacheState,
+    ...staleHeaders,
+    ...dynamicHeaders
+  });
 }
 }

@@ -1,6 +1,6 @@
 import { getAllServers } from '../utils/cache.js';
 import { DashboardController } from '../handlers/DashboardController.js';
-import { mergeMetricsIntoServer } from '../utils/metrics.js';
+import { mergeMetricsIntoServer, OFFLINE_REPORT_THRESHOLD_MS, zeroOfflineMetrics } from '../utils/metrics.js';
 import { DASHBOARD_LATENCY_WINDOW_HOURS, DASHBOARD_LATENCY_WINDOW_POINTS } from '../utils/config.js';
 
 /**
@@ -9,7 +9,7 @@ import { DASHBOARD_LATENCY_WINDOW_HOURS, DASHBOARD_LATENCY_WINDOW_POINTS } from 
  * 供用户端 DashboardController 与管理端 AdminController 共享复用
  */
 export class ServerService {
-  static ONLINE_THRESHOLD_MS = 300000;
+  static ONLINE_THRESHOLD_MS = OFFLINE_REPORT_THRESHOLD_MS;
 
   constructor(env) {
     this.env = env;
@@ -105,6 +105,9 @@ export class ServerService {
 
       item.metricsUnavailable = unavailable.has(server.id);
       item.is_online = !isOnline && item.metricsUnavailable ? null : isOnline;
+      if (item.is_online === false && !item.metricsUnavailable) {
+        Object.assign(item, zeroOfflineMetrics(item));
+      }
       if (item.is_online === null) globalUnknown++;
       if (!item.region) item.region = server.region || '';
 
@@ -156,9 +159,14 @@ export class ServerService {
       globalNetRx
     };
 
+    const currentReportUpdates = (realtimeState?.latestReportUpdates || []).filter(update => {
+      const reportTs = Number(update?.reportTs ?? update?.samples?.at(-1)?.ts);
+      return Number.isFinite(reportTs) && now - reportTs < ServerService.ONLINE_THRESHOLD_MS;
+    });
+
     return {
       servers,
-      latestReportUpdates: realtimeState?.latestReportUpdates || [],
+      latestReportUpdates: currentReportUpdates,
       stats,
       regionStats
     };

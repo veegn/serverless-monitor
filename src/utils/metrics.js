@@ -21,6 +21,60 @@ export const DISK_IO_FIELD_TO_COLUMN = {
   util: 'disk_util'
 };
 
+export const OFFLINE_REPORT_THRESHOLD_MS = 5 * 60 * 1000;
+
+const OFFLINE_ZERO_FIELDS = [
+  'cpu', 'ram_used', 'swap_used', 'disk_used',
+  'ram_percent', 'swap_percent', 'disk_percent',
+  'net_in_speed', 'net_out_speed', 'processes', 'tcp_conn', 'udp_conn',
+  ...Object.values(DISK_IO_FIELD_TO_COLUMN)
+];
+
+const OFFLINE_GPU_FIELDS = ['info', 'mem_used', 'sm_clock', 'mem_clock', 'temp', 'power'];
+
+function zeroOfflineGpuInfo(value) {
+  const wasString = typeof value === 'string';
+  let list = value;
+  if (wasString) {
+    try { list = JSON.parse(value); } catch { return value; }
+  }
+  if (!Array.isArray(list)) return value;
+
+  const result = list.map(gpu => {
+    if (!gpu || typeof gpu !== 'object' || Array.isArray(gpu)) return gpu;
+    const item = { ...gpu };
+    for (const field of OFFLINE_GPU_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(item, field)) item[field] = 0;
+    }
+    return item;
+  });
+  return wasString ? JSON.stringify(result) : result;
+}
+
+export function zeroOfflineMetrics(metrics) {
+  if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) return metrics;
+  const result = { ...metrics, load_avg: '0.00 0.00 0.00' };
+  for (const field of OFFLINE_ZERO_FIELDS) result[field] = 0;
+
+  for (const field of PROBE_METRIC_FIELDS) {
+    const value = result[field];
+    if (value !== undefined && value !== null && value !== false && value !== 'false') result[field] = 0;
+  }
+
+  if (result.disk && typeof result.disk === 'object' && !Array.isArray(result.disk)) {
+    result.disk = {
+      ...result.disk,
+      ...Object.fromEntries(DISK_IO_METRIC_FIELDS.map(field => [field, 0]))
+    };
+  }
+
+  if (Object.prototype.hasOwnProperty.call(result, 'gpu_info')) {
+    result.gpu_info = zeroOfflineGpuInfo(result.gpu_info);
+  }
+
+  return result;
+}
+
 function toFiniteMetricNumber(value, fallback = 0) {
   if (value === null || value === undefined || value === '') return fallback;
   const number = Number(value);
